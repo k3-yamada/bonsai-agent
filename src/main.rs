@@ -43,6 +43,10 @@ struct Cli {
     /// 監査ログを表示
     #[arg(long)]
     audit: bool,
+
+    /// 未完了タスク一覧
+    #[arg(long)]
+    tasks: bool,
 }
 
 fn main() -> Result<()> {
@@ -107,6 +111,28 @@ fn main() -> Result<()> {
                     .collect();
                 let date = if s.created_at.len() >= 19 { &s.created_at[..19] } else { &s.created_at };
                 println!("{id:<38} {date:<22} {preview}", id = s.id);
+            }
+        }
+        return Ok(());
+    }
+
+    // 未完了タスク一覧
+    if cli.tasks {
+        let mgr = bonsai_agent::agent::task::TaskManager::new(store.conn());
+        let tasks = mgr.list_incomplete()?;
+        if tasks.is_empty() {
+            println!("未完了タスクはありません。");
+        } else {
+            for t in &tasks {
+                let state = match t.state {
+                    bonsai_agent::agent::task::TaskState::Pending => "待機",
+                    bonsai_agent::agent::task::TaskState::InProgress => "実行中",
+                    bonsai_agent::agent::task::TaskState::WaitingForHuman => "確認待ち",
+                    _ => "?",
+                };
+                let steps = t.step_log.len();
+                println!("[{state}] {} (ステップ: {steps})", t.goal);
+                println!("  ID: {}", &t.id[..8]);
             }
         }
         return Ok(());
