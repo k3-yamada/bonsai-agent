@@ -1,5 +1,6 @@
 pub mod file;
 pub mod git;
+pub mod hooks;
 pub mod mcp_client;
 pub mod permission;
 pub mod plugin;

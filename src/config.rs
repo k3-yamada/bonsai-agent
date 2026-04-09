@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub hooks: crate::tools::hooks::HooksConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
