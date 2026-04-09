@@ -9,6 +9,8 @@ use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::inference::MockLlmBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
+use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
+use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::ToolRegistry;
 
@@ -34,6 +36,9 @@ fn main() -> Result<()> {
     // ツールレジストリ
     let mut tools = ToolRegistry::new();
     tools.register(Box::new(ShellTool::new()));
+    tools.register(Box::new(FileReadTool));
+    tools.register(Box::new(FileWriteTool));
+    tools.register(Box::new(GitTool));
 
     // 安全性
     let path_guard = PathGuard::default_deny_list();
@@ -107,6 +112,7 @@ fn main() -> Result<()> {
                 break;
             }
 
+            eprint!("\x1b[2m"); // 薄色で思考表示
             match run_agent_loop(
                 input,
                 backend.as_ref(),
@@ -116,8 +122,14 @@ fn main() -> Result<()> {
                 &cancel,
                 Some(store.conn()),
             ) {
-                Ok(result) => println!("\n{result}\n"),
-                Err(e) => eprintln!("\nエラー: {e}\n"),
+                Ok(result) => {
+                    eprint!("\x1b[0m"); // 色リセット
+                    println!("\n\x1b[1m{result}\x1b[0m\n"); // 最終回答は太字
+                }
+                Err(e) => {
+                    eprint!("\x1b[0m");
+                    eprintln!("\n\x1b[31mエラー: {e}\x1b[0m\n"); // エラーは赤色
+                }
             }
         }
     }

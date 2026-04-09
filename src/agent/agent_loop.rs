@@ -73,13 +73,34 @@ pub fn execute_step(
     let selected_tools = ctx.tools.select_relevant(last_user_msg, 5);
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
-    // 2. LLM呼び出し
+    // 2. LLM呼び出し（ストリーミング対応）
+    let in_think = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let in_think_clone = in_think.clone();
+
     let result = ctx.backend.generate(
         &session.messages,
         &tool_schemas,
-        &mut |_| {}, // ストリーミングは Phase 7
+        &mut |token| {
+            // ストリーミングトークンの表示
+            if token.contains("<think>") {
+                in_think_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                eprint!("\x1b[2m"); // 薄色開始
+            } else if token.contains("</think>") {
+                in_think_clone.store(false, std::sync::atomic::Ordering::Relaxed);
+                eprint!("\x1b[0m"); // 色リセット
+            } else if token.contains("<tool_call>") || token.contains("</tool_call>") {
+                // ツール呼び出しタグは非表示
+            } else {
+                eprint!("{token}");
+            }
+        },
         ctx.cancel,
     )?;
+    // 色リセットを保証
+    if in_think.load(std::sync::atomic::Ordering::Relaxed) {
+        eprint!("\x1b[0m");
+    }
+    eprintln!(); // 改行
 
     // 3. パース
     let parsed = match parse_assistant_output(&result.text) {
