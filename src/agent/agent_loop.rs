@@ -9,6 +9,7 @@ use crate::agent::parse::parse_assistant_output;
 use crate::agent::validate::{validate_tool_call, PathGuard, Severity};
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
+use crate::memory::store::MemoryStore;
 use crate::runtime::inference::LlmBackend;
 use crate::tools::ToolRegistry;
 
@@ -24,10 +25,44 @@ impl Default for AgentConfig {
         Self {
             max_iterations: 10,
             max_retries: 3,
-            system_prompt: "あなたは有能なAIアシスタントです。ツールを使ってタスクを実行できます。".to_string(),
+            system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
         }
     }
 }
+
+/// 1ビットモデル向けに最適化されたシステムプロンプト。
+/// arxiv知見: スキーマファースト（ツール定義をプロンプト先頭に配置）、
+/// 簡潔な指示、明確なフォーマット例が小型モデルの精度を最大化する。
+const DEFAULT_SYSTEM_PROMPT: &str = r#"あなたはbonsai-agent、ローカルで動作する自律型AIアシスタントです。
+
+## ツールの使い方
+
+ツールを呼び出すには、以下のXML形式を使ってください:
+
+<tool_call>{"name": "ツール名", "arguments": {"パラメータ名": "値"}}</tool_call>
+
+### 例
+
+ファイルを読む:
+<tool_call>{"name": "file_read", "arguments": {"path": "README.md"}}</tool_call>
+
+コマンドを実行する:
+<tool_call>{"name": "shell", "arguments": {"command": "ls -la"}}</tool_call>
+
+ファイルの一部を編集する:
+<tool_call>{"name": "file_write", "arguments": {"path": "main.rs", "old_text": "hello", "new_text": "world"}}</tool_call>
+
+Gitの状態を確認する:
+<tool_call>{"name": "git", "arguments": {"subcommand": "status"}}</tool_call>
+
+## ルール
+
+1. 考える必要があれば <think>ここに思考</think> タグを使う
+2. ツール呼び出しのJSONは正しい形式にする
+3. ツール結果を受け取ったら、それを元に回答する
+4. わからないことは正直に「わからない」と答える
+5. 危険な操作（ファイル削除、システム変更）は慎重に行う
+"#;
 
 /// エージェントのステップ結果
 #[derive(Debug)]
@@ -200,7 +235,7 @@ pub fn run_agent_loop(
     path_guard: &PathGuard,
     config: &AgentConfig,
     cancel: &CancellationToken,
-    experience_conn: Option<&rusqlite::Connection>,
+    store: Option<&MemoryStore>,
 ) -> Result<String> {
     let mut session = Session::new();
     session.add_message(Message::system(&config.system_prompt));
@@ -228,9 +263,10 @@ pub fn run_agent_loop(
 
         match outcome {
             StepOutcome::FinalAnswer(answer) => {
-                // 経験記録（成功）
-                if let Some(conn) = experience_conn {
-                    let exp = ExperienceStore::new(conn);
+                // セッション保存 + 経験記録（成功）
+                if let Some(s) = store {
+                    let _ = s.save_session(&session);
+                    let exp = ExperienceStore::new(s.conn());
                     let _ = exp.record(&RecordParams {
                         exp_type: ExperienceType::Success,
                         task_context: input,
@@ -245,9 +281,10 @@ pub fn run_agent_loop(
                 return Ok(answer);
             }
             StepOutcome::Aborted(reason) => {
-                // 経験記録（失敗）
-                if let Some(conn) = experience_conn {
-                    let exp = ExperienceStore::new(conn);
+                // セッション保存 + 経験記録（失敗）
+                if let Some(s) = store {
+                    let _ = s.save_session(&session);
+                    let exp = ExperienceStore::new(s.conn());
                     let _ = exp.record(&RecordParams {
                         exp_type: ExperienceType::Insight,
                         task_context: input,
@@ -331,7 +368,7 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("天気は？", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        let result = run_agent_loop("天気は？", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
         assert!(result.contains("晴れ"));
     }
 
@@ -347,7 +384,7 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("echo test", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        let result = run_agent_loop("echo test", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
         assert!(result.contains("hello"));
     }
 
@@ -364,7 +401,7 @@ mod tests {
         let config = AgentConfig { max_iterations: 3, ..Default::default() };
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
         assert!(result.contains("中断"));
     }
 
@@ -378,7 +415,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = run_agent_loop("test", &mock, &tools, &guard, &config, &cancel, None);
+        let result = run_agent_loop("test", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>);
         // MockLlmBackend::generateがキャンセルエラーを返す
         assert!(result.is_err() || result.unwrap().contains("キャンセル"));
     }
@@ -395,7 +432,7 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("hack", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        let result = run_agent_loop("hack", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
         assert!(result.contains("了解"));
     }
 
@@ -411,7 +448,7 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("fail", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        let result = run_agent_loop("fail", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
         assert!(result.contains("エラー"));
     }
 
@@ -425,10 +462,10 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        run_agent_loop("テスト", &mock, &tools, &guard, &config, &cancel, Some(store.conn())).unwrap();
+        run_agent_loop("test query", &mock, &tools, &guard, &config, &cancel, Some(&store)).unwrap();
 
         let exp = ExperienceStore::new(store.conn());
-        let experiences = exp.find_similar("テスト", 10).unwrap();
+        let experiences = exp.find_similar("test", 10).unwrap();
         assert!(!experiences.is_empty());
     }
 
@@ -444,7 +481,7 @@ mod tests {
         let config = AgentConfig { max_iterations: 10, ..Default::default() };
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
         assert!(result.contains("中断"));
     }
 }

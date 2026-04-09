@@ -124,6 +124,126 @@ impl MemoryStore {
         Ok(())
     }
 
+    // --- セッション ---
+
+    /// セッションを保存
+    pub fn save_session(
+        &self,
+        session: &crate::agent::conversation::Session,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, created_at, updated_at, summary) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                &session.id,
+                session.created_at.to_rfc3339(),
+                &now,
+                &session.summary,
+            ],
+        )?;
+
+        // 既存メッセージを削除して再挿入（簡易実装）
+        self.conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![&session.id],
+        )?;
+
+        for msg in &session.messages {
+            let role = match msg.role {
+                crate::agent::conversation::Role::System => "system",
+                crate::agent::conversation::Role::User => "user",
+                crate::agent::conversation::Role::Assistant => "assistant",
+                crate::agent::conversation::Role::Tool => "tool",
+            };
+            self.conn.execute(
+                "INSERT INTO messages (session_id, role, content, tool_call_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![&session.id, role, &msg.content, &msg.tool_call_id, &now],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// セッション一覧を取得（最新順）
+    pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.created_at, s.summary,
+                    (SELECT content FROM messages WHERE session_id = s.id AND role = 'user' ORDER BY id LIMIT 1)
+             FROM sessions s
+             ORDER BY s.updated_at DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                summary: row.get(2)?,
+                first_user_message: row.get(3)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// セッションを読み込み
+    pub fn load_session(&self, session_id: &str) -> Result<Option<crate::agent::conversation::Session>> {
+        use crate::agent::conversation::{Message, Role, Session};
+
+        let session_row = self.conn.query_row(
+            "SELECT id, created_at, summary FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        );
+
+        let (id, created_at_str, summary) = match session_row {
+            Ok(r) => r,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
+        let mut stmt = self.conn.prepare(
+            "SELECT role, content, tool_call_id FROM messages WHERE session_id = ?1 ORDER BY id",
+        )?;
+
+        let messages: Vec<Message> = stmt
+            .query_map(params![&id], |row| {
+                let role_str: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let tool_call_id: Option<String> = row.get(2)?;
+                let role = match role_str.as_str() {
+                    "system" => Role::System,
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    _ => Role::Tool,
+                };
+                Ok(Message {
+                    role,
+                    content,
+                    attachments: Vec::new(),
+                    tool_call_id,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(Some(Session {
+            id,
+            messages,
+            created_at,
+            updated_at: chrono::Utc::now(),
+            summary,
+        }))
+    }
+
     // --- ユーザープロファイル ---
 
     pub fn set_profile(&self, key: &str, value: &str) -> Result<()> {
@@ -185,6 +305,14 @@ impl MemoryStore {
         )?;
         Ok(count as usize)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub id: String,
+    pub created_at: String,
+    pub summary: Option<String>,
+    pub first_user_message: Option<String>,
 }
 
 #[derive(Debug, Clone)]

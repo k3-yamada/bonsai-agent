@@ -6,6 +6,7 @@ use clap::Parser;
 use bonsai_agent::agent::agent_loop::{run_agent_loop, AgentConfig};
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
+use bonsai_agent::config::AppConfig;
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::inference::MockLlmBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
@@ -28,21 +29,39 @@ struct Cli {
     /// モックモード（LLMなしでテスト）
     #[arg(long)]
     mock: bool,
+
+    /// セッション一覧を表示
+    #[arg(long)]
+    sessions: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // 設定ファイル読み込み
+    let app_config = AppConfig::load()?;
+
+    // サーバーURLをCLI引数 or 設定ファイルから決定
+    let server_url = if cli.server_url != "http://localhost:8080" {
+        cli.server_url.clone() // CLI引数が明示的に指定された場合
+    } else {
+        app_config.model.server_url.clone()
+    };
+
     // ツールレジストリ
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(ShellTool::new()));
+    tools.register(Box::new(ShellTool::new().with_timeout(app_config.agent.shell_timeout_secs)));
     tools.register(Box::new(FileReadTool));
     tools.register(Box::new(FileWriteTool));
     tools.register(Box::new(GitTool));
 
     // 安全性
-    let path_guard = PathGuard::default_deny_list();
-    let config = AgentConfig::default();
+    let path_guard = PathGuard::new(app_config.safety.deny_paths.clone());
+    let config = AgentConfig {
+        max_iterations: app_config.agent.max_iterations,
+        max_retries: app_config.agent.max_retries,
+        ..Default::default()
+    };
     let cancel = CancellationToken::new();
 
     // Ctrl+Cハンドラ
@@ -53,14 +72,37 @@ fn main() -> Result<()> {
     let db_path = get_db_path();
     let store = MemoryStore::open(&db_path)?;
 
+    if cli.sessions {
+        let sessions = store.list_sessions(20)?;
+        if sessions.is_empty() {
+            println!("セッションはありません。");
+        } else {
+            let header = format!("{id:<38} {date:<22} {msg}", id = "ID", date = "日時", msg = "内容");
+            println!("{header}");
+            let sep = "-".repeat(80);
+            println!("{sep}");
+            for s in &sessions {
+                let preview: String = s.first_user_message
+                    .as_deref()
+                    .unwrap_or("(空)")
+                    .chars()
+                    .take(30)
+                    .collect();
+                let date = if s.created_at.len() >= 19 { &s.created_at[..19] } else { &s.created_at };
+                println!("{id:<38} {date:<22} {preview}", id = s.id);
+            }
+        }
+        return Ok(());
+    }
+
     if let Some(input) = &cli.exec {
         // 単発実行モード
         let result = if cli.mock {
             let mock = MockLlmBackend::single("モックモードです。実際のLLMは使用していません。");
-            run_agent_loop(input, &mock, &tools, &path_guard, &config, &cancel, Some(store.conn()))?
+            run_agent_loop(input, &mock, &tools, &path_guard, &config, &cancel, Some(&store))?
         } else {
-            let backend = LlamaServerBackend::connect(&cli.server_url, "bonsai-8b");
-            run_agent_loop(input, &backend, &tools, &path_guard, &config, &cancel, Some(store.conn()))?
+            let backend = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
+            run_agent_loop(input, &backend, &tools, &path_guard, &config, &cancel, Some(&store))?
         };
         println!("{result}");
     } else {
@@ -78,13 +120,13 @@ fn main() -> Result<()> {
                     .collect(),
             ))
         } else {
-            let backend = LlamaServerBackend::connect(&cli.server_url, "bonsai-8b");
+            let backend = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
             if !backend.is_healthy() {
-                eprintln!("警告: llama-server ({}) に接続できません。", cli.server_url);
+                eprintln!("警告: llama-server ({server_url}) に接続できません。");
                 eprintln!("--mock フラグでモックモードを使用するか、llama-serverを起動してください。");
                 std::process::exit(1);
             }
-            println!("[接続済み] {}", cli.server_url);
+            println!("[接続済み] {server_url}");
             Box::new(backend)
         };
 
@@ -120,7 +162,7 @@ fn main() -> Result<()> {
                 &path_guard,
                 &config,
                 &cancel,
-                Some(store.conn()),
+                Some(&store),
             ) {
                 Ok(result) => {
                     eprint!("\x1b[0m"); // 色リセット
