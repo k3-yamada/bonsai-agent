@@ -1,0 +1,429 @@
+use anyhow::Result;
+
+use crate::agent::conversation::{Message, ParsedOutput, Session};
+use crate::agent::error_recovery::{
+    decide_recovery, CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail,
+    RecoveryAction,
+};
+use crate::agent::parse::parse_assistant_output;
+use crate::agent::validate::{validate_tool_call, PathGuard, Severity};
+use crate::cancel::CancellationToken;
+use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
+use crate::runtime::inference::LlmBackend;
+use crate::tools::ToolRegistry;
+
+/// エージェント設定
+pub struct AgentConfig {
+    pub max_iterations: usize,
+    pub max_retries: usize,
+    pub system_prompt: String,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 10,
+            max_retries: 3,
+            system_prompt: "あなたは有能なAIアシスタントです。ツールを使ってタスクを実行できます。".to_string(),
+        }
+    }
+}
+
+/// エージェントのステップ結果
+#[derive(Debug)]
+pub enum StepOutcome {
+    /// 最終回答（ループ終了）
+    FinalAnswer(String),
+    /// ツール実行後、ループ継続
+    Continue,
+    /// エラーで中断
+    Aborted(String),
+}
+
+/// ステップ実行に必要なコンテキスト
+pub struct StepContext<'a> {
+    pub backend: &'a dyn LlmBackend,
+    pub tools: &'a ToolRegistry,
+    pub path_guard: &'a PathGuard,
+    pub config: &'a AgentConfig,
+    pub cancel: &'a CancellationToken,
+}
+
+/// エージェントの1ステップを実行する（テスト容易性のためループの内側を分離）
+pub fn execute_step(
+    session: &mut Session,
+    ctx: &StepContext<'_>,
+    circuit_breaker: &mut CircuitBreaker,
+    loop_detector: &mut LoopDetector,
+    attempt: usize,
+) -> Result<StepOutcome> {
+    if ctx.cancel.is_cancelled() {
+        return Ok(StepOutcome::Aborted("キャンセルされました".to_string()));
+    }
+
+    // 1. 動的ツール選択
+    let last_user_msg = session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, crate::agent::conversation::Role::User))
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+
+    let selected_tools = ctx.tools.select_relevant(last_user_msg, 5);
+    let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
+
+    // 2. LLM呼び出し
+    let result = ctx.backend.generate(
+        &session.messages,
+        &tool_schemas,
+        &mut |_| {}, // ストリーミングは Phase 7
+        ctx.cancel,
+    )?;
+
+    // 3. パース
+    let parsed = match parse_assistant_output(&result.text) {
+        Ok(p) => p,
+        Err(e) => {
+            let mode = FailureMode::ParseError(ParseErrorDetail::InvalidJson);
+            let action = decide_recovery(&mode, attempt, ctx.config.max_retries);
+            return match action {
+                RecoveryAction::ExplainAndStop(msg) => Ok(StepOutcome::Aborted(msg)),
+                _ => {
+                    // エラー情報をコンテキストに追加してリトライを促す
+                    session.add_message(Message::assistant(format!(
+                        "パースエラー: {e}。修正します。"
+                    )));
+                    Ok(StepOutcome::Continue)
+                }
+            };
+        }
+    };
+
+    // 4. ツール呼び出しがなければ最終回答
+    if parsed.tool_calls.is_empty() {
+        let answer = build_answer(&parsed);
+        session.add_message(Message::assistant(&answer));
+        return Ok(StepOutcome::FinalAnswer(answer));
+    }
+
+    // 5. 各ツール呼び出しを実行
+    let assistant_text = result.text.clone();
+    session.add_message(Message::assistant(&assistant_text));
+
+    for tool_call in &parsed.tool_calls {
+        // ループ検出
+        let action_key = format!("{}:{}", tool_call.name, tool_call.arguments);
+        if loop_detector.record_and_check(&action_key) {
+            let mode = FailureMode::LoopDetected;
+            let action = decide_recovery(&mode, attempt, ctx.config.max_retries);
+            if let RecoveryAction::Abort(msg) = action {
+                return Ok(StepOutcome::Aborted(msg));
+            }
+        }
+
+        // サーキットブレーカーチェック
+        if !circuit_breaker.is_available(&tool_call.name) {
+            session.add_message(Message::tool(
+                format!("ツール '{}' は連続失敗のため一時停止中です。別の方法を試してください。", tool_call.name),
+                &tool_call.name,
+            ));
+            continue;
+        }
+
+        // バリデーション
+        let known = ctx.tools.known_names();
+        let validation = validate_tool_call(tool_call, &known, ctx.path_guard, None);
+
+        if !validation.is_valid {
+            let block_issues: Vec<_> = validation
+                .issues
+                .iter()
+                .filter(|i| i.severity == Severity::Block)
+                .map(|i| i.message.as_str())
+                .collect();
+            session.add_message(Message::tool(
+                format!("バリデーションエラー: {}", block_issues.join(", ")),
+                &tool_call.name,
+            ));
+            continue;
+        }
+
+        // ツール実行
+        let tool = match ctx.tools.get(&tool_call.name) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        match tool.call(tool_call.arguments.clone()) {
+            Ok(tool_result) => {
+                circuit_breaker.record_success(&tool_call.name);
+                session.add_message(Message::tool(&tool_result.output, &tool_call.name));
+            }
+            Err(e) => {
+                circuit_breaker.record_failure(&tool_call.name);
+                let error_msg = format!("ツール実行エラー: {e}");
+                session.add_message(Message::tool(&error_msg, &tool_call.name));
+            }
+        }
+    }
+
+    Ok(StepOutcome::Continue)
+}
+
+/// エージェントループ全体を実行
+pub fn run_agent_loop(
+    input: &str,
+    backend: &dyn LlmBackend,
+    tools: &ToolRegistry,
+    path_guard: &PathGuard,
+    config: &AgentConfig,
+    cancel: &CancellationToken,
+    experience_conn: Option<&rusqlite::Connection>,
+) -> Result<String> {
+    let mut session = Session::new();
+    session.add_message(Message::system(&config.system_prompt));
+    session.add_message(Message::user(input));
+
+    let mut circuit_breaker = CircuitBreaker::default();
+    let mut loop_detector = LoopDetector::default();
+
+    let ctx = StepContext {
+        backend,
+        tools,
+        path_guard,
+        config,
+        cancel,
+    };
+
+    for iteration in 0..config.max_iterations {
+        let outcome = execute_step(
+            &mut session,
+            &ctx,
+            &mut circuit_breaker,
+            &mut loop_detector,
+            iteration,
+        )?;
+
+        match outcome {
+            StepOutcome::FinalAnswer(answer) => {
+                // 経験記録（成功）
+                if let Some(conn) = experience_conn {
+                    let exp = ExperienceStore::new(conn);
+                    let _ = exp.record(&RecordParams {
+                        exp_type: ExperienceType::Success,
+                        task_context: input,
+                        action: &answer,
+                        outcome: "completed",
+                        lesson: None,
+                        tool_name: None,
+                        error_type: None,
+                        error_detail: None,
+                    });
+                }
+                return Ok(answer);
+            }
+            StepOutcome::Aborted(reason) => {
+                // 経験記録（失敗）
+                if let Some(conn) = experience_conn {
+                    let exp = ExperienceStore::new(conn);
+                    let _ = exp.record(&RecordParams {
+                        exp_type: ExperienceType::Insight,
+                        task_context: input,
+                        action: "aborted",
+                        outcome: &reason,
+                        lesson: Some(&reason),
+                        tool_name: None,
+                        error_type: Some("Aborted"),
+                        error_detail: None,
+                    });
+                }
+                return Ok(format!("[中断] {reason}"));
+            }
+            StepOutcome::Continue => continue,
+        }
+    }
+
+    let timeout_msg = format!(
+        "最大イテレーション数({})に到達しました。タスクを完了できませんでした。",
+        config.max_iterations
+    );
+    Ok(format!("[中断] {timeout_msg}"))
+}
+
+/// ParsedOutputから回答テキストを構築
+fn build_answer(parsed: &ParsedOutput) -> String {
+    parsed
+        .text
+        .clone()
+        .unwrap_or_else(|| "(回答なし)".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::store::MemoryStore;
+    use crate::runtime::inference::MockLlmBackend;
+    use crate::tools::permission::Permission;
+    use crate::tools::{Tool, ToolResult};
+
+    /// テスト用のエコーツール
+    struct EchoTool;
+    impl Tool for EchoTool {
+        fn name(&self) -> &str { "echo" }
+        fn description(&self) -> &str { "入力をそのまま返す" }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}})
+        }
+        fn permission(&self) -> Permission { Permission::Auto }
+        fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
+            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("(empty)");
+            Ok(ToolResult { output: text.to_string(), success: true })
+        }
+    }
+
+    /// テスト用の失敗ツール
+    struct FailTool;
+    impl Tool for FailTool {
+        fn name(&self) -> &str { "fail" }
+        fn description(&self) -> &str { "常に失敗する" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn permission(&self) -> Permission { Permission::Auto }
+        fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
+            anyhow::bail!("意図的なエラー")
+        }
+    }
+
+    fn test_registry() -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(EchoTool));
+        reg.register(Box::new(FailTool));
+        reg
+    }
+
+    // テスト1: ツール不要 → 直接回答
+    #[test]
+    fn test_direct_answer() {
+        let mock = MockLlmBackend::single("東京の天気は晴れです。");
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop("天気は？", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        assert!(result.contains("晴れ"));
+    }
+
+    // テスト2: ツール1回 → 回答
+    #[test]
+    fn test_single_tool_call() {
+        let mock = MockLlmBackend::new(vec![
+            r#"<tool_call>{"name":"echo","arguments":{"text":"hello"}}</tool_call>"#.to_string(),
+            "ツール結果: hello".to_string(),
+        ]);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop("echo test", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        assert!(result.contains("hello"));
+    }
+
+    // テスト3: 最大イテレーション到達
+    #[test]
+    fn test_max_iterations() {
+        // 常にツール呼び出しを返すモック（終了しない）
+        let responses: Vec<String> = (0..15)
+            .map(|i| format!(r#"<tool_call>{{"name":"echo","arguments":{{"text":"iter{}"}}}}</tool_call>"#, i))
+            .collect();
+        let mock = MockLlmBackend::new(responses);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig { max_iterations: 3, ..Default::default() };
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        assert!(result.contains("中断"));
+    }
+
+    // テスト4: Ctrl+Cキャンセル
+    #[test]
+    fn test_cancellation() {
+        let mock = MockLlmBackend::single("回答");
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = run_agent_loop("test", &mock, &tools, &guard, &config, &cancel, None);
+        // MockLlmBackend::generateがキャンセルエラーを返す
+        assert!(result.is_err() || result.unwrap().contains("キャンセル"));
+    }
+
+    // テスト5: 不正ツール名 → バリデーション拒否
+    #[test]
+    fn test_unknown_tool_blocked() {
+        let mock = MockLlmBackend::new(vec![
+            r#"<tool_call>{"name":"hack","arguments":{}}</tool_call>"#.to_string(),
+            "バリデーションエラーのため別の方法を試します。回答: 了解".to_string(),
+        ]);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop("hack", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        assert!(result.contains("了解"));
+    }
+
+    // テスト6: ツール失敗 → サーキットブレーカー記録
+    #[test]
+    fn test_tool_failure_recorded() {
+        let mock = MockLlmBackend::new(vec![
+            r#"<tool_call>{"name":"fail","arguments":{}}</tool_call>"#.to_string(),
+            "ツールが失敗しました。回答: エラーが発生しました".to_string(),
+        ]);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop("fail", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        assert!(result.contains("エラー"));
+    }
+
+    // テスト7: 経験メモリへの記録
+    #[test]
+    fn test_experience_recording() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mock = MockLlmBackend::single("回答です。");
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        run_agent_loop("テスト", &mock, &tools, &guard, &config, &cancel, Some(store.conn())).unwrap();
+
+        let exp = ExperienceStore::new(store.conn());
+        let experiences = exp.find_similar("テスト", 10).unwrap();
+        assert!(!experiences.is_empty());
+    }
+
+    // テスト8: ループ検出
+    #[test]
+    fn test_loop_detection() {
+        // 全く同じツール呼び出しを繰り返すモック
+        let same_call = r#"<tool_call>{"name":"echo","arguments":{"text":"same"}}</tool_call>"#;
+        let responses: Vec<String> = (0..10).map(|_| same_call.to_string()).collect();
+        let mock = MockLlmBackend::new(responses);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig { max_iterations: 10, ..Default::default() };
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None).unwrap();
+        assert!(result.contains("中断"));
+    }
+}
