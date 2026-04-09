@@ -47,6 +47,10 @@ struct Cli {
     /// 未完了タスク一覧
     #[arg(long)]
     tasks: bool,
+
+    /// ナレッジVault概要
+    #[arg(long)]
+    vault: bool,
 }
 
 fn main() -> Result<()> {
@@ -88,6 +92,12 @@ fn main() -> Result<()> {
     // Ctrl+Cハンドラ
     let cancel_clone = cancel.clone();
     ctrlc_handler(cancel_clone);
+
+    if cli.vault {
+        let vp = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("bonsai-agent").join("vault");
+        if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(\&vp) { println!("{}", v.summary().unwrap_or_default()); }
+        return Ok(());
+    }
 
     // メモリストア
     let db_path = get_db_path();

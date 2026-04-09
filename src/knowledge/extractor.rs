@@ -16,7 +16,7 @@ pub enum StockCategory {
     Preference,  // 好み（「〜が好き」「〜を使いたい」）
     Pattern,     // パターン（繰り返し出現する手順）
     Insight,     // 洞察（「〜だとわかった」）
-    Todo,        // やるべきこと（「〜する必要がある」）
+    Todo,        // やるべきこと（「〜必要がある」）
 }
 
 impl StockCategory {
@@ -42,7 +42,7 @@ static PREFERENCE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
     Regex::new(r"(?i)(prefer|like|want|好き|使いたい|ほしい|がいい|にしたい|お願い)").unwrap(),
 ]);
 static TODO_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
-    Regex::new(r"(?i)(need to|should|must|TODO|やる|する必要|すべき|しなきゃ|忘れずに|覚えて)").unwrap(),
+    Regex::new(r"(?i)(need to|should|must|TODO|やる|必要|すべき|しなきゃ|忘れずに|覚えて)").unwrap(),
 ]);
 static INSIGHT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| vec![
     Regex::new(r"(?i)(realized|learned|found out|turns out|わかった|気づいた|発見|学んだ|判明)").unwrap(),
