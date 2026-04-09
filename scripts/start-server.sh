@@ -36,7 +36,7 @@ exec "$BIN" -m "$MODEL" \
     -ngl 99 \
     -c 16384 \
     --cache-type-k q8_0 --cache-type-v q8_0 \
-    --flash-attn \
+    --flash-attn on \
     --temp 0.5 --top-p 0.85 --top-k 20 --min-p 0 \
     --reasoning-budget 0 --reasoning-format none \
     --chat-template-kwargs '{"enable_thinking": false}' \
