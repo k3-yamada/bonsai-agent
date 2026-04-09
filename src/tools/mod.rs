@@ -1,6 +1,7 @@
 pub mod file;
 pub mod git;
 pub mod permission;
+pub mod plugin;
 pub mod sandbox;
 pub mod shell;
 pub mod web;

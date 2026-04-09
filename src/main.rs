@@ -63,6 +63,11 @@ fn main() -> Result<()> {
     tools.register(Box::new(WebSearchTool));
     tools.register(Box::new(WebFetchTool));
 
+    // プラグインツールの登録
+    for plugin_tool in bonsai_agent::tools::plugin::load_plugin_tools(&app_config.plugins.tools) {
+        tools.register(plugin_tool);
+    }
+
     // 安全性
     let path_guard = PathGuard::new(app_config.safety.deny_paths.clone());
     let config = AgentConfig {

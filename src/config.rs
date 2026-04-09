@@ -11,6 +11,15 @@ pub struct AppConfig {
     pub agent: AgentSettings,
     pub safety: SafetyConfig,
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    #[serde(default)]
+    pub tools: Vec<crate::tools::plugin::PluginToolConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
