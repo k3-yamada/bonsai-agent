@@ -115,6 +115,24 @@ impl MemoryStore {
         Ok(results)
     }
 
+    /// 全メモリを取得（ベクトル検索のスキャン用）
+    pub fn all_memories(&self) -> Result<Vec<MemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, category, tags, access_count, created_at FROM memories ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(MemoryRecord {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                category: row.get(2)?,
+                tags: row.get(3)?,
+                access_count: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// メモリ間リンクを作成
     pub fn link_memories(&self, source_id: i64, target_id: i64, relation: &str) -> Result<()> {
         self.conn.execute(

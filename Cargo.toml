@@ -17,6 +17,14 @@ dirs = "6"
 toml = "0.8"
 libc = "0.2"
 
+[features]
+default = []
+embeddings = ["dep:fastembed"]
+
+[dependencies.fastembed]
+version = "5"
+optional = true
+
 # 将来追加予定
 # hf-hub = "0.5"           # モデル自動DL
 # sysinfo = "0.33"         # RAM検出
