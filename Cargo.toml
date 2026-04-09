@@ -11,8 +11,9 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 
-# Phase 0完了後に追加
+# llama-cpp-2: PrismMLフォークとupstream llama-cpp-rsのAPI不整合のためHTTP方式にフォールバック
 # llama-cpp-2 = { git = "https://github.com/k3-yamada/llama-cpp-rs", features = ["metal"] }
+ureq = { version = "3", features = ["json"] }  # llama-server HTTP API + Web検索 + Ollama
 
 rusqlite = { version = "0.32", features = ["bundled"] }
 
