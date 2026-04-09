@@ -3,6 +3,7 @@ pub mod git;
 pub mod permission;
 pub mod sandbox;
 pub mod shell;
+pub mod web;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

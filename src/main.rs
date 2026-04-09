@@ -13,6 +13,7 @@ use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
 use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::shell::ShellTool;
+use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
 use bonsai_agent::tools::ToolRegistry;
 
 #[derive(Parser)]
@@ -54,6 +55,8 @@ fn main() -> Result<()> {
     tools.register(Box::new(FileReadTool));
     tools.register(Box::new(FileWriteTool));
     tools.register(Box::new(GitTool));
+    tools.register(Box::new(WebSearchTool));
+    tools.register(Box::new(WebFetchTool));
 
     // 安全性
     let path_guard = PathGuard::new(app_config.safety.deny_paths.clone());
