@@ -241,6 +241,28 @@ pub fn run_agent_loop(
     session.add_message(Message::system(&config.system_prompt));
     session.add_message(Message::user(input));
 
+    run_agent_loop_with_session(&mut session, backend, tools, path_guard, config, cancel, store)
+}
+
+/// 既存セッションでエージェントループを実行（セッション再開用）
+pub fn run_agent_loop_with_session(
+    session: &mut Session,
+    backend: &dyn LlmBackend,
+    tools: &ToolRegistry,
+    path_guard: &PathGuard,
+    config: &AgentConfig,
+    cancel: &CancellationToken,
+    store: Option<&MemoryStore>,
+) -> Result<String> {
+    // 経験記録用にユーザー入力を取得
+    let task_context: String = session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, crate::agent::conversation::Role::User))
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
 
@@ -254,7 +276,7 @@ pub fn run_agent_loop(
 
     for iteration in 0..config.max_iterations {
         let outcome = execute_step(
-            &mut session,
+            session,
             &ctx,
             &mut circuit_breaker,
             &mut loop_detector,
@@ -265,11 +287,11 @@ pub fn run_agent_loop(
             StepOutcome::FinalAnswer(answer) => {
                 // セッション保存 + 経験記録（成功）
                 if let Some(s) = store {
-                    let _ = s.save_session(&session);
+                    let _ = s.save_session(session);
                     let exp = ExperienceStore::new(s.conn());
                     let _ = exp.record(&RecordParams {
                         exp_type: ExperienceType::Success,
-                        task_context: input,
+                        task_context: &task_context,
                         action: &answer,
                         outcome: "completed",
                         lesson: None,
@@ -283,11 +305,11 @@ pub fn run_agent_loop(
             StepOutcome::Aborted(reason) => {
                 // セッション保存 + 経験記録（失敗）
                 if let Some(s) = store {
-                    let _ = s.save_session(&session);
+                    let _ = s.save_session(session);
                     let exp = ExperienceStore::new(s.conn());
                     let _ = exp.record(&RecordParams {
                         exp_type: ExperienceType::Insight,
-                        task_context: input,
+                        task_context: &task_context,
                         action: "aborted",
                         outcome: &reason,
                         lesson: Some(&reason),

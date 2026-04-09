@@ -3,7 +3,8 @@ use std::io::{self, BufRead, Write};
 use anyhow::Result;
 use clap::Parser;
 
-use bonsai_agent::agent::agent_loop::{run_agent_loop, AgentConfig};
+use bonsai_agent::agent::agent_loop::{run_agent_loop, run_agent_loop_with_session, AgentConfig};
+use bonsai_agent::agent::conversation::Message;
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::AppConfig;
@@ -34,6 +35,10 @@ struct Cli {
     /// セッション一覧を表示
     #[arg(long)]
     sessions: bool,
+
+    /// 過去セッションを再開（セッションIDの先頭数文字でOK）
+    #[arg(long)]
+    resume: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -93,6 +98,80 @@ fn main() -> Result<()> {
                     .collect();
                 let date = if s.created_at.len() >= 19 { &s.created_at[..19] } else { &s.created_at };
                 println!("{id:<38} {date:<22} {preview}", id = s.id);
+            }
+        }
+        return Ok(());
+    }
+
+    // セッション再開
+    if let Some(resume_id) = &cli.resume {
+        let sessions = store.list_sessions(100)?;
+        let matched = sessions.iter().find(|s| s.id.starts_with(resume_id.as_str()));
+
+        let Some(matched) = matched else {
+            eprintln!("セッション '{resume_id}' が見つかりません。--sessions で一覧を確認してください。");
+            std::process::exit(1);
+        };
+
+        let Some(mut session) = store.load_session(&matched.id)? else {
+            eprintln!("セッションの読み込みに失敗しました: {}", matched.id);
+            std::process::exit(1);
+        };
+
+        println!("セッション再開: {}", session.id);
+        println!("メッセージ数: {}", session.messages.len());
+        println!();
+
+        // 直近のメッセージを表示
+        for msg in session.messages.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+            let role = match msg.role {
+                bonsai_agent::agent::conversation::Role::User => "\x1b[36mあなた\x1b[0m",
+                bonsai_agent::agent::conversation::Role::Assistant => "\x1b[32mBonsai\x1b[0m",
+                _ => continue,
+            };
+            let preview: String = msg.content.chars().take(80).collect();
+            println!("{role}: {preview}");
+        }
+        println!("\n--- 続きからどうぞ ---\n");
+
+        let backend: Box<dyn bonsai_agent::runtime::inference::LlmBackend> = if cli.mock {
+            Box::new(MockLlmBackend::new(
+                (0..1000).map(|_| "モックモードです。".to_string()).collect(),
+            ))
+        } else {
+            let b = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
+            if !b.is_healthy() {
+                eprintln!("警告: llama-server ({server_url}) に接続できません。");
+                std::process::exit(1);
+            }
+            Box::new(b)
+        };
+
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+        loop {
+            if cancel.is_cancelled() { break; }
+            print!("bonsai> ");
+            stdout.flush()?;
+            let mut input = String::new();
+            if stdin.lock().read_line(&mut input)? == 0 { break; }
+            let input = input.trim();
+            if input.is_empty() { continue; }
+            if input == "exit" || input == "quit" { break; }
+
+            session.add_message(Message::user(input));
+            match run_agent_loop_with_session(
+                &mut session, backend.as_ref(), &tools, &path_guard, &config, &cancel, Some(&store),
+            ) {
+                Ok(result) => {
+                    eprint!("\x1b[0m");
+                    if result.starts_with("[中断]") {
+                        println!("\n\x1b[33m{result}\x1b[0m\n");
+                    } else {
+                        println!();
+                    }
+                }
+                Err(e) => eprintln!("\n\x1b[31mエラー: {e}\x1b[0m\n"),
             }
         }
         return Ok(());
