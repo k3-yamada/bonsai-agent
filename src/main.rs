@@ -104,7 +104,10 @@ fn main() -> Result<()> {
             let backend = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
             run_agent_loop(input, &backend, &tools, &path_guard, &config, &cancel, Some(&store))?
         };
-        println!("{result}");
+        // ストリーミング出力で既に表示済みなので、結果が中断の場合のみ表示
+        if result.starts_with("[中断]") {
+            println!("\n{result}");
+        }
     } else {
         // 対話モード（REPL）
         println!("bonsai-agent v{}", env!("CARGO_PKG_VERSION"));
@@ -165,8 +168,12 @@ fn main() -> Result<()> {
                 Some(&store),
             ) {
                 Ok(result) => {
-                    eprint!("\x1b[0m"); // 色リセット
-                    println!("\n\x1b[1m{result}\x1b[0m\n"); // 最終回答は太字
+                    eprint!("\x1b[0m");
+                    if result.starts_with("[中断]") {
+                        println!("\n\x1b[33m{result}\x1b[0m\n");
+                    } else {
+                        println!(); // ストリーミングで既に表示済み
+                    }
                 }
                 Err(e) => {
                     eprint!("\x1b[0m");

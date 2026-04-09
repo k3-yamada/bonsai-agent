@@ -5,7 +5,7 @@ set -e
 
 BONSAI_DEMO="${BONSAI_DEMO:-$HOME/Bonsai-demo}"
 BIN="$BONSAI_DEMO/bin/mac/llama-server"
-MODEL="$BONSAI_DEMO/models/gguf/8B/bonsai-8b-q1_0-g128.gguf"
+MODEL="$BONSAI_DEMO/models/gguf/8B/Bonsai-8B.gguf"
 HOST="127.0.0.1"
 PORT="${PORT:-8080}"
 
