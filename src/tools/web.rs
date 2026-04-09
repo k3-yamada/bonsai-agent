@@ -89,9 +89,9 @@ impl Tool for WebFetchTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("'url' パラメータが必要です"))?;
 
-        match ureq::get(url).call() {
+        match reqwest::blocking::get(url) {
             Ok(mut response) => {
-                let body = response.body_mut().read_to_string()?;
+                let body = response.text()?;
                 // HTMLタグを簡易的に除去
                 let text = strip_html_tags(&body);
                 // 長すぎる場合は切り詰め
