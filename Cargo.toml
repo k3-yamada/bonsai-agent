@@ -2,6 +2,18 @@
 name = "bonsai-agent"
 version = "0.1.0"
 edition = "2024"
+description = "Bonsai-8B 1-bit LLMで動作する自律型AIエージェント"
+license = "MIT"
+repository = "https://github.com/k3-yamada/bonsai-agent"
+
+[[bin]]
+name = "bonsai"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = "z"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
