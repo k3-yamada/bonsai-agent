@@ -9,8 +9,13 @@ use crate::agent::parse::parse_assistant_output;
 use crate::agent::validate::{validate_tool_call, PathGuard, Severity};
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
+use crate::memory::search::HybridSearch;
+use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
+use crate::observability::audit::{AuditAction, AuditLog};
+use crate::runtime::embedder::create_embedder;
 use crate::runtime::inference::LlmBackend;
+use crate::safety::secrets::SecretsFilter;
 use crate::tools::ToolRegistry;
 
 /// エージェント設定
@@ -82,6 +87,8 @@ pub struct StepContext<'a> {
     pub path_guard: &'a PathGuard,
     pub config: &'a AgentConfig,
     pub cancel: &'a CancellationToken,
+    pub secrets_filter: &'a SecretsFilter,
+    pub store: Option<&'a MemoryStore>,
 }
 
 /// エージェントの1ステップを実行する（テスト容易性のためループの内側を分離）
@@ -214,11 +221,39 @@ pub fn execute_step(
         match tool.call(tool_call.arguments.clone()) {
             Ok(tool_result) => {
                 circuit_breaker.record_success(&tool_call.name);
-                session.add_message(Message::tool(&tool_result.output, &tool_call.name));
+                // 秘密情報をマスク
+                let redacted_output = ctx.secrets_filter.redact(&tool_result.output);
+                // 監査ログ記録
+                if let Some(s) = ctx.store {
+                    let audit = AuditLog::new(s.conn());
+                    let _ = audit.log(
+                        Some(&session.id),
+                        &AuditAction::ToolCall {
+                            tool_name: tool_call.name.clone(),
+                            args: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+                            success: tool_result.success,
+                            output_preview: redacted_output.chars().take(200).collect(),
+                        },
+                    );
+                }
+                session.add_message(Message::tool(&redacted_output, &tool_call.name));
             }
             Err(e) => {
                 circuit_breaker.record_failure(&tool_call.name);
                 let error_msg = format!("ツール実行エラー: {e}");
+                // 失敗も監査ログに記録
+                if let Some(s) = ctx.store {
+                    let audit = AuditLog::new(s.conn());
+                    let _ = audit.log(
+                        Some(&session.id),
+                        &AuditAction::ToolCall {
+                            tool_name: tool_call.name.clone(),
+                            args: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+                            success: false,
+                            output_preview: error_msg.clone(),
+                        },
+                    );
+                }
                 session.add_message(Message::tool(&error_msg, &tool_call.name));
             }
         }
@@ -263,6 +298,46 @@ pub fn run_agent_loop_with_session(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
+    let secrets_filter = SecretsFilter::default();
+    let embedder = create_embedder();
+
+    // ハイブリッド検索: 関連メモリをシステムプロンプトに注入
+    if let Some(s) = store {
+        let search = HybridSearch::new(s, embedder.as_ref());
+        let memories = search.search(&task_context, 3).unwrap_or_default();
+        if !memories.is_empty() {
+            let memory_context: String = memories
+                .iter()
+                .map(|r| format!("- {}", r.memory.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+            session.add_message(Message::system(format!(
+                "関連する過去の記憶:\n{memory_context}"
+            )));
+        }
+
+        // 類似経験を検索して注入
+        let exp = ExperienceStore::new(s.conn());
+        let past = exp.find_similar(&task_context, 3).unwrap_or_default();
+        if !past.is_empty() {
+            let exp_context: String = past
+                .iter()
+                .map(|e| {
+                    let prefix = match e.exp_type {
+                        ExperienceType::Success => "成功",
+                        ExperienceType::Failure => "失敗（避けよ）",
+                        ExperienceType::Insight => "学び",
+                    };
+                    format!("- [{prefix}] {}: {}", e.action, e.outcome)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            session.add_message(Message::system(format!(
+                "過去の経験:\n{exp_context}"
+            )));
+        }
+    }
+
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
 
@@ -272,6 +347,8 @@ pub fn run_agent_loop_with_session(
         path_guard,
         config,
         cancel,
+        secrets_filter: &secrets_filter,
+        store,
     };
 
     for iteration in 0..config.max_iterations {
@@ -299,6 +376,9 @@ pub fn run_agent_loop_with_session(
                         error_type: None,
                         error_detail: None,
                     });
+                    // スキル昇格チェック（3回成功で昇格）
+                    let skills = SkillStore::new(s.conn());
+                    let _ = skills.promote_from_experiences(s.conn(), 3);
                 }
                 return Ok(answer);
             }
