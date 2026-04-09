@@ -39,6 +39,10 @@ struct Cli {
     /// 過去セッションを再開（セッションIDの先頭数文字でOK）
     #[arg(long)]
     resume: Option<String>,
+
+    /// 監査ログを表示
+    #[arg(long)]
+    audit: bool,
 }
 
 fn main() -> Result<()> {
@@ -103,6 +107,27 @@ fn main() -> Result<()> {
                     .collect();
                 let date = if s.created_at.len() >= 19 { &s.created_at[..19] } else { &s.created_at };
                 println!("{id:<38} {date:<22} {preview}", id = s.id);
+            }
+        }
+        return Ok(());
+    }
+
+    // 監査ログ表示
+    if cli.audit {
+        let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
+        let entries = audit.recent(50)?;
+        if entries.is_empty() {
+            println!("監査ログはありません。");
+        } else {
+            for entry in entries.iter().rev() {
+                let ts = if entry.timestamp.len() >= 19 { &entry.timestamp[..19] } else { &entry.timestamp };
+                let sid = entry.session_id.as_deref().unwrap_or("-");
+                println!(
+                    "{ts}  [{typ}]  session={sid}",
+                    typ = entry.action_type,
+                    sid = &sid[..8.min(sid.len())],
+                );
+                println!("  {}", entry.action_data);
             }
         }
         return Ok(());
