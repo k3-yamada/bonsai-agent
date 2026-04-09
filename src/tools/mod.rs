@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod mcp_client;
 pub mod permission;
 pub mod plugin;
+// pub mod repomap;  // 次セッションで作成
 pub mod sandbox;
 pub mod shell;
 pub mod web;
