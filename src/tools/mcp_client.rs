@@ -1,0 +1,302 @@
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use crate::tools::permission::Permission;
+use crate::tools::{Tool, ToolResult};
+
+/// MCP サーバー設定（TOML定義）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// JSON-RPC リクエスト
+#[derive(Serialize)]
+struct JsonRpcRequest {
+    jsonrpc: &'static str,
+    id: u64,
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<serde_json::Value>,
+}
+
+/// JSON-RPC レスポンス
+#[derive(Deserialize)]
+struct JsonRpcResponse {
+    #[allow(dead_code)]
+    id: u64,
+    result: Option<serde_json::Value>,
+    error: Option<serde_json::Value>,
+}
+
+static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// MCPサーバープロセスとの接続
+pub struct McpConnection {
+    child: Child,
+    #[allow(dead_code)]
+    config: McpServerConfig,
+}
+
+impl McpConnection {
+    /// MCPサーバーを子プロセスとして起動
+    pub fn spawn(config: &McpServerConfig) -> Result<Self> {
+        let child = Command::new(&config.command)
+            .args(&config.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command))?;
+
+        let mut conn = Self {
+            child,
+            config: config.clone(),
+        };
+
+        // initialize
+        conn.send_request("initialize", Some(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
+        })))?;
+
+        // initialized通知
+        conn.send_notification("notifications/initialized")?;
+
+        Ok(conn)
+    }
+
+    /// JSON-RPCリクエストを送信してレスポンスを受け取る
+    fn send_request(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value> {
+        let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: method.to_string(),
+            params,
+        };
+
+        let stdin = self.child.stdin.as_mut()
+            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdinが利用不可"))?;
+        let request_json = serde_json::to_string(&request)?;
+        writeln!(stdin, "{request_json}")?;
+        stdin.flush()?;
+
+        let stdout = self.child.stdout.as_mut()
+            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdoutが利用不可"))?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+
+        let response: JsonRpcResponse = serde_json::from_str(line.trim())?;
+
+        if let Some(error) = response.error {
+            anyhow::bail!("MCPエラー: {error}");
+        }
+
+        Ok(response.result.unwrap_or(serde_json::Value::Null))
+    }
+
+    /// 通知を送信（レスポンスなし）
+    fn send_notification(&mut self, method: &str) -> Result<()> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+        });
+
+        let stdin = self.child.stdin.as_mut()
+            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdinが利用不可"))?;
+        let json = serde_json::to_string(&request)?;
+        writeln!(stdin, "{json}")?;
+        stdin.flush()?;
+        Ok(())
+    }
+
+    /// ツール一覧を取得
+    pub fn list_tools(&mut self) -> Result<Vec<McpToolInfo>> {
+        let result = self.send_request("tools/list", None)?;
+        let tools = result.get("tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        Some(McpToolInfo {
+                            name: t.get("name")?.as_str()?.to_string(),
+                            description: t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            input_schema: t.get("inputSchema").cloned().unwrap_or(serde_json::json!({})),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(tools)
+    }
+
+    /// ツールを呼び出す
+    pub fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> Result<String> {
+        let result = self.send_request("tools/call", Some(serde_json::json!({
+            "name": name,
+            "arguments": arguments,
+        })))?;
+
+        // MCP tool/call レスポンス: { content: [{ type: "text", text: "..." }] }
+        let text = result.get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if text.is_empty() {
+            Ok(serde_json::to_string_pretty(&result)?)
+        } else {
+            Ok(text.to_string())
+        }
+    }
+}
+
+impl Drop for McpConnection {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// MCPツール情報
+#[derive(Debug, Clone)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+/// MCPツールをTool traitにラップ（静的情報のみ保持、呼び出しはMcpConnection経由）
+pub struct McpToolWrapper {
+    info: McpToolInfo,
+    server_name: String,
+}
+
+impl McpToolWrapper {
+    pub fn new(info: McpToolInfo, server_name: &str) -> Self {
+        Self {
+            info,
+            server_name: server_name.to_string(),
+        }
+    }
+}
+
+impl Tool for McpToolWrapper {
+    fn name(&self) -> &str {
+        &self.info.name
+    }
+
+    fn description(&self) -> &str {
+        &self.info.description
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.info.input_schema.clone()
+    }
+
+    fn permission(&self) -> Permission {
+        Permission::Confirm // MCPツールはデフォルトConfirm
+    }
+
+    fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
+        // 注意: 実際の呼び出しはMcpConnection::call_tool経由で行う必要がある
+        // このwrapperはスキーマ情報提供用。エージェントループで特別扱い。
+        Ok(ToolResult {
+            output: format!("MCPツール '{}' (サーバー: {}) の直接呼び出しは未サポート。agent_loop経由で使用してください。", self.info.name, self.server_name),
+            success: false,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mcp_server_config_deserialize() {
+        let toml_str = r#"
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+"#;
+        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "filesystem");
+        assert_eq!(config.command, "npx");
+        assert_eq!(config.args.len(), 3);
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_metadata() {
+        let info = McpToolInfo {
+            name: "read_file".to_string(),
+            description: "ファイルを読む".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let wrapper = McpToolWrapper::new(info, "filesystem");
+        assert_eq!(wrapper.name(), "read_file");
+        assert_eq!(wrapper.permission(), Permission::Confirm);
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_schema() {
+        let info = McpToolInfo {
+            name: "test".to_string(),
+            description: "desc".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        };
+        let wrapper = McpToolWrapper::new(info, "test-server");
+        let schema = wrapper.parameters_schema();
+        assert!(schema["properties"]["path"].is_object());
+    }
+
+    #[test]
+    fn test_json_rpc_request_serialize() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("tools/list"));
+        assert!(!json.contains("params")); // skip_serializing_if
+    }
+
+    #[test]
+    fn test_json_rpc_request_with_params() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: 2,
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({"name": "test"})),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("params"));
+    }
+
+    // 実MCPサーバーとの統合テスト
+    #[test]
+    #[ignore]
+    fn test_mcp_echo_server() {
+        // echo的なMCPサーバーが必要
+        let config = McpServerConfig {
+            name: "test".to_string(),
+            command: "npx".to_string(),
+            args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string(), "/tmp".to_string()],
+        };
+        let mut conn = McpConnection::spawn(&config).unwrap();
+        let tools = conn.list_tools().unwrap();
+        assert!(!tools.is_empty());
+    }
+}

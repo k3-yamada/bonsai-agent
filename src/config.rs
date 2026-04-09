@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub plugins: PluginsConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -20,6 +22,13 @@ pub struct AppConfig {
 pub struct PluginsConfig {
     #[serde(default)]
     pub tools: Vec<crate::tools::plugin::PluginToolConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: Vec<crate::tools::mcp_client::McpServerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
