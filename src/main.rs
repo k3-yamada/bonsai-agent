@@ -95,7 +95,7 @@ fn main() -> Result<()> {
 
     if cli.vault {
         let vp = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("bonsai-agent").join("vault");
-        if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(\&vp) { println!("{}", v.summary().unwrap_or_default()); }
+        if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(&vp) { println!("{}", v.summary().unwrap_or_default()); }
         return Ok(());
     }
 

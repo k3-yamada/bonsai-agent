@@ -301,10 +301,10 @@ pub fn run_agent_loop_with_session(
     let secrets_filter = SecretsFilter::default();
 
     let vault_path = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("bonsai-agent").join("vault");
-    let vault = crate::knowledge::vault::Vault::new(\&vault_path).ok();
+    let vault = crate::knowledge::vault::Vault::new(&vault_path).ok();
     if let Some(ref v) = vault {
-        let stocks = crate::knowledge::extractor::extract_stock(\&task_context, \&session.id);
-        let _ = v.append_all(\&stocks);
+        let stocks = crate::knowledge::extractor::extract_stock(&task_context, &session.id);
+        let _ = v.append_all(&stocks);
     }
     let embedder = create_embedder();
 
