@@ -62,11 +62,14 @@ Gitの状態を確認する:
 
 ## ルール
 
-1. 考える必要があれば <think>ここに思考</think> タグを使う
-2. ツール呼び出しのJSONは正しい形式にする
-3. ツール結果を受け取ったら、それを元に回答する
-4. わからないことは正直に「わからない」と答える
-5. 危険な操作（ファイル削除、システム変更）は慎重に行う
+1. 回答は簡潔にする。聞かれたことだけ答える
+2. 同じ内容を繰り返さない
+3. 日本語で回答する
+4. 考える必要があれば <think>ここに思考</think> タグを使う
+5. ツール呼び出しのJSONは正しい形式にする
+6. ツール結果を元に簡潔に回答する
+7. わからないことは「わからない」と答える
+8. 「検索して」→ web_search。URLが分かっている時だけ web_fetch
 "#;
 
 /// エージェントのステップ結果
@@ -420,10 +423,23 @@ pub fn run_agent_loop_with_session(
 
 /// ParsedOutputから回答テキストを構築
 fn build_answer(parsed: &ParsedOutput) -> String {
-    parsed
-        .text
-        .clone()
-        .unwrap_or_else(|| "(回答なし)".to_string())
+    let raw = parsed.text.clone().unwrap_or_else(|| "(回答なし)".to_string());
+    clean_response(&raw)
+}
+
+fn clean_response(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.dedup();
+    let joined = lines.join("\n");
+    let len = joined.len();
+    if len > 100 {
+        let half = len / 2;
+        let first = &joined[..half];
+        let second = &joined[half..];
+        let check = &first[..50.min(first.len())];
+        if second.contains(check) { return first.trim_end().to_string(); }
+    }
+    joined
 }
 
 #[cfg(test)]

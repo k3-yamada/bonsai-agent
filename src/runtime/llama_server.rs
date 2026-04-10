@@ -84,8 +84,10 @@ impl LlamaServerBackend {
             "messages": msgs,
             "temperature": 0.5,
             "top_k": 20,
-            "top_p": 0.9,
-            "max_tokens": 2048,
+            "top_p": 0.85,
+            "min_p": 0.05,
+            "max_tokens": 1024,
+            "repeat_penalty": 1.15,
             "stream": false,
         })
     }
