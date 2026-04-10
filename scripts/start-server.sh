@@ -39,7 +39,6 @@ exec "$BIN" -m "$MODEL" \
     --flash-attn on \
     --temp 0.5 --top-p 0.85 --top-k 20 --min-p 0.05 \
     --repeat-penalty 1.15 --repeat-last-n 128 \
-    --no-penalize-nl \
     --reasoning-budget 0 --reasoning-format none \
     --chat-template-kwargs '{"enable_thinking": false}' \
     "$@"
