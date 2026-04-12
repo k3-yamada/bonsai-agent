@@ -276,7 +276,13 @@ pub fn run_agent_loop(
     store: Option<&MemoryStore>,
 ) -> Result<String> {
     let mut session = Session::new();
-    session.add_message(Message::system(&config.system_prompt));
+    let now = chrono::Local::now();
+    let date_str = now.format("%Y年%m月%d日(%A) %H:%M");
+    let system_with_date = format!("{}
+
+## 現在の日時
+現在は{}です。正確な現在時刻が必要な場合は shell ツールで date コマンドを実行してください。", config.system_prompt, date_str);
+    session.add_message(Message::system(&system_with_date));
     session.add_message(Message::user(input));
 
     run_agent_loop_with_session(&mut session, backend, tools, path_guard, config, cancel, store)
