@@ -127,6 +127,20 @@ fn main() -> Result<()> {
             Ok(applied) => { for a in &applied { println!("  改善: {a}"); } if applied.is_empty() { println!("  (新しい改善なし)"); } }
             Err(e) => eprintln!("改善エラー: {e}"),
         }
+
+        // 3. 改善提案
+        match engine.suggest_improvements() {
+            Ok(suggestions) => {
+                if !suggestions.is_empty() {
+                    println!("提案:");
+                    for s in &suggestions {
+                        println!("  - {s}");
+                    }
+                }
+            }
+            Err(e) => eprintln!("提案エラー: {e}"),
+        }
+
         return Ok(());
     }
 
