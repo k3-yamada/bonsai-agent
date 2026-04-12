@@ -80,7 +80,7 @@ impl MemoryStore {
     /// FTS5でメモリを検索
     pub fn search_memories(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
         if query.is_empty() { return Ok(Vec::new()); }
-        let safe_query = format!(""{}"", query.replace('"', ""));
+        let safe_query = format!("\"{}\"", query.replace('"', ""));
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.content, m.category, m.tags, m.access_count, m.created_at
              FROM memories_fts f
