@@ -55,7 +55,7 @@ src/
 │   ├── search.rs                  # ハイブリッド検索（FTS5+ベクトルRRF融合）
 │   ├── feedback.rs                # Correction/Reinforcement検出
 │   ├── dreams.rs                  # Dreamingシステム（振り返り+パターン検出）
-│   └── evolution.rs               # arxiv自己進化エンジン
+│   └── evolution.rs               # arxiv自己進化エンジン + 能動的自己改善
 ├── knowledge/
 │   ├── extractor.rs               # フロー→ストック抽出（6カテゴリ）
 │   └── vault.rs                   # mdファイル蓄積（Karpathyパターン）

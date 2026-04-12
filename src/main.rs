@@ -107,7 +107,11 @@ fn main() -> Result<()> {
         let engine = bonsai_agent::memory::evolution::EvolutionEngine::new(&store);
         match engine.auto_collect() {
             Ok(n) => println!("arxiv: {n}件の論文を収集"),
-            Err(e) => eprintln!("エラー: {e}"),
+            Err(e) => eprintln!("収集エラー: {e}"),
+        }
+        match engine.apply_improvements() {
+            Ok(applied) => { for a in &applied { println!("  改善: {a}"); } if applied.is_empty() { println!("  (新しい改善なし)"); } }
+            Err(e) => eprintln!("改善エラー: {e}"),
         }
         return Ok(());
     }

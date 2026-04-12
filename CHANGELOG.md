@@ -40,6 +40,7 @@
 - Correction/Reinforcement検出（DeerFlow方式、日英対応）
 - Dreamingシステム（exbrain方式、データ駆動の振り返り+パターン検出）
 - arxiv自己進化エンジン（論文自動収集+知識蓄積+改善提案）
+- 能動的自己改善（apply_improvements: 失敗パターン警告、スキル化提案、成功率改善提案を自動記録）（論文自動収集+知識蓄積+改善提案）
 - ナレッジVault（フロー→ストック自動抽出、mdファイル蓄積）
 - セッション永続化 + 再開（--resume）
 
