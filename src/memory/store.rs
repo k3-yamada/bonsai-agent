@@ -79,6 +79,8 @@ impl MemoryStore {
 
     /// FTS5でメモリを検索
     pub fn search_memories(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
+        if query.is_empty() { return Ok(Vec::new()); }
+        let safe_query = format!(""{}"", query.replace('"', ""));
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.content, m.category, m.tags, m.access_count, m.created_at
              FROM memories_fts f
@@ -88,7 +90,7 @@ impl MemoryStore {
              LIMIT ?2",
         )?;
 
-        let rows = stmt.query_map(params![query, limit as i64], |row| {
+        let rows = stmt.query_map(params![&safe_query, limit as i64], |row| {
             Ok(MemoryRecord {
                 id: row.get(0)?,
                 content: row.get(1)?,
