@@ -389,6 +389,8 @@ pub fn run_agent_loop_with_session(
                     // スキル昇格チェック（3回成功で昇格）
                     let skills = SkillStore::new(s.conn());
                     let _ = skills.promote_from_experiences(s.conn(), 3);
+                    let evo = crate::memory::evolution::EvolutionEngine::new(s);
+                    let _ = evo.auto_collect();
                 }
                 return Ok(answer);
             }

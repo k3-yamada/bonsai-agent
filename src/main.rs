@@ -11,6 +11,7 @@ use bonsai_agent::config::AppConfig;
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::inference::MockLlmBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
+use bonsai_agent::tools::arxiv::ArxivTool;
 use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
 use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::shell::ShellTool;
@@ -54,6 +55,9 @@ struct Cli {
 
     #[arg(long)]
     manifest: bool,
+
+    #[arg(long)]
+    evolve: bool,
 }
 
 fn main() -> Result<()> {
@@ -77,6 +81,7 @@ fn main() -> Result<()> {
     tools.register(Box::new(GitTool));
     tools.register(Box::new(WebSearchTool));
     tools.register(Box::new(WebFetchTool));
+    tools.register(Box::new(ArxivTool));
 
     // プラグインツールの登録
     for plugin_tool in bonsai_agent::tools::plugin::load_plugin_tools(&app_config.plugins.tools) {
@@ -95,6 +100,17 @@ fn main() -> Result<()> {
     // Ctrl+Cハンドラ
     let cancel_clone = cancel.clone();
     ctrlc_handler(cancel_clone);
+
+    if cli.evolve {
+        let db_path = get_db_path();
+        let store = bonsai_agent::memory::store::MemoryStore::open(&db_path)?;
+        let engine = bonsai_agent::memory::evolution::EvolutionEngine::new(&store);
+        match engine.auto_collect() {
+            Ok(n) => println!("arxiv: {n}件の論文を収集"),
+            Err(e) => eprintln!("エラー: {e}"),
+        }
+        return Ok(());
+    }
 
     if cli.manifest {
         println!("{}", bonsai_agent::safety::manifest::format_manifest());
