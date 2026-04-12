@@ -434,13 +434,13 @@ fn clean_response(text: &str) -> String {
     let mut lines: Vec<&str> = text.lines().collect();
     lines.dedup();
     let joined = lines.join("\n");
-    let len = joined.len();
-    if len > 100 {
-        let half = len / 2;
-        let first = &joined[..half];
-        let second = &joined[half..];
-        let check = &first[..50.min(first.len())];
-        if second.contains(check) { return first.trim_end().to_string(); }
+    let chars: Vec<char> = joined.chars().collect();
+    if chars.len() > 100 {
+        let half = chars.len() / 2;
+        let first: String = chars[..half].iter().collect();
+        let second: String = chars[half..].iter().collect();
+        let check: String = first.chars().take(30).collect();
+        if second.contains(&check) { return first.trim_end().to_string(); }
     }
     joined
 }
