@@ -31,7 +31,9 @@ toml = "0.8"
 libc = "0.2"
 
 [features]
-default = []
+default = ["cli"]
+cli = []
+full = ["cli", "embeddings"]
 embeddings = ["dep:fastembed"]
 
 [dependencies.fastembed]

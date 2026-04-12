@@ -51,6 +51,9 @@ struct Cli {
     /// ナレッジVault概要
     #[arg(long)]
     vault: bool,
+
+    #[arg(long)]
+    manifest: bool,
 }
 
 fn main() -> Result<()> {
@@ -92,6 +95,11 @@ fn main() -> Result<()> {
     // Ctrl+Cハンドラ
     let cancel_clone = cancel.clone();
     ctrlc_handler(cancel_clone);
+
+    if cli.manifest {
+        println!("{}", bonsai_agent::safety::manifest::format_manifest());
+        return Ok(());
+    }
 
     if cli.vault {
         let vp = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("bonsai-agent").join("vault");
