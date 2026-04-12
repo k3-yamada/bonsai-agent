@@ -391,6 +391,7 @@ pub fn run_agent_loop_with_session(
                     let _ = skills.promote_from_experiences(s.conn(), 3);
                     let evo = crate::memory::evolution::EvolutionEngine::new(s);
                     let _ = evo.auto_collect();
+                    let _ = evo.apply_improvements();
                 }
                 return Ok(answer);
             }

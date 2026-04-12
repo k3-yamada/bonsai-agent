@@ -212,6 +212,15 @@ impl<'a> EvolutionEngine<'a> {
         Ok(suggestions)
     }
 
+    pub fn apply_improvements(&self) -> Result<Vec<String>> {
+        let mut applied = Vec::new();
+        let exp = crate::memory::experience::ExperienceStore::new(self.store.conn());
+        for (pat, cnt) in exp.failure_patterns("shell").unwrap_or_default() { if cnt >= 3 { let w = format!("[auto-learn] '{pat}' は{cnt}回失敗"); if self.store.search_memories(&pat, 1).unwrap_or_default().is_empty() { let _ = self.store.save_memory(&w, "insight", &["auto-improve".into()]); applied.push(w); } } }
+        let d = crate::memory::dreams::Dreamer::new(self.store.conn());
+        if let Ok(r) = d.generate_report(7) { if r.success_rate < 0.5 && r.success_rate > 0.0 { let h = format!("[auto-learn] 成功率{:.0}%", r.success_rate * 100.0); let _ = self.store.save_memory(&h, "insight", &["auto-improve".into()]); applied.push(h); } }
+        Ok(applied)
+    }
+
     /// 定期実行用: 関心領域のarxiv論文を自動収集
     pub fn auto_collect(&self) -> Result<usize> {
         let queries = [
