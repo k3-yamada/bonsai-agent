@@ -53,11 +53,25 @@ struct Cli {
     #[arg(long)]
     vault: bool,
 
+    /// ケイパビリティ一覧
     #[arg(long)]
     manifest: bool,
 
+    /// arxiv収集+自己改善
     #[arg(long)]
     evolve: bool,
+
+    /// REST APIサーバー
+    #[arg(long)]
+    serve: bool,
+
+    /// APIポート
+    #[arg(long, default_value = "3030")]
+    api_port: u16,
+
+    /// MCPサーバー
+    #[arg(long)]
+    mcp_server: bool,
 }
 
 fn main() -> Result<()> {

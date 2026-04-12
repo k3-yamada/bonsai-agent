@@ -90,7 +90,7 @@ impl Tool for WebFetchTool {
             .ok_or_else(|| anyhow::anyhow!("'url' パラメータが必要です"))?;
 
         match reqwest::blocking::get(url) {
-            Ok(mut response) => {
+            Ok(response) => {
                 let body = response.text()?;
                 // HTMLタグを簡易的に除去
                 let text = strip_html_tags(&body);
