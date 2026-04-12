@@ -70,7 +70,7 @@ fn parse_arxiv_xml(xml: &str) -> Vec<ArxivEntry> {
                     id,
                     title,
                     summary: if summary.len() > 500 {
-                        format!("{}...", &summary[..500])
+                        { let end = summary.char_indices().take_while(|(i, _)| *i <= 500).last().map(|(i, ch)| i + ch.len_utf8()).unwrap_or(summary.len()); format!("{}...", &summary[..end]) }
                     } else {
                         summary
                     },
@@ -291,9 +291,19 @@ mod tests {
         // 手動でarxivメモリを追加
         store.save_memory("[arxiv:2402.17764] test", "knowledge", &["arxiv".to_string()]).unwrap();
 
-        let engine = EvolutionEngine::new(&store);
+        let _engine = EvolutionEngine::new(&store);
         // 同じIDの論文は重複チェックでスキップされる
         // (実際のAPI呼び出しは #[ignore] テストで確認)
+    }
+
+    #[test]
+    fn test_parse_arxiv_xml_multibyte_summary() {
+        let long_summary = "あ".repeat(200);
+        let xml = format!(r#"<feed><entry><id>http://arxiv.org/abs/9999.99999</id><title>Test</title><summary>{}</summary><published>2024-01-01</published></entry></feed>"#, long_summary);
+        let entries = parse_arxiv_xml(&xml);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].summary.ends_with("..."));
+        assert!(entries[0].summary.is_char_boundary(entries[0].summary.len()));
     }
 
     // 実ネットワークテスト
