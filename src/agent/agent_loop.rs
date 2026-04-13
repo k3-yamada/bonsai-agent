@@ -362,6 +362,20 @@ pub fn run_agent_loop_with_session(
                 "過去の経験:\n{exp_context}"
             )));
         }
+
+        // 関連スキルをプロンプトに注入
+        let skills = SkillStore::new(s.conn());
+        let matching_skills = skills.find_matching(&task_context, 3).unwrap_or_default();
+        if !matching_skills.is_empty() {
+            let skill_context: String = matching_skills
+                .iter()
+                .map(|sk| format!("- スキル「{}」: {} (ツール: {})", sk.name, sk.description, sk.tool_chain))
+                .collect::<Vec<_>>()
+                .join("\n");
+            session.add_message(Message::system(format!(
+                "利用可能なスキル（過去の成功パターン）:\n{skill_context}\n上記のパターンが適用可能な場合は参考にしてください。"
+            )));
+        }
     }
 
     let mut circuit_breaker = CircuitBreaker::default();
