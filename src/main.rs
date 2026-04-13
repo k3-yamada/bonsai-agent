@@ -293,12 +293,7 @@ fn handle_sessions_mode(store: &MemoryStore) -> Result<()> {
     if sessions.is_empty() {
         println!("セッションはありません。");
     } else {
-        println!(
-            "{id:<38} {date:<22} {msg}",
-            id = "ID",
-            date = "日時",
-            msg = "内容"
-        );
+        println!("{:<38} {:<22} 内容", "ID", "日時");
         println!("{}", "-".repeat(80));
         for s in &sessions {
             let preview: String = s
