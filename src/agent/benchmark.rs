@@ -78,6 +78,138 @@ impl BenchmarkResult {
     }
 }
 
+/// 複数回実行の設定
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRunConfig {
+    /// 各タスクの実行回数（default 3）
+    pub k: usize,
+    /// 実行間のシステムプロンプト微小変動用シード（決定論的出力を回避）
+    pub jitter_seed: bool,
+}
+
+impl Default for MultiRunConfig {
+    fn default() -> Self {
+        Self {
+            k: 3,
+            jitter_seed: true,
+        }
+    }
+}
+
+/// 複数回実行時の単一タスクスコア
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRunTaskScore {
+    pub task_id: String,
+    /// k回中の成功割合（score > pass_threshold のラン数 / k）
+    pub pass_at_k: f64,
+    /// 最長連続成功 / k（p^n 指標）
+    pub pass_consecutive_k: f64,
+    /// 平均スコア
+    pub mean_score: f64,
+    /// スコアの分散
+    pub variance: f64,
+    /// 個別スコア
+    pub individual_scores: Vec<f64>,
+}
+
+impl MultiRunTaskScore {
+    /// 個別スコア列からMultiRunTaskScoreを計算
+    pub fn from_scores(task_id: String, scores: Vec<f64>, pass_threshold: f64) -> Self {
+        let k = scores.len();
+        if k == 0 {
+            return Self {
+                task_id,
+                pass_at_k: 0.0,
+                pass_consecutive_k: 0.0,
+                mean_score: 0.0,
+                variance: 0.0,
+                individual_scores: vec![],
+            };
+        }
+
+        let passes: Vec<bool> = scores.iter().map(|s| *s >= pass_threshold).collect();
+        let pass_at_k = passes.iter().filter(|p| **p).count() as f64 / k as f64;
+
+        // 最長連続成功
+        let mut max_streak = 0usize;
+        let mut current_streak = 0usize;
+        for &passed in &passes {
+            if passed {
+                current_streak += 1;
+                max_streak = max_streak.max(current_streak);
+            } else {
+                current_streak = 0;
+            }
+        }
+        let pass_consecutive_k = max_streak as f64 / k as f64;
+
+        let mean_score = scores.iter().sum::<f64>() / k as f64;
+        let variance = if k > 1 {
+            scores
+                .iter()
+                .map(|s| (s - mean_score).powi(2))
+                .sum::<f64>()
+                / (k - 1) as f64
+        } else {
+            0.0
+        };
+
+        Self {
+            task_id,
+            pass_at_k,
+            pass_consecutive_k,
+            mean_score,
+            variance,
+            individual_scores: scores,
+        }
+    }
+}
+
+/// 複数回実行のベンチマーク全体結果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiRunBenchmarkResult {
+    pub task_scores: Vec<MultiRunTaskScore>,
+    pub duration_secs: f64,
+}
+
+impl MultiRunBenchmarkResult {
+    /// 全タスクの平均pass_at_k
+    pub fn composite_pass_at_k(&self) -> f64 {
+        if self.task_scores.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.task_scores.iter().map(|s| s.pass_at_k).sum();
+        sum / self.task_scores.len() as f64
+    }
+
+    /// 全タスクの平均pass_consecutive_k
+    pub fn composite_pass_consecutive_k(&self) -> f64 {
+        if self.task_scores.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.task_scores.iter().map(|s| s.pass_consecutive_k).sum();
+        sum / self.task_scores.len() as f64
+    }
+
+    /// 全タスクの平均mean_score（既存composite_scoreと互換）
+    pub fn composite_score(&self) -> f64 {
+        if self.task_scores.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.task_scores.iter().map(|s| s.mean_score).sum();
+        sum / self.task_scores.len() as f64
+    }
+
+    /// 全タスクの平均variance
+    pub fn mean_variance(&self) -> f64 {
+        if self.task_scores.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = self.task_scores.iter().map(|s| s.variance).sum();
+        sum / self.task_scores.len() as f64
+    }
+}
+
 /// ベンチマークスイート
 pub struct BenchmarkSuite {
     pub tasks: Vec<BenchmarkTask>,
@@ -162,6 +294,76 @@ impl BenchmarkSuite {
                 },
             ],
         }
+    }
+
+    /// 各タスクをk回実行してpass^k指標を計算
+    pub fn run_k(
+        &self,
+        config: &AgentConfig,
+        backend: &dyn LlmBackend,
+        tools: &ToolRegistry,
+        path_guard: &PathGuard,
+        cancel: &CancellationToken,
+        multi: &MultiRunConfig,
+        pass_threshold: f64,
+    ) -> Result<MultiRunBenchmarkResult> {
+        let start = std::time::Instant::now();
+        let mut task_scores = Vec::new();
+
+        for task in &self.tasks {
+            if cancel.is_cancelled() {
+                break;
+            }
+
+            let mut scores = Vec::new();
+            for run_idx in 0..multi.k {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                // jitter_seed時はプロンプトに実行番号を付加してキャッシュ回避
+                let system_prompt = if multi.jitter_seed {
+                    format!("{}\n<!-- run:{run_idx} -->", config.system_prompt)
+                } else {
+                    config.system_prompt.clone()
+                };
+
+                let task_config = AgentConfig {
+                    max_iterations: task.max_iterations,
+                    max_retries: config.max_retries,
+                    max_tools_selected: config.max_tools_selected,
+                    system_prompt,
+                };
+
+                let store = MemoryStore::in_memory()?;
+                let result = run_agent_loop(
+                    &task.input,
+                    backend,
+                    tools,
+                    path_guard,
+                    &task_config,
+                    cancel,
+                    Some(&store),
+                );
+
+                let score = match result {
+                    Ok(ref loop_result) => evaluate_task_response(task, loop_result).score(),
+                    Err(_) => 0.0,
+                };
+                scores.push(score);
+            }
+
+            task_scores.push(MultiRunTaskScore::from_scores(
+                task.id.clone(),
+                scores,
+                pass_threshold,
+            ));
+        }
+
+        Ok(MultiRunBenchmarkResult {
+            task_scores,
+            duration_secs: start.elapsed().as_secs_f64(),
+        })
     }
 
     /// ベンチマークスイートを実行し結果を返す
@@ -399,7 +601,6 @@ mod tests {
         let result = mock_result("hello there", vec![], 1);
         let score = evaluate_task_response(&task, &result);
         assert!((score.keyword_hits - 0.5).abs() < f64::EPSILON);
-        // ツール不要タスクではcorrect_toolsは常に1.0
         assert!((score.correct_tools - 1.0).abs() < f64::EPSILON);
     }
 
@@ -490,5 +691,71 @@ mod tests {
         let score_full = evaluate_task_response(&task, &full);
         assert!((score_partial.correct_tools - 0.5).abs() < f64::EPSILON);
         assert!((score_full.correct_tools - 1.0).abs() < f64::EPSILON);
+    }
+
+    // --- pass^k テスト ---
+
+    #[test]
+    fn test_multi_run_task_score_all_pass() {
+        let scores = vec![0.9, 0.85, 0.95];
+        let mrt = MultiRunTaskScore::from_scores("t1".into(), scores, 0.5);
+        assert!((mrt.pass_at_k - 1.0).abs() < f64::EPSILON);
+        assert!((mrt.pass_consecutive_k - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_multi_run_task_score_some_pass() {
+        let scores = vec![0.9, 0.3, 0.8];
+        let mrt = MultiRunTaskScore::from_scores("t2".into(), scores, 0.5);
+        assert!((mrt.pass_at_k - 2.0 / 3.0).abs() < 0.001);
+        assert!((mrt.pass_consecutive_k - 1.0 / 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_pass_consecutive_k_streak() {
+        let scores = vec![0.9, 0.9, 0.9, 0.1, 0.9];
+        let mrt = MultiRunTaskScore::from_scores("t3".into(), scores, 0.5);
+        assert!((mrt.pass_consecutive_k - 3.0 / 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_pass_consecutive_k_interleaved() {
+        let scores = vec![0.9, 0.1, 0.9, 0.1];
+        let mrt = MultiRunTaskScore::from_scores("t4".into(), scores, 0.5);
+        assert!((mrt.pass_consecutive_k - 1.0 / 4.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_multi_run_variance_calculation() {
+        let scores = vec![0.8, 0.8, 0.8];
+        let mrt = MultiRunTaskScore::from_scores("t5".into(), scores, 0.5);
+        assert!(mrt.variance.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_multi_run_variance_nonzero() {
+        let scores = vec![0.0, 1.0];
+        let mrt = MultiRunTaskScore::from_scores("t6".into(), scores, 0.5);
+        assert!((mrt.variance - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_multi_run_benchmark_result_composite() {
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![
+                MultiRunTaskScore::from_scores("a".into(), vec![1.0, 1.0, 1.0], 0.5),
+                MultiRunTaskScore::from_scores("b".into(), vec![0.0, 0.0, 0.0], 0.5),
+            ],
+            duration_secs: 10.0,
+        };
+        assert!((result.composite_pass_at_k() - 0.5).abs() < 0.001);
+        assert!((result.composite_score() - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_multi_run_empty_scores() {
+        let mrt = MultiRunTaskScore::from_scores("empty".into(), vec![], 0.5);
+        assert!((mrt.pass_at_k).abs() < f64::EPSILON);
+        assert!((mrt.mean_score).abs() < f64::EPSILON);
     }
 }
