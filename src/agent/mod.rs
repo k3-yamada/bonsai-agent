@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod benchmark;
 pub mod checkpoint;
 pub mod compaction;
 pub mod conversation;
