@@ -325,8 +325,9 @@ fn main() -> Result<()> {
             match run_agent_loop_with_session(
                 &mut session, backend.as_ref(), &tools, &path_guard, &config, &cancel, Some(&store),
             ) {
-                Ok(result) => {
+                Ok(loop_result) => {
                     eprint!("\x1b[0m");
+                    let result = &loop_result.answer;
                     if result.starts_with("[中断]") {
                         println!("\n\x1b[33m{result}\x1b[0m\n");
                     } else {
@@ -341,7 +342,7 @@ fn main() -> Result<()> {
 
     if let Some(input) = &cli.exec {
         // 単発実行モード
-        let result = if cli.mock {
+        let loop_result = if cli.mock {
             let mock = MockLlmBackend::single("モックモードです。実際のLLMは使用していません。");
             run_agent_loop(input, &mock, &tools, &path_guard, &config, &cancel, Some(&store))?
         } else {
@@ -349,8 +350,8 @@ fn main() -> Result<()> {
             run_agent_loop(input, &backend, &tools, &path_guard, &config, &cancel, Some(&store))?
         };
         // ストリーミング出力で既に表示済みなので、結果が中断の場合のみ表示
-        if result.starts_with("[中断]") {
-            println!("\n{result}");
+        if loop_result.answer.starts_with("[中断]") {
+            println!("\n{}", loop_result.answer);
         }
     } else {
         // 対話モード（REPL）
@@ -411,8 +412,9 @@ fn main() -> Result<()> {
                 &cancel,
                 Some(&store),
             ) {
-                Ok(result) => {
+                Ok(loop_result) => {
                     eprint!("\x1b[0m");
+                    let result = &loop_result.answer;
                     if result.starts_with("[中断]") {
                         println!("\n\x1b[33m{result}\x1b[0m\n");
                     } else {

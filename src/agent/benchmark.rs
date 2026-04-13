@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::agent_loop::{run_agent_loop, AgentConfig};
+use crate::agent::agent_loop::{run_agent_loop, AgentConfig, AgentLoopResult};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
@@ -199,7 +199,7 @@ impl BenchmarkSuite {
             );
 
             let score = match result {
-                Ok(response) => evaluate_task_response(task, &response),
+                Ok(ref loop_result) => evaluate_task_response(task, loop_result),
                 Err(_) => TaskScore {
                     task_id: task.id.clone(),
                     completed: false,
@@ -221,7 +221,8 @@ impl BenchmarkSuite {
 }
 
 /// タスクのレスポンスを評価してスコアを生成
-fn evaluate_task_response(task: &BenchmarkTask, response: &str) -> TaskScore {
+fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> TaskScore {
+    let response = &result.answer;
     let keyword_hits = if task.expected_keywords.is_empty() {
         1.0
     } else {
@@ -233,10 +234,14 @@ fn evaluate_task_response(task: &BenchmarkTask, response: &str) -> TaskScore {
         hits as f64 / task.expected_keywords.len() as f64
     };
 
+    // ツール正確性: 実際に呼ばれたツールと期待ツールを照合
     let correct_tools = if task.expected_tools.is_empty() {
         keyword_hits
     } else {
-        if keyword_hits > 0.0 { 1.0 } else { 0.0 }
+        let matched = task.expected_tools.iter()
+            .filter(|t| result.tools_called.iter().any(|c| c == *t))
+            .count();
+        matched as f64 / task.expected_tools.len() as f64
     };
 
     TaskScore {
@@ -244,7 +249,7 @@ fn evaluate_task_response(task: &BenchmarkTask, response: &str) -> TaskScore {
         completed: true,
         correct_tools,
         keyword_hits,
-        iterations_used: 1,
+        iterations_used: result.iterations_used,
         iteration_budget: task.max_iterations,
     }
 }
@@ -352,31 +357,65 @@ mod tests {
         assert_eq!(ids.len(), suite.tasks.len());
     }
 
+    fn mock_result(answer: &str, tools: Vec<&str>, iterations: usize) -> AgentLoopResult {
+        AgentLoopResult {
+            answer: answer.to_string(),
+            iterations_used: iterations,
+            tools_called: tools.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     #[test]
     fn test_evaluate_task_response_keywords() {
         let task = BenchmarkTask { id: "test".into(), name: "test".into(), input: "test".into(), expected_tools: vec![], expected_keywords: vec!["hello".into(), "world".into()], max_iterations: 3, category: TaskCategory::Reasoning };
-        let score = evaluate_task_response(&task, "hello there");
+        let result = mock_result("hello there", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
         assert!((score.keyword_hits - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_evaluate_task_response_all_keywords() {
         let task = BenchmarkTask { id: "test".into(), name: "test".into(), input: "test".into(), expected_tools: vec![], expected_keywords: vec!["1024".into()], max_iterations: 3, category: TaskCategory::Reasoning };
-        let score = evaluate_task_response(&task, "2の10乗は1024です");
+        let result = mock_result("2の10乗は1024です", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
         assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_evaluate_task_response_with_tools() {
         let task = BenchmarkTask { id: "test".into(), name: "test".into(), input: "test".into(), expected_tools: vec!["file_read".into()], expected_keywords: vec!["README".into()], max_iterations: 3, category: TaskCategory::ToolUse };
-        let score = evaluate_task_response(&task, "READMEの内容は...");
+        let result = mock_result("READMEの内容は...", vec!["file_read"], 2);
+        let score = evaluate_task_response(&task, &result);
         assert!((score.correct_tools - 1.0).abs() < f64::EPSILON);
+        assert_eq!(score.iterations_used, 2);
     }
 
     #[test]
     fn test_evaluate_task_response_missing_keywords() {
         let task = BenchmarkTask { id: "test".into(), name: "test".into(), input: "test".into(), expected_tools: vec!["git".into()], expected_keywords: vec!["commit".into()], max_iterations: 3, category: TaskCategory::ToolUse };
-        let score = evaluate_task_response(&task, "エラーが発生しました");
+        let result = mock_result("エラーが発生しました", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
         assert!((score.correct_tools).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_evaluate_different_iterations_different_scores() {
+        let task = BenchmarkTask { id: "test".into(), name: "test".into(), input: "test".into(), expected_tools: vec![], expected_keywords: vec!["ok".into()], max_iterations: 5, category: TaskCategory::Reasoning };
+        let fast = mock_result("ok", vec![], 1);
+        let slow = mock_result("ok", vec![], 4);
+        let score_fast = evaluate_task_response(&task, &fast);
+        let score_slow = evaluate_task_response(&task, &slow);
+        assert!(score_fast.score() > score_slow.score(), "少ないイテレーションの方が高スコア");
+    }
+
+    #[test]
+    fn test_evaluate_actual_tools_matched() {
+        let task = BenchmarkTask { id: "test".into(), name: "test".into(), input: "test".into(), expected_tools: vec!["shell".into(), "file_read".into()], expected_keywords: vec!["ok".into()], max_iterations: 3, category: TaskCategory::MultiStep };
+        let partial = mock_result("ok", vec!["shell"], 1);
+        let full = mock_result("ok", vec!["shell", "file_read"], 1);
+        let score_partial = evaluate_task_response(&task, &partial);
+        let score_full = evaluate_task_response(&task, &full);
+        assert!((score_partial.correct_tools - 0.5).abs() < f64::EPSILON);
+        assert!((score_full.correct_tools - 1.0).abs() < f64::EPSILON);
     }
 }

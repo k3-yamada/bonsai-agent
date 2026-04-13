@@ -72,13 +72,21 @@ Gitの状態を確認する:
 8. 「検索して」→ web_search。URLが分かっている時だけ web_fetch
 "#;
 
+/// エージェントループの構造化戻り値
+#[derive(Debug, Clone)]
+pub struct AgentLoopResult {
+    pub answer: String,
+    pub iterations_used: usize,
+    pub tools_called: Vec<String>,
+}
+
 /// エージェントのステップ結果
 #[derive(Debug)]
 pub enum StepOutcome {
     /// 最終回答（ループ終了）
     FinalAnswer(String),
-    /// ツール実行後、ループ継続
-    Continue,
+    /// ツール実行後、ループ継続（使用ツール名を保持）
+    Continue(Vec<String>),
     /// エラーで中断
     Aborted(String),
 }
@@ -160,7 +168,7 @@ pub fn execute_step(
                     session.add_message(Message::assistant(format!(
                         "パースエラー: {e}。修正します。"
                     )));
-                    Ok(StepOutcome::Continue)
+                    Ok(StepOutcome::Continue(Vec::new()))
                 }
             };
         }
@@ -177,6 +185,7 @@ pub fn execute_step(
     let assistant_text = result.text.clone();
     session.add_message(Message::assistant(&assistant_text));
 
+    let mut step_tools: Vec<String> = Vec::new();
     for tool_call in &parsed.tool_calls {
         // ループ検出
         let action_key = format!("{}:{}", tool_call.name, tool_call.arguments);
@@ -224,6 +233,7 @@ pub fn execute_step(
         match tool.call(tool_call.arguments.clone()) {
             Ok(tool_result) => {
                 circuit_breaker.record_success(&tool_call.name);
+                step_tools.push(tool_call.name.clone());
                 // 秘密情報をマスク
                 let redacted_output = ctx.secrets_filter.redact(&tool_result.output);
                 // 監査ログ記録
@@ -262,7 +272,7 @@ pub fn execute_step(
         }
     }
 
-    Ok(StepOutcome::Continue)
+    Ok(StepOutcome::Continue(step_tools))
 }
 
 /// エージェントループ全体を実行
@@ -274,7 +284,7 @@ pub fn run_agent_loop(
     config: &AgentConfig,
     cancel: &CancellationToken,
     store: Option<&MemoryStore>,
-) -> Result<String> {
+) -> Result<AgentLoopResult> {
     let mut session = Session::new();
     let now = chrono::Local::now();
     let date_str = now.format("%Y年%m月%d日(%A) %H:%M");
@@ -297,7 +307,7 @@ pub fn run_agent_loop_with_session(
     config: &AgentConfig,
     cancel: &CancellationToken,
     store: Option<&MemoryStore>,
-) -> Result<String> {
+) -> Result<AgentLoopResult> {
     // 経験記録用にユーザー入力を取得
     let task_context: String = session
         .messages
@@ -367,7 +377,10 @@ pub fn run_agent_loop_with_session(
         store,
     };
 
+    let mut all_tools: Vec<String> = Vec::new();
+    let mut final_iteration = 0;
     for iteration in 0..config.max_iterations {
+        final_iteration = iteration + 1;
         let outcome = execute_step(
             session,
             &ctx,
@@ -399,7 +412,11 @@ pub fn run_agent_loop_with_session(
                     let _ = evo.auto_collect();
                     let _ = evo.apply_improvements();
                 }
-                return Ok(answer);
+                return Ok(AgentLoopResult {
+                    answer,
+                    iterations_used: final_iteration,
+                    tools_called: all_tools,
+                });
             }
             StepOutcome::Aborted(reason) => {
                 // セッション保存 + 経験記録（失敗）
@@ -417,9 +434,16 @@ pub fn run_agent_loop_with_session(
                         error_detail: None,
                     });
                 }
-                return Ok(format!("[中断] {reason}"));
+                return Ok(AgentLoopResult {
+                    answer: format!("[中断] {reason}"),
+                    iterations_used: final_iteration,
+                    tools_called: all_tools,
+                });
             }
-            StepOutcome::Continue => continue,
+            StepOutcome::Continue(step_tools) => {
+                all_tools.extend(step_tools);
+                continue;
+            }
         }
     }
 
@@ -427,7 +451,11 @@ pub fn run_agent_loop_with_session(
         "最大イテレーション数({})に到達しました。タスクを完了できませんでした。",
         config.max_iterations
     );
-    Ok(format!("[中断] {timeout_msg}"))
+    Ok(AgentLoopResult {
+        answer: format!("[中断] {timeout_msg}"),
+        iterations_used: final_iteration,
+        tools_called: all_tools,
+    })
 }
 
 /// ParsedOutputから回答テキストを構築
@@ -503,7 +531,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = run_agent_loop("天気は？", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
-        assert!(result.contains("晴れ"));
+        assert!(result.answer.contains("晴れ"));
+        assert_eq!(result.iterations_used, 1);
+        assert!(result.tools_called.is_empty());
     }
 
     // テスト2: ツール1回 → 回答
@@ -519,7 +549,9 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = run_agent_loop("echo test", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
-        assert!(result.contains("hello"));
+        assert!(result.answer.contains("hello"));
+        assert_eq!(result.iterations_used, 2);
+        assert!(result.tools_called.contains(&"echo".to_string()));
     }
 
     // テスト3: 最大イテレーション到達
@@ -536,7 +568,8 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
-        assert!(result.contains("中断"));
+        assert!(result.answer.contains("中断"));
+        assert_eq!(result.iterations_used, 3);
     }
 
     // テスト4: Ctrl+Cキャンセル
@@ -551,7 +584,7 @@ mod tests {
 
         let result = run_agent_loop("test", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>);
         // MockLlmBackend::generateがキャンセルエラーを返す
-        assert!(result.is_err() || result.unwrap().contains("キャンセル"));
+        assert!(result.is_err() || result.unwrap().answer.contains("キャンセル"));
     }
 
     // テスト5: 不正ツール名 → バリデーション拒否
@@ -567,7 +600,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = run_agent_loop("hack", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
-        assert!(result.contains("了解"));
+        assert!(result.answer.contains("了解"));
     }
 
     // テスト6: ツール失敗 → サーキットブレーカー記録
@@ -583,7 +616,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = run_agent_loop("fail", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
-        assert!(result.contains("エラー"));
+        assert!(result.answer.contains("エラー"));
     }
 
     // テスト7: 経験メモリへの記録
@@ -616,6 +649,6 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
-        assert!(result.contains("中断"));
+        assert!(result.answer.contains("中断"));
     }
 }
