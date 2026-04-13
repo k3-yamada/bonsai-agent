@@ -236,7 +236,7 @@ fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> Tas
 
     // ツール正確性: 実際に呼ばれたツールと期待ツールを照合
     let correct_tools = if task.expected_tools.is_empty() {
-        keyword_hits
+        1.0 // ツール不要タスクではツール正確性は常に満点
     } else {
         let matched = task
             .expected_tools
@@ -398,6 +398,8 @@ mod tests {
         let result = mock_result("hello there", vec![], 1);
         let score = evaluate_task_response(&task, &result);
         assert!((score.keyword_hits - 0.5).abs() < f64::EPSILON);
+        // ツール不要タスクではcorrect_toolsは常に1.0
+        assert!((score.correct_tools - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
