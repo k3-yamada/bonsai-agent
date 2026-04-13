@@ -32,6 +32,14 @@ pub enum AuditAction {
         event_type: String,
         detail: String,
     },
+    /// ステップ単位の成否記録（p^n診断用）
+    StepOutcome {
+        step_index: usize,
+        outcome: String,
+        duration_ms: u64,
+        tools_used: Vec<String>,
+        consecutive_failures: usize,
+    },
 }
 
 /// 監査ログライター（append-only）
@@ -51,6 +59,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::LlmCall { .. } => "llm_call",
             AuditAction::ToolCall { .. } => "tool_call",
             AuditAction::SecurityEvent { .. } => "security_event",
+            AuditAction::StepOutcome { .. } => "step_outcome",
         };
         let action_data = serde_json::to_string(action)?;
 
@@ -194,7 +203,6 @@ mod tests {
         }
         let recent = audit.recent(3).unwrap();
         assert_eq!(recent.len(), 3);
-        // 最新が最初
         assert!(recent[0].id > recent[1].id);
     }
 
@@ -259,5 +267,96 @@ mod tests {
         let audit = AuditLog::new(store.conn());
         assert_eq!(audit.count().unwrap(), 0);
         assert!(audit.recent(10).unwrap().is_empty());
+    }
+
+    // --- StepOutcome テスト ---
+
+    #[test]
+    fn test_log_step_outcome_success() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        audit
+            .log(
+                Some("session-1"),
+                &AuditAction::StepOutcome {
+                    step_index: 0,
+                    outcome: "continue".to_string(),
+                    duration_ms: 1500,
+                    tools_used: vec!["shell".to_string(), "file_read".to_string()],
+                    consecutive_failures: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(audit.count().unwrap(), 1);
+        let entries = audit.recent(1).unwrap();
+        assert_eq!(entries[0].action_type, "step_outcome");
+    }
+
+    #[test]
+    fn test_log_step_outcome_aborted() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        audit
+            .log(
+                Some("session-1"),
+                &AuditAction::StepOutcome {
+                    step_index: 3,
+                    outcome: "aborted".to_string(),
+                    duration_ms: 500,
+                    tools_used: vec![],
+                    consecutive_failures: 3,
+                },
+            )
+            .unwrap();
+        let entries = audit.recent(1).unwrap();
+        let data: serde_json::Value = serde_json::from_str(&entries[0].action_data).unwrap();
+        assert_eq!(data["step_index"], 3);
+        assert_eq!(data["consecutive_failures"], 3);
+    }
+
+    #[test]
+    fn test_step_outcome_duration_recorded() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        audit
+            .log(
+                Some("s1"),
+                &AuditAction::StepOutcome {
+                    step_index: 0,
+                    outcome: "final_answer".to_string(),
+                    duration_ms: 2500,
+                    tools_used: vec![],
+                    consecutive_failures: 0,
+                },
+            )
+            .unwrap();
+        let entries = audit.recent(1).unwrap();
+        let data: serde_json::Value = serde_json::from_str(&entries[0].action_data).unwrap();
+        assert_eq!(data["duration_ms"], 2500);
+    }
+
+    #[test]
+    fn test_step_outcome_consecutive_failures_tracked() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        for i in 0..3 {
+            audit
+                .log(
+                    Some("s1"),
+                    &AuditAction::StepOutcome {
+                        step_index: i,
+                        outcome: "error".to_string(),
+                        duration_ms: 100,
+                        tools_used: vec![],
+                        consecutive_failures: i + 1,
+                    },
+                )
+                .unwrap();
+        }
+        let entries = audit.for_session("s1").unwrap();
+        assert_eq!(entries.len(), 3);
+        let last_data: serde_json::Value =
+            serde_json::from_str(&entries[2].action_data).unwrap();
+        assert_eq!(last_data["consecutive_failures"], 3);
     }
 }
