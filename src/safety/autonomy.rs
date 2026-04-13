@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AutonomyLevel { ReadOnly, Supervised, Full }
-impl Default for AutonomyLevel { fn default() -> Self { Self::Supervised } }
+pub enum AutonomyLevel { ReadOnly, #[default]
+Supervised, Full }
 impl AutonomyLevel {
     pub fn can_write(&self) -> bool { !matches!(self, Self::ReadOnly) }
     pub fn needs_confirmation(&self, is_destructive: bool) -> bool {

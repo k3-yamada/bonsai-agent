@@ -45,14 +45,16 @@ struct PromptRuleCandidate {
     description: String,
 }
 
-impl HypothesisGenerator {
-    pub fn new() -> Self {
+impl Default for HypothesisGenerator {
+    fn default() -> Self {
         Self {
             rules: default_prompt_rules(),
             current_index: 0,
         }
     }
+}
 
+impl HypothesisGenerator {
     /// 次の変異候補を生成（ラウンドロビン）
     pub fn next_mutation(&mut self, experiment_count: usize) -> Mutation {
         // 3種のmutationをローテーション:
@@ -130,7 +132,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
 
     match &mutation.apply {
         MutationAction::AddPromptRule(rule) => {
-            config.system_prompt.push_str("\n");
+            config.system_prompt.push('\n');
             config.system_prompt.push_str(rule);
         }
         MutationAction::RemovePromptRule(pattern) => {
@@ -195,7 +197,7 @@ pub fn run_experiment_loop(
     loop_config: &ExperimentLoopConfig,
 ) -> Result<Vec<Experiment>> {
     let suite = BenchmarkSuite::default_tasks();
-    let mut generator = HypothesisGenerator::new();
+    let mut generator = HypothesisGenerator::default();
     let mut experiments: Vec<Experiment> = Vec::new();
 
     // 1. ベースライン計測
@@ -215,11 +217,10 @@ pub fn run_experiment_loop(
             break;
         }
 
-        if let Some(max) = loop_config.max_experiments {
-            if experiment_count >= max {
+        if let Some(max) = loop_config.max_experiments
+            && experiment_count >= max {
                 eprintln!("[lab] 最大実験回数({max})に到達");
                 break;
-            }
         }
 
         // a. 仮説生成
@@ -262,22 +263,18 @@ pub fn run_experiment_loop(
 
         // f. ログ記録
         ExperimentLog::save_to_db(store.conn(), &exp)?;
-        if let Some(tsv) = &loop_config.tsv_path {
-            ExperimentLog::append_tsv(tsv, &exp)?;
-        }
+        if let Some(tsv) = &loop_config.tsv_path { ExperimentLog::append_tsv(tsv, &exp)?; }
 
         experiments.push(exp);
         experiment_count += 1;
 
         // g. Dreamer統合（N実験ごと）
-        if experiment_count % loop_config.dreamer_interval == 0 {
-            if let Ok(report) =
-                crate::memory::dreams::Dreamer::new(store.conn()).generate_report(7)
-            {
-                for insight in &report.insights {
-                    generator.add_insight_mutation(insight);
-                    eprintln!("[lab] Dreamer insight追加: {insight}");
-                }
+        if experiment_count % loop_config.dreamer_interval == 0
+            && let Ok(report) = crate::memory::dreams::Dreamer::new(store.conn()).generate_report(7)
+        {
+            for insight in &report.insights {
+                generator.add_insight_mutation(insight);
+                eprintln!("[lab] Dreamer insight追加: {insight}");
             }
         }
     }
@@ -292,7 +289,6 @@ pub fn run_experiment_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::benchmark::{BenchmarkResult, TaskScore};
 
     fn make_config() -> AgentConfig {
         AgentConfig {
@@ -355,36 +351,36 @@ mod tests {
 
     #[test]
     fn test_hypothesis_generator_rotation() {
-        let mut gen = HypothesisGenerator::new();
-        let m0 = gen.next_mutation(0);
+        let mut hyp_gen = HypothesisGenerator::default();
+        let m0 = hyp_gen.next_mutation(0);
         assert_eq!(m0.mutation_type, MutationType::PromptRule);
-        let m3 = gen.next_mutation(3);
+        let m3 = hyp_gen.next_mutation(3);
         assert_eq!(m3.mutation_type, MutationType::AgentParam);
         assert!(m3.detail.contains("+2"));
-        let m4 = gen.next_mutation(4);
+        let m4 = hyp_gen.next_mutation(4);
         assert_eq!(m4.mutation_type, MutationType::AgentParam);
         assert!(m4.detail.contains("-2"));
     }
 
     #[test]
     fn test_hypothesis_generator_cycles_rules() {
-        let mut gen = HypothesisGenerator::new();
-        let n_rules = gen.rules.len();
+        let mut hyp_gen = HypothesisGenerator::default();
+        let n_rules = hyp_gen.rules.len();
         // n_rules + 1回呼ぶとラップアラウンド
         for i in 0..=n_rules {
-            let _ = gen.next_mutation(i % 3); // PromptRuleのみのcycle
+            let _ = hyp_gen.next_mutation(i % 3); // PromptRuleのみのcycle
         }
         // current_indexがn_rules+1になっている
-        assert_eq!(gen.current_index, n_rules + 1);
+        assert_eq!(hyp_gen.current_index, n_rules + 1);
     }
 
     #[test]
     fn test_add_insight_mutation() {
-        let mut gen = HypothesisGenerator::new();
-        let initial_count = gen.rules.len();
-        gen.add_insight_mutation("新しい洞察: ツールの前に考えるべし");
-        assert_eq!(gen.rules.len(), initial_count + 1);
-        assert!(gen.rules.last().unwrap().rule.contains("新しい洞察"));
+        let mut hyp_gen = HypothesisGenerator::default();
+        let initial_count = hyp_gen.rules.len();
+        hyp_gen.add_insight_mutation("新しい洞察: ツールの前に考えるべし");
+        assert_eq!(hyp_gen.rules.len(), initial_count + 1);
+        assert!(hyp_gen.rules.last().unwrap().rule.contains("新しい洞察"));
     }
 
     #[test]

@@ -36,6 +36,9 @@ cli = []
 full = ["cli", "embeddings"]
 embeddings = ["dep:fastembed"]
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [dependencies.fastembed]
 version = "5"
 optional = true

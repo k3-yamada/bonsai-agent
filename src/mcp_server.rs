@@ -3,7 +3,7 @@ use crate::memory::store::MemoryStore;
 pub fn run_mcp_server(store: &MemoryStore) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    for line in stdin.lock().lines().flatten() {
+    for line in stdin.lock().lines().map_while(|r| r.ok()) {
         let req: serde_json::Value = match serde_json::from_str(&line) { Ok(v) => v, Err(_) => continue };
         let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");

@@ -261,6 +261,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
  "ureq 3.3.0",
  "uuid",
