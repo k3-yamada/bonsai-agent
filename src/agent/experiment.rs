@@ -225,7 +225,11 @@ pub fn run_experiment_loop(
 
         // a. 仮説生成
         let mutation = generator.next_mutation(experiment_count);
-        let experiment_id = format!("exp_{:04}", experiment_count);
+        let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let experiment_id = format!("exp_{ts}_{:04}", experiment_count);
         eprintln!(
             "[lab] 実験 {experiment_id}: {} — {}",
             mutation.mutation_type.as_str(),
