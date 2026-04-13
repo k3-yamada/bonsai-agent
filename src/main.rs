@@ -9,6 +9,7 @@ use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::AppConfig;
 use bonsai_agent::memory::store::MemoryStore;
+use bonsai_agent::runtime::cache::CachedBackend;
 use bonsai_agent::runtime::inference::MockLlmBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::arxiv::ArxivTool;
@@ -148,8 +149,10 @@ fn main() -> Result<()> {
             max_experiments: Some(cli.lab_experiments),
             dreamer_interval: 10,
         };
+        // --lab時のみキャッシュ有効化（ベンチマーク安定化）
+        let backend = CachedBackend::new(backend, 200);
         let experiments = run_experiment_loop(
-            &config, backend.as_ref(), &tools, &path_guard, &cancel, &store, &loop_config,
+            &config, &backend, &tools, &path_guard, &cancel, &store, &loop_config,
         )?;
         println!("\n実験完了: {}件", experiments.len());
         return Ok(());
