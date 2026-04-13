@@ -207,6 +207,8 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
 
 fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
     let store = MemoryStore::open(&get_db_path())?;
+    // create_backend()を使わない理由: labモックは"1024"を返す特殊応答が必要
+    // （ベンチマークタスクのキーワード評価で数値が必要なため）
     let backend: Box<dyn LlmBackend> = if ctx.mock {
         Box::new(MockLlmBackend::new(
             (0..10000).map(|_| "1024".to_string()).collect(),
@@ -325,7 +327,8 @@ fn handle_tasks_mode(store: &MemoryStore) -> Result<()> {
                 bonsai_agent::agent::task::TaskState::Pending => "待機",
                 bonsai_agent::agent::task::TaskState::InProgress => "実行中",
                 bonsai_agent::agent::task::TaskState::WaitingForHuman => "確認待ち",
-                _ => "?",
+                bonsai_agent::agent::task::TaskState::Completed => "完了",
+                bonsai_agent::agent::task::TaskState::Failed => "失敗",
             };
             println!("[{state}] {} (ステップ: {})", t.goal, t.step_log.len());
             println!("  ID: {}", &t.id[..8]);
@@ -378,15 +381,9 @@ fn handle_resume_mode(ctx: &AppContext, store: &MemoryStore, resume_id: &str) ->
     println!("メッセージ数: {}", session.messages.len());
     println!();
 
-    for msg in session
-        .messages
-        .iter()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
+    let msg_len = session.messages.len();
+    let msg_start = msg_len.saturating_sub(4);
+    for msg in &session.messages[msg_start..] {
         let role = match msg.role {
             bonsai_agent::agent::conversation::Role::User => "\x1b[36mあなた\x1b[0m",
             bonsai_agent::agent::conversation::Role::Assistant => "\x1b[32mBonsai\x1b[0m",
@@ -412,6 +409,7 @@ fn handle_exec_mode(ctx: &AppContext, store: &MemoryStore, input: &str) -> Resul
         &ctx.cancel,
         Some(store),
     )?;
+    // ストリーミング出力で正常回答は表示済み。[中断]のみ追加表示。
     if loop_result.answer.starts_with("[中断]") {
         println!("\n{}", loop_result.answer);
     }
@@ -438,56 +436,11 @@ fn run_repl_loop(
     ctx: &AppContext,
     store: &MemoryStore,
     backend: &dyn LlmBackend,
-    session: Option<&mut bonsai_agent::agent::conversation::Session>,
+    mut session: Option<&mut bonsai_agent::agent::conversation::Session>,
 ) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    // セッション再開モードの場合はrun_agent_loop_with_sessionを使う
-    if let Some(session) = session {
-        loop {
-            if ctx.cancel.is_cancelled() {
-                break;
-            }
-            print!("bonsai> ");
-            stdout.flush()?;
-            let mut input = String::new();
-            if stdin.lock().read_line(&mut input)? == 0 {
-                break;
-            }
-            let input = input.trim();
-            if input.is_empty() {
-                continue;
-            }
-            if input == "exit" || input == "quit" {
-                break;
-            }
-            session.add_message(Message::user(input));
-            match run_agent_loop_with_session(
-                session,
-                backend,
-                &ctx.tools,
-                &ctx.path_guard,
-                &ctx.config,
-                &ctx.cancel,
-                Some(store),
-            ) {
-                Ok(loop_result) => {
-                    eprint!("\x1b[0m");
-                    let result = &loop_result.answer;
-                    if result.starts_with("[中断]") {
-                        println!("\n\x1b[33m{result}\x1b[0m\n");
-                    } else {
-                        println!();
-                    }
-                }
-                Err(e) => eprintln!("\n\x1b[31mエラー: {e}\x1b[0m\n"),
-            }
-        }
-        return Ok(());
-    }
-
-    // 通常REPLモード
     loop {
         if ctx.cancel.is_cancelled() {
             break;
@@ -505,21 +458,38 @@ fn run_repl_loop(
         if input == "exit" || input == "quit" {
             break;
         }
-        eprint!("\x1b[2m");
-        match run_agent_loop(
-            input,
-            backend,
-            &ctx.tools,
-            &ctx.path_guard,
-            &ctx.config,
-            &ctx.cancel,
-            Some(store),
-        ) {
+
+        // セッション再開/通常モードで呼び出し関数を分岐
+        let result = if let Some(ref mut sess) = session {
+            sess.add_message(Message::user(input));
+            run_agent_loop_with_session(
+                sess,
+                backend,
+                &ctx.tools,
+                &ctx.path_guard,
+                &ctx.config,
+                &ctx.cancel,
+                Some(store),
+            )
+        } else {
+            eprint!("\x1b[2m");
+            run_agent_loop(
+                input,
+                backend,
+                &ctx.tools,
+                &ctx.path_guard,
+                &ctx.config,
+                &ctx.cancel,
+                Some(store),
+            )
+        };
+
+        match result {
             Ok(loop_result) => {
                 eprint!("\x1b[0m");
-                let result = &loop_result.answer;
-                if result.starts_with("[中断]") {
-                    println!("\n\x1b[33m{result}\x1b[0m\n");
+                let answer = &loop_result.answer;
+                if answer.starts_with("[中断]") {
+                    println!("\n\x1b[33m{answer}\x1b[0m\n");
                 } else {
                     println!();
                 }

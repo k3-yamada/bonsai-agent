@@ -419,7 +419,13 @@ fn inject_contextual_memories(
 
     // ハイブリッド検索: 関連メモリ
     let search = HybridSearch::new(s, embedder.as_ref());
-    let memories = search.search(task_context, 3).unwrap_or_default();
+    let memories = match search.search(task_context, 3) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[warn] メモリ検索エラー: {e}");
+            vec![]
+        }
+    };
     if !memories.is_empty() {
         let ctx: String = memories
             .iter()
@@ -431,7 +437,13 @@ fn inject_contextual_memories(
 
     // 類似経験
     let exp = ExperienceStore::new(s.conn());
-    let past = exp.find_similar(task_context, 3).unwrap_or_default();
+    let past = match exp.find_similar(task_context, 3) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[warn] 経験検索エラー: {e}");
+            vec![]
+        }
+    };
     if !past.is_empty() {
         let ctx: String = past
             .iter()
@@ -450,7 +462,13 @@ fn inject_contextual_memories(
 
     // 関連スキル
     let skills = SkillStore::new(s.conn());
-    let matching = skills.find_matching(task_context, 3).unwrap_or_default();
+    let matching = match skills.find_matching(task_context, 3) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[warn] スキル検索エラー: {e}");
+            vec![]
+        }
+    };
     if !matching.is_empty() {
         let ctx: String = matching
             .iter()
