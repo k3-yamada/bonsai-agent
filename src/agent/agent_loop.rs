@@ -2,11 +2,10 @@ use anyhow::Result;
 
 use crate::agent::conversation::{Message, ParsedOutput, Session};
 use crate::agent::error_recovery::{
-    decide_recovery, CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail,
-    RecoveryAction,
+    CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
 };
 use crate::agent::parse::parse_assistant_output;
-use crate::agent::validate::{validate_tool_call, PathGuard, Severity};
+use crate::agent::validate::{PathGuard, Severity, validate_tool_call};
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
 use crate::memory::search::HybridSearch;
@@ -200,7 +199,10 @@ pub fn execute_step(
         // サーキットブレーカーチェック
         if !circuit_breaker.is_available(&tool_call.name) {
             session.add_message(Message::tool(
-                format!("ツール '{}' は連続失敗のため一時停止中です。別の方法を試してください。", tool_call.name),
+                format!(
+                    "ツール '{}' は連続失敗のため一時停止中です。別の方法を試してください。",
+                    tool_call.name
+                ),
                 &tool_call.name,
             ));
             continue;
@@ -288,14 +290,25 @@ pub fn run_agent_loop(
     let mut session = Session::new();
     let now = chrono::Local::now();
     let date_str = now.format("%Y年%m月%d日(%A) %H:%M");
-    let system_with_date = format!("{}
+    let system_with_date = format!(
+        "{}
 
 ## 現在の日時
-現在は{}です。正確な現在時刻が必要な場合は shell ツールで date コマンドを実行してください。", config.system_prompt, date_str);
+現在は{}です。正確な現在時刻が必要な場合は shell ツールで date コマンドを実行してください。",
+        config.system_prompt, date_str
+    );
     session.add_message(Message::system(&system_with_date));
     session.add_message(Message::user(input));
 
-    run_agent_loop_with_session(&mut session, backend, tools, path_guard, config, cancel, store)
+    run_agent_loop_with_session(
+        &mut session,
+        backend,
+        tools,
+        path_guard,
+        config,
+        cancel,
+        store,
+    )
 }
 
 /// 既存セッションでエージェントループを実行（セッション再開用）
@@ -319,7 +332,10 @@ pub fn run_agent_loop_with_session(
 
     let secrets_filter = SecretsFilter::default();
 
-    let vault_path = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("bonsai-agent").join("vault");
+    let vault_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("bonsai-agent")
+        .join("vault");
     let vault = crate::knowledge::vault::Vault::new(&vault_path).ok();
     if let Some(ref v) = vault {
         let stocks = crate::knowledge::extractor::extract_stock(&task_context, &session.id);
@@ -358,9 +374,7 @@ pub fn run_agent_loop_with_session(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            session.add_message(Message::system(format!(
-                "過去の経験:\n{exp_context}"
-            )));
+            session.add_message(Message::system(format!("過去の経験:\n{exp_context}")));
         }
 
         // 関連スキルをプロンプトに注入
@@ -369,7 +383,12 @@ pub fn run_agent_loop_with_session(
         if !matching_skills.is_empty() {
             let skill_context: String = matching_skills
                 .iter()
-                .map(|sk| format!("- スキル「{}」: {} (ツール: {})", sk.name, sk.description, sk.tool_chain))
+                .map(|sk| {
+                    format!(
+                        "- スキル「{}」: {} (ツール: {})",
+                        sk.name, sk.description, sk.tool_chain
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             session.add_message(Message::system(format!(
@@ -474,7 +493,10 @@ pub fn run_agent_loop_with_session(
 
 /// ParsedOutputから回答テキストを構築
 fn build_answer(parsed: &ParsedOutput) -> String {
-    let raw = parsed.text.clone().unwrap_or_else(|| "(回答なし)".to_string());
+    let raw = parsed
+        .text
+        .clone()
+        .unwrap_or_else(|| "(回答なし)".to_string());
     clean_response(&raw)
 }
 
@@ -488,7 +510,9 @@ fn clean_response(text: &str) -> String {
         let first: String = chars[..half].iter().collect();
         let second: String = chars[half..].iter().collect();
         let check: String = first.chars().take(30).collect();
-        if second.contains(&check) { return first.trim_end().to_string(); }
+        if second.contains(&check) {
+            return first.trim_end().to_string();
+        }
     }
     joined
 }
@@ -504,25 +528,45 @@ mod tests {
     /// テスト用のエコーツール
     struct EchoTool;
     impl Tool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "入力をそのまま返す" }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "入力をそのまま返す"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}})
         }
-        fn permission(&self) -> Permission { Permission::Auto }
+        fn permission(&self) -> Permission {
+            Permission::Auto
+        }
         fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-            let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("(empty)");
-            Ok(ToolResult { output: text.to_string(), success: true })
+            let text = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(empty)");
+            Ok(ToolResult {
+                output: text.to_string(),
+                success: true,
+            })
         }
     }
 
     /// テスト用の失敗ツール
     struct FailTool;
     impl Tool for FailTool {
-        fn name(&self) -> &str { "fail" }
-        fn description(&self) -> &str { "常に失敗する" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
-        fn permission(&self) -> Permission { Permission::Auto }
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn description(&self) -> &str {
+            "常に失敗する"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn permission(&self) -> Permission {
+            Permission::Auto
+        }
         fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
             anyhow::bail!("意図的なエラー")
         }
@@ -544,7 +588,16 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("天気は？", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
+        let result = run_agent_loop(
+            "天気は？",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        )
+        .unwrap();
         assert!(result.answer.contains("晴れ"));
         assert_eq!(result.iterations_used, 1);
         assert!(result.tools_called.is_empty());
@@ -562,7 +615,16 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("echo test", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
+        let result = run_agent_loop(
+            "echo test",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        )
+        .unwrap();
         assert!(result.answer.contains("hello"));
         assert_eq!(result.iterations_used, 2);
         assert!(result.tools_called.contains(&"echo".to_string()));
@@ -573,15 +635,32 @@ mod tests {
     fn test_max_iterations() {
         // 常にツール呼び出しを返すモック（終了しない）
         let responses: Vec<String> = (0..15)
-            .map(|i| format!(r#"<tool_call>{{"name":"echo","arguments":{{"text":"iter{}"}}}}</tool_call>"#, i))
+            .map(|i| {
+                format!(
+                    r#"<tool_call>{{"name":"echo","arguments":{{"text":"iter{}"}}}}</tool_call>"#,
+                    i
+                )
+            })
             .collect();
         let mock = MockLlmBackend::new(responses);
         let tools = test_registry();
         let guard = PathGuard::default_deny_list();
-        let config = AgentConfig { max_iterations: 3, ..Default::default() };
+        let config = AgentConfig {
+            max_iterations: 3,
+            ..Default::default()
+        };
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
+        let result = run_agent_loop(
+            "loop",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        )
+        .unwrap();
         assert!(result.answer.contains("中断"));
         assert_eq!(result.iterations_used, 3);
     }
@@ -596,7 +675,15 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = run_agent_loop("test", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>);
+        let result = run_agent_loop(
+            "test",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        );
         // MockLlmBackend::generateがキャンセルエラーを返す
         assert!(result.is_err() || result.unwrap().answer.contains("キャンセル"));
     }
@@ -613,7 +700,16 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("hack", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
+        let result = run_agent_loop(
+            "hack",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        )
+        .unwrap();
         assert!(result.answer.contains("了解"));
     }
 
@@ -629,7 +725,16 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("fail", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
+        let result = run_agent_loop(
+            "fail",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        )
+        .unwrap();
         assert!(result.answer.contains("エラー"));
     }
 
@@ -643,7 +748,16 @@ mod tests {
         let config = AgentConfig::default();
         let cancel = CancellationToken::new();
 
-        run_agent_loop("test query", &mock, &tools, &guard, &config, &cancel, Some(&store)).unwrap();
+        run_agent_loop(
+            "test query",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            Some(&store),
+        )
+        .unwrap();
 
         let exp = ExperienceStore::new(store.conn());
         let experiences = exp.find_similar("test", 10).unwrap();
@@ -659,10 +773,22 @@ mod tests {
         let mock = MockLlmBackend::new(responses);
         let tools = test_registry();
         let guard = PathGuard::default_deny_list();
-        let config = AgentConfig { max_iterations: 10, ..Default::default() };
+        let config = AgentConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
         let cancel = CancellationToken::new();
 
-        let result = run_agent_loop("loop", &mock, &tools, &guard, &config, &cancel, None::<&MemoryStore>).unwrap();
+        let result = run_agent_loop(
+            "loop",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            None::<&MemoryStore>,
+        )
+        .unwrap();
         assert!(result.answer.contains("中断"));
     }
 }

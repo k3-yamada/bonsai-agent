@@ -34,7 +34,7 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"\bmkfs\b",
         r">\s*/dev/",
         r"\bdd\b.*\bof=/dev/",
-        r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",  // フォーク爆弾
+        r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;", // フォーク爆弾
     ]
     .iter()
     .map(|p| Regex::new(p).expect("危険パターンのコンパイルに失敗"))
@@ -239,10 +239,7 @@ mod tests {
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
         // 危険パターンはWarn（ツール自体は有効なのでis_valid=true、ただし警告あり）
         assert!(result.is_valid);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.severity == Severity::Warn));
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Warn));
     }
 
     // テスト5: 危険コマンド（sudo）
@@ -253,10 +250,12 @@ mod tests {
             arguments: serde_json::json!({"command": "sudo apt install vim"}),
         };
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.message.contains("危険なコマンドパターン")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.message.contains("危険なコマンドパターン"))
+        );
     }
 
     // テスト6: 安全なパス
@@ -318,9 +317,6 @@ mod tests {
             arguments: serde_json::json!({"command": ":(){ :|:& };"}),
         };
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.severity == Severity::Warn));
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Warn));
     }
 }

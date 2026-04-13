@@ -117,11 +117,9 @@ impl Tool for PluginTool {
 
     fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
         let expanded = self.expand_command(&args);
-        let result = self.sandbox.execute(
-            "sh",
-            &["-c", &expanded],
-            &ResourceLimits::default(),
-        )?;
+        let result = self
+            .sandbox
+            .execute("sh", &["-c", &expanded], &ResourceLimits::default())?;
 
         let success = result.success();
         let output = if result.stdout.is_empty() {

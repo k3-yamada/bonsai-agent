@@ -75,7 +75,15 @@ impl FileWriteTool {
                 .args(["add", path])
                 .output();
             let _ = std::process::Command::new("git")
-                .args(["commit", "-m", &format!("bonsai: snapshot before edit {}", file_path.file_name().unwrap_or_default().to_string_lossy()), "--allow-empty"])
+                .args([
+                    "commit",
+                    "-m",
+                    &format!(
+                        "bonsai: snapshot before edit {}",
+                        file_path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    "--allow-empty",
+                ])
                 .output();
             return Some(());
         }
@@ -229,7 +237,10 @@ mod tests {
 
     #[test]
     fn test_write_creates_parent_dirs() {
-        let path = format!("/tmp/bonsai-test-nested-{}/sub/file.txt", uuid::Uuid::new_v4());
+        let path = format!(
+            "/tmp/bonsai-test-nested-{}/sub/file.txt",
+            uuid::Uuid::new_v4()
+        );
         let tool = FileWriteTool;
 
         let result = tool
@@ -285,9 +296,7 @@ mod tests {
     #[test]
     fn test_write_no_content_params() {
         let tool = FileWriteTool;
-        let result = tool
-            .call(serde_json::json!({"path": "/tmp/x"}))
-            .unwrap();
+        let result = tool.call(serde_json::json!({"path": "/tmp/x"})).unwrap();
         assert!(!result.success);
     }
 

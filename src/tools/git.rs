@@ -10,9 +10,7 @@ pub struct GitTool;
 
 impl GitTool {
     fn run_git(args: &[&str]) -> Result<ToolResult> {
-        let output = Command::new("git")
-            .args(args)
-            .output()?;
+        let output = Command::new("git").args(args).output()?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -143,9 +141,7 @@ mod tests {
     #[test]
     fn test_git_log() {
         let tool = GitTool;
-        let result = tool
-            .call(serde_json::json!({"subcommand": "log"}))
-            .unwrap();
+        let result = tool.call(serde_json::json!({"subcommand": "log"})).unwrap();
         assert!(result.success);
     }
 

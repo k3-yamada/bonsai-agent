@@ -65,7 +65,9 @@ impl Message {
     }
 
     pub fn has_image(&self) -> bool {
-        self.attachments.iter().any(|a| matches!(a, Attachment::Image(_)))
+        self.attachments
+            .iter()
+            .any(|a| matches!(a, Attachment::Image(_)))
     }
 }
 

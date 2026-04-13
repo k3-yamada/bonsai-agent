@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// 経験の種類
@@ -114,7 +114,8 @@ impl<'a> ExperienceStore<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 特定ツールの失敗パターンを集計
@@ -131,7 +132,8 @@ impl<'a> ExperienceStore<'a> {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 成功経験の数をカウント
@@ -207,8 +209,10 @@ mod tests {
     fn test_find_similar() {
         let store = test_conn();
         let exp = ExperienceStore::new(store.conn());
-        exp.record(&success_params("list files", "shell: ls")).unwrap();
-        exp.record(&success_params("create directory", "shell: mkdir test")).unwrap();
+        exp.record(&success_params("list files", "shell: ls"))
+            .unwrap();
+        exp.record(&success_params("create directory", "shell: mkdir test"))
+            .unwrap();
 
         let results = exp.find_similar("list", 10).unwrap();
         assert_eq!(results.len(), 1);
@@ -266,7 +270,8 @@ mod tests {
             tool_name: Some("shell"),
             error_type: None,
             error_detail: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(exp.success_count("shell").unwrap(), 2);
     }

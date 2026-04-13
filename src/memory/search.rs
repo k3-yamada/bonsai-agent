@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::memory::store::{MemoryRecord, MemoryStore};
-use crate::runtime::embedder::{cosine_similarity, Embedder};
+use crate::runtime::embedder::{Embedder, cosine_similarity};
 
 /// ハイブリッド検索結果
 #[derive(Debug, Clone)]
@@ -128,7 +128,11 @@ impl<'a> HybridSearch<'a> {
             })
             .collect();
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         results
     }
@@ -141,9 +145,23 @@ mod tests {
 
     fn setup() -> (MemoryStore, SimpleEmbedder) {
         let store = MemoryStore::in_memory().unwrap();
-        store.save_memory("Rust is a fast programming language", "fact", &["rust".into()]).unwrap();
-        store.save_memory("Python is great for data science", "fact", &["python".into()]).unwrap();
-        store.save_memory("JavaScript runs in browsers", "fact", &["js".into()]).unwrap();
+        store
+            .save_memory(
+                "Rust is a fast programming language",
+                "fact",
+                &["rust".into()],
+            )
+            .unwrap();
+        store
+            .save_memory(
+                "Python is great for data science",
+                "fact",
+                &["python".into()],
+            )
+            .unwrap();
+        store
+            .save_memory("JavaScript runs in browsers", "fact", &["js".into()])
+            .unwrap();
         (store, SimpleEmbedder::default())
     }
 

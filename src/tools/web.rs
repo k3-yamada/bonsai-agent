@@ -96,7 +96,11 @@ impl Tool for WebFetchTool {
                 let text = strip_html_tags(&body);
                 // 長すぎる場合は切り詰め
                 let truncated = if text.len() > 4000 {
-                    format!("{}...\n\n（{}文字中、最初の4000文字を表示）", &text[..4000], text.len())
+                    format!(
+                        "{}...\n\n（{}文字中、最初の4000文字を表示）",
+                        &text[..4000],
+                        text.len()
+                    )
                 } else {
                     text
                 };

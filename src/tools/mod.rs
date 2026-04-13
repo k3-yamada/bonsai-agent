@@ -190,26 +190,14 @@ mod tests {
             "shell",
             "シェルコマンドを実行する",
         )));
-        reg.register(Box::new(DummyTool::new(
-            "file_read",
-            "ファイルを読み込む",
-        )));
-        reg.register(Box::new(DummyTool::new(
-            "file_write",
-            "ファイルに書き込む",
-        )));
+        reg.register(Box::new(DummyTool::new("file_read", "ファイルを読み込む")));
+        reg.register(Box::new(DummyTool::new("file_write", "ファイルに書き込む")));
         reg.register(Box::new(DummyTool::new(
             "memory_search",
             "メモリを検索する",
         )));
-        reg.register(Box::new(DummyTool::new(
-            "git",
-            "Gitリポジトリを操作する",
-        )));
-        reg.register(Box::new(DummyTool::new(
-            "web_search",
-            "Webを検索する",
-        )));
+        reg.register(Box::new(DummyTool::new("git", "Gitリポジトリを操作する")));
+        reg.register(Box::new(DummyTool::new("web_search", "Webを検索する")));
         reg
     }
 

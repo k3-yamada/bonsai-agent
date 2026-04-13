@@ -103,9 +103,7 @@ mod tests {
     #[test]
     fn test_shell_failing_command() {
         let tool = ShellTool::new();
-        let result = tool
-            .call(serde_json::json!({"command": "exit 1"}))
-            .unwrap();
+        let result = tool.call(serde_json::json!({"command": "exit 1"})).unwrap();
         assert!(!result.success);
     }
 
@@ -125,9 +123,7 @@ mod tests {
     #[test]
     fn test_shell_pwd() {
         let tool = ShellTool::new();
-        let result = tool
-            .call(serde_json::json!({"command": "pwd"}))
-            .unwrap();
+        let result = tool.call(serde_json::json!({"command": "pwd"})).unwrap();
         assert!(result.success);
         assert!(result.output.starts_with('/'));
     }

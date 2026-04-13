@@ -30,7 +30,10 @@ impl Default for SimpleEmbedder {
 
 impl Embedder for SimpleEmbedder {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        Ok(texts.iter().map(|text| hash_embed(text, self.dim)).collect())
+        Ok(texts
+            .iter()
+            .map(|text| hash_embed(text, self.dim))
+            .collect())
     }
 
     fn dim(&self) -> usize {
@@ -69,7 +72,10 @@ impl FastEmbedder {
             model_name: fastembed::EmbeddingModel::AllMiniLML6V2,
             ..Default::default()
         })?;
-        Ok(Self { model, dim: DEFAULT_EMBEDDING_DIM })
+        Ok(Self {
+            model,
+            dim: DEFAULT_EMBEDDING_DIM,
+        })
     }
 }
 

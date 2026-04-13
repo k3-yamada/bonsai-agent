@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// スキル: 成功したツールチェーンのテンプレート
@@ -8,8 +8,8 @@ pub struct Skill {
     pub id: i64,
     pub name: String,
     pub description: String,
-    pub tool_chain: String,          // JSON: ツール呼び出しの順序
-    pub trigger_patterns: String,    // JSON: 発動パターン
+    pub tool_chain: String,       // JSON: ツール呼び出しの順序
+    pub trigger_patterns: String, // JSON: 発動パターン
     pub success_count: i64,
     pub created_at: String,
 }
@@ -25,15 +25,24 @@ impl<'a> SkillStore<'a> {
     }
 
     /// スキルを保存/更新
-    pub fn save(&self, name: &str, description: &str, tool_chain: &str, trigger_patterns: &str) -> Result<i64> {
+    pub fn save(
+        &self,
+        name: &str,
+        description: &str,
+        tool_chain: &str,
+        trigger_patterns: &str,
+    ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
 
         // 既存スキルがあれば更新
-        let existing: Option<i64> = self.conn.query_row(
-            "SELECT id FROM skills WHERE name = ?1",
-            params![name],
-            |row| row.get(0),
-        ).ok();
+        let existing: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM skills WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .ok();
 
         if let Some(id) = existing {
             self.conn.execute(
@@ -74,7 +83,8 @@ impl<'a> SkillStore<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 全スキルを取得
@@ -96,7 +106,8 @@ impl<'a> SkillStore<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 経験からスキルへの昇格チェック
@@ -155,8 +166,8 @@ impl<'a> SkillStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::store::MemoryStore;
     use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
+    use crate::memory::store::MemoryStore;
 
     fn test_store() -> MemoryStore {
         MemoryStore::in_memory().unwrap()
@@ -166,7 +177,9 @@ mod tests {
     fn test_save_new_skill() {
         let store = test_store();
         let skills = SkillStore::new(store.conn());
-        let id = skills.save("list_files", "ファイル一覧", "shell: ls -la", "[]").unwrap();
+        let id = skills
+            .save("list_files", "ファイル一覧", "shell: ls -la", "[]")
+            .unwrap();
         assert!(id > 0);
     }
 
@@ -175,7 +188,9 @@ mod tests {
         let store = test_store();
         let skills = SkillStore::new(store.conn());
         let id1 = skills.save("list_files", "v1", "shell: ls", "[]").unwrap();
-        let id2 = skills.save("list_files", "v2", "shell: ls -la", "[]").unwrap();
+        let id2 = skills
+            .save("list_files", "v2", "shell: ls -la", "[]")
+            .unwrap();
         assert_eq!(id1, id2); // 同じID
 
         let all = skills.list_all().unwrap();
@@ -187,8 +202,12 @@ mod tests {
     fn test_find_matching() {
         let store = test_store();
         let skills = SkillStore::new(store.conn());
-        skills.save("list_files", "ファイル一覧を表示", "shell: ls", "[]").unwrap();
-        skills.save("read_file", "ファイルを読む", "file_read: path", "[]").unwrap();
+        skills
+            .save("list_files", "ファイル一覧を表示", "shell: ls", "[]")
+            .unwrap();
+        skills
+            .save("read_file", "ファイルを読む", "file_read: path", "[]")
+            .unwrap();
 
         let found = skills.find_matching("list", 10).unwrap();
         assert_eq!(found.len(), 1);
@@ -220,7 +239,8 @@ mod tests {
                 tool_name: Some("shell"),
                 error_type: None,
                 error_detail: None,
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         let skills = SkillStore::new(store.conn());
@@ -245,7 +265,8 @@ mod tests {
             tool_name: Some("shell"),
             error_type: None,
             error_detail: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         let skills = SkillStore::new(store.conn());
         let promoted = skills.promote_from_experiences(store.conn(), 3).unwrap();

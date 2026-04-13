@@ -3,8 +3,9 @@ use std::io::{self, BufRead, Write};
 use anyhow::Result;
 use clap::Parser;
 
-use bonsai_agent::agent::agent_loop::{run_agent_loop, run_agent_loop_with_session, AgentConfig};
+use bonsai_agent::agent::agent_loop::{AgentConfig, run_agent_loop, run_agent_loop_with_session};
 use bonsai_agent::agent::conversation::Message;
+use bonsai_agent::agent::experiment::{ExperimentLoopConfig, run_experiment_loop};
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::AppConfig;
@@ -12,13 +13,12 @@ use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::cache::CachedBackend;
 use bonsai_agent::runtime::inference::MockLlmBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
+use bonsai_agent::tools::ToolRegistry;
 use bonsai_agent::tools::arxiv::ArxivTool;
 use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
 use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
-use bonsai_agent::agent::experiment::{run_experiment_loop, ExperimentLoopConfig};
-use bonsai_agent::tools::ToolRegistry;
 
 #[derive(Parser)]
 #[command(name = "bonsai-agent", version, about = "Bonsai-8B自律型エージェント")]
@@ -99,7 +99,9 @@ fn main() -> Result<()> {
 
     // ツールレジストリ
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(ShellTool::new().with_timeout(app_config.agent.shell_timeout_secs)));
+    tools.register(Box::new(
+        ShellTool::new().with_timeout(app_config.agent.shell_timeout_secs),
+    ));
     tools.register(Box::new(FileReadTool));
     tools.register(Box::new(FileWriteTool));
     tools.register(Box::new(GitTool));
@@ -152,7 +154,13 @@ fn main() -> Result<()> {
         // --lab時のみキャッシュ有効化（ベンチマーク安定化）
         let backend = CachedBackend::new(backend, 200);
         let experiments = run_experiment_loop(
-            &config, &backend, &tools, &path_guard, &cancel, &store, &loop_config,
+            &config,
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            &store,
+            &loop_config,
         )?;
         println!("\n実験完了: {}件", experiments.len());
         return Ok(());
@@ -167,7 +175,14 @@ fn main() -> Result<()> {
             Err(e) => eprintln!("収集エラー: {e}"),
         }
         match engine.apply_improvements() {
-            Ok(applied) => { for a in &applied { println!("  改善: {a}"); } if applied.is_empty() { println!("  (新しい改善なし)"); } }
+            Ok(applied) => {
+                for a in &applied {
+                    println!("  改善: {a}");
+                }
+                if applied.is_empty() {
+                    println!("  (新しい改善なし)");
+                }
+            }
             Err(e) => eprintln!("改善エラー: {e}"),
         }
 
@@ -193,8 +208,13 @@ fn main() -> Result<()> {
     }
 
     if cli.vault {
-        let vp = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from(".")).join("bonsai-agent").join("vault");
-        if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(&vp) { println!("{}", v.summary().unwrap_or_default()); }
+        let vp = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("bonsai-agent")
+            .join("vault");
+        if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(&vp) {
+            println!("{}", v.summary().unwrap_or_default());
+        }
         return Ok(());
     }
 
@@ -207,18 +227,28 @@ fn main() -> Result<()> {
         if sessions.is_empty() {
             println!("セッションはありません。");
         } else {
-            let header = format!("{id:<38} {date:<22} {msg}", id = "ID", date = "日時", msg = "内容");
+            let header = format!(
+                "{id:<38} {date:<22} {msg}",
+                id = "ID",
+                date = "日時",
+                msg = "内容"
+            );
             println!("{header}");
             let sep = "-".repeat(80);
             println!("{sep}");
             for s in &sessions {
-                let preview: String = s.first_user_message
+                let preview: String = s
+                    .first_user_message
                     .as_deref()
                     .unwrap_or("(空)")
                     .chars()
                     .take(30)
                     .collect();
-                let date = if s.created_at.len() >= 19 { &s.created_at[..19] } else { &s.created_at };
+                let date = if s.created_at.len() >= 19 {
+                    &s.created_at[..19]
+                } else {
+                    &s.created_at
+                };
                 println!("{id:<38} {date:<22} {preview}", id = s.id);
             }
         }
@@ -255,7 +285,11 @@ fn main() -> Result<()> {
             println!("監査ログはありません。");
         } else {
             for entry in entries.iter().rev() {
-                let ts = if entry.timestamp.len() >= 19 { &entry.timestamp[..19] } else { &entry.timestamp };
+                let ts = if entry.timestamp.len() >= 19 {
+                    &entry.timestamp[..19]
+                } else {
+                    &entry.timestamp
+                };
                 let sid = entry.session_id.as_deref().unwrap_or("-");
                 println!(
                     "{ts}  [{typ}]  session={sid}",
@@ -271,10 +305,14 @@ fn main() -> Result<()> {
     // セッション再開
     if let Some(resume_id) = &cli.resume {
         let sessions = store.list_sessions(100)?;
-        let matched = sessions.iter().find(|s| s.id.starts_with(resume_id.as_str()));
+        let matched = sessions
+            .iter()
+            .find(|s| s.id.starts_with(resume_id.as_str()));
 
         let Some(matched) = matched else {
-            eprintln!("セッション '{resume_id}' が見つかりません。--sessions で一覧を確認してください。");
+            eprintln!(
+                "セッション '{resume_id}' が見つかりません。--sessions で一覧を確認してください。"
+            );
             std::process::exit(1);
         };
 
@@ -288,7 +326,15 @@ fn main() -> Result<()> {
         println!();
 
         // 直近のメッセージを表示
-        for msg in session.messages.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+        for msg in session
+            .messages
+            .iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             let role = match msg.role {
                 bonsai_agent::agent::conversation::Role::User => "\x1b[36mあなた\x1b[0m",
                 bonsai_agent::agent::conversation::Role::Assistant => "\x1b[32mBonsai\x1b[0m",
@@ -301,7 +347,9 @@ fn main() -> Result<()> {
 
         let backend: Box<dyn bonsai_agent::runtime::inference::LlmBackend> = if cli.mock {
             Box::new(MockLlmBackend::new(
-                (0..1000).map(|_| "モックモードです。".to_string()).collect(),
+                (0..1000)
+                    .map(|_| "モックモードです。".to_string())
+                    .collect(),
             ))
         } else {
             let b = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
@@ -315,18 +363,32 @@ fn main() -> Result<()> {
         let stdin = io::stdin();
         let mut stdout = io::stdout();
         loop {
-            if cancel.is_cancelled() { break; }
+            if cancel.is_cancelled() {
+                break;
+            }
             print!("bonsai> ");
             stdout.flush()?;
             let mut input = String::new();
-            if stdin.lock().read_line(&mut input)? == 0 { break; }
+            if stdin.lock().read_line(&mut input)? == 0 {
+                break;
+            }
             let input = input.trim();
-            if input.is_empty() { continue; }
-            if input == "exit" || input == "quit" { break; }
+            if input.is_empty() {
+                continue;
+            }
+            if input == "exit" || input == "quit" {
+                break;
+            }
 
             session.add_message(Message::user(input));
             match run_agent_loop_with_session(
-                &mut session, backend.as_ref(), &tools, &path_guard, &config, &cancel, Some(&store),
+                &mut session,
+                backend.as_ref(),
+                &tools,
+                &path_guard,
+                &config,
+                &cancel,
+                Some(&store),
             ) {
                 Ok(loop_result) => {
                     eprint!("\x1b[0m");
@@ -347,10 +409,26 @@ fn main() -> Result<()> {
         // 単発実行モード
         let loop_result = if cli.mock {
             let mock = MockLlmBackend::single("モックモードです。実際のLLMは使用していません。");
-            run_agent_loop(input, &mock, &tools, &path_guard, &config, &cancel, Some(&store))?
+            run_agent_loop(
+                input,
+                &mock,
+                &tools,
+                &path_guard,
+                &config,
+                &cancel,
+                Some(&store),
+            )?
         } else {
             let backend = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
-            run_agent_loop(input, &backend, &tools, &path_guard, &config, &cancel, Some(&store))?
+            run_agent_loop(
+                input,
+                &backend,
+                &tools,
+                &path_guard,
+                &config,
+                &cancel,
+                Some(&store),
+            )?
         };
         // ストリーミング出力で既に表示済みなので、結果が中断の場合のみ表示
         if loop_result.answer.starts_with("[中断]") {
@@ -374,7 +452,9 @@ fn main() -> Result<()> {
             let backend = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
             if !backend.is_healthy() {
                 eprintln!("警告: llama-server ({server_url}) に接続できません。");
-                eprintln!("--mock フラグでモックモードを使用するか、llama-serverを起動してください。");
+                eprintln!(
+                    "--mock フラグでモックモードを使用するか、llama-serverを起動してください。"
+                );
                 std::process::exit(1);
             }
             println!("[接続済み] {server_url}");
@@ -459,7 +539,10 @@ fn ctrlc_handler(cancel: CancellationToken) {
 /// Ctrl+Cシグナルを受け取るチャネル（簡易実装）
 fn ctrlc_channel(tx: std::sync::mpsc::Sender<()>) {
     unsafe {
-        libc::signal(libc::SIGINT, sigint_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            sigint_handler as *const () as libc::sighandler_t,
+        );
     }
     // グローバル変数でチャネル送信を管理（簡易実装）
     SIGINT_TX.lock().unwrap().replace(tx);

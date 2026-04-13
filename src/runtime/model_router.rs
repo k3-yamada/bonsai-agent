@@ -34,8 +34,8 @@ impl TaskContext {
 /// モデルルーター設定
 pub struct RouterConfig {
     pub enabled: bool,
-    pub min_free_ram_e4b: u64,   // E4Bに必要な空きRAM（バイト）
-    pub min_free_ram_e2b: u64,   // E2Bに必要な空きRAM（バイト）
+    pub min_free_ram_e4b: u64, // E4Bに必要な空きRAM（バイト）
+    pub min_free_ram_e2b: u64, // E2Bに必要な空きRAM（バイト）
     pub prefer_bonsai_for_tools: bool,
 }
 
@@ -205,7 +205,8 @@ mod tests {
     #[test]
     fn test_task_context_with_image() {
         let mut msg = Message::user("画像");
-        msg.attachments.push(crate::agent::conversation::Attachment::Image(vec![0xFF]));
+        msg.attachments
+            .push(crate::agent::conversation::Attachment::Image(vec![0xFF]));
         let ctx = TaskContext::from_messages(&[msg], false);
         assert!(ctx.has_image);
     }

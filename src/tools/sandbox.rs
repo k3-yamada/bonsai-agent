@@ -37,24 +37,14 @@ impl ExecResult {
 
 /// サンドボックスの抽象化。初期はDirectSandbox、将来ContainerSandbox等に差替可能。
 pub trait Sandbox: Send + Sync {
-    fn execute(
-        &self,
-        command: &str,
-        args: &[&str],
-        limits: &ResourceLimits,
-    ) -> Result<ExecResult>;
+    fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult>;
 }
 
 /// 直接実行サンドボックス（macOS向け、ulimit付き）
 pub struct DirectSandbox;
 
 impl Sandbox for DirectSandbox {
-    fn execute(
-        &self,
-        command: &str,
-        args: &[&str],
-        limits: &ResourceLimits,
-    ) -> Result<ExecResult> {
+    fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult> {
         // macOSではulimitをシェル経由で適用
         let full_command = if args.is_empty() {
             command.to_string()
@@ -106,10 +96,7 @@ impl Sandbox for DirectSandbox {
                 let _ = child.wait();
                 Ok(ExecResult {
                     stdout: String::new(),
-                    stderr: format!(
-                        "タイムアウト: {}秒を超過しました",
-                        limits.timeout.as_secs()
-                    ),
+                    stderr: format!("タイムアウト: {}秒を超過しました", limits.timeout.as_secs()),
                     exit_code: -1,
                     timed_out: true,
                 })
@@ -153,10 +140,7 @@ impl ChildExt for std::process::Child {
 }
 
 /// 出力を読み取り、max_bytesで切り詰める
-fn read_output(
-    pipe: Option<impl std::io::Read>,
-    max_bytes: usize,
-) -> String {
+fn read_output(pipe: Option<impl std::io::Read>, max_bytes: usize) -> String {
     let Some(mut pipe) = pipe else {
         return String::new();
     };

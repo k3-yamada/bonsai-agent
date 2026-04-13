@@ -32,18 +32,16 @@ impl LlamaServerBackend {
     }
 
     /// メッセージをOpenAI互換のJSON形式に変換
-    fn build_request_body(
-        &self,
-        messages: &[Message],
-        tools: &[ToolSchema],
-    ) -> serde_json::Value {
+    fn build_request_body(&self, messages: &[Message], tools: &[ToolSchema]) -> serde_json::Value {
         let mut msgs: Vec<serde_json::Value> = Vec::new();
 
         // ツールスキーマをシステムプロンプトに注入
         if !tools.is_empty() {
             let tool_prompt = format_tool_schemas(tools);
             // 最初のシステムメッセージに追加、またはなければ新規作成
-            let has_system = messages.iter().any(|m| matches!(m.role, crate::agent::conversation::Role::System));
+            let has_system = messages
+                .iter()
+                .any(|m| matches!(m.role, crate::agent::conversation::Role::System));
             if !has_system {
                 msgs.push(serde_json::json!({
                     "role": "system",
@@ -71,7 +69,10 @@ impl LlamaServerBackend {
             if matches!(msg.role, crate::agent::conversation::Role::Tool)
                 && let Some(id) = &msg.tool_call_id
             {
-                content = format!("<tool_response>{}</tool_response>\nツール '{id}' の結果:\n{content}", "");
+                content = format!(
+                    "<tool_response>{}</tool_response>\nツール '{id}' の結果:\n{content}",
+                    ""
+                );
             }
 
             msgs.push(serde_json::json!({
@@ -126,7 +127,8 @@ impl LlmBackend for LlamaServerBackend {
             .to_string();
 
         let prompt_tokens = response["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as usize;
-        let completion_tokens = response["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize;
+        let completion_tokens =
+            response["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize;
 
         // ストリーミングコールバック（非ストリームモードでは全文を一度に送信）
         on_token(&text);
@@ -151,11 +153,7 @@ pub struct LlamaServerProcess {
 
 impl LlamaServerProcess {
     /// llama-serverを子プロセスとして起動
-    pub fn spawn(
-        server_binary: &str,
-        model_path: &Path,
-        context_length: u32,
-    ) -> Result<Self> {
+    pub fn spawn(server_binary: &str, model_path: &Path, context_length: u32) -> Result<Self> {
         let port = find_free_port()?;
 
         let child = Command::new(server_binary)
@@ -193,7 +191,10 @@ impl LlamaServerProcess {
 
         loop {
             if start.elapsed() > timeout {
-                anyhow::bail!("llama-serverの起動がタイムアウト（{}秒）", timeout.as_secs());
+                anyhow::bail!(
+                    "llama-serverの起動がタイムアウト（{}秒）",
+                    timeout.as_secs()
+                );
             }
             if ureq::get(&url).call().is_ok() {
                 return Ok(());
@@ -223,10 +224,13 @@ fn find_free_port() -> Result<u16> {
 
 /// ツールスキーマをプロンプト用テキストにフォーマット
 fn format_tool_schemas(tools: &[ToolSchema]) -> String {
-    let mut out = String::from("# 使用可能なツール\n\nツールを呼び出すには以下のXML形式を使用してください:\n<tool_call>{\"name\": \"ツール名\", \"arguments\": {パラメータ}}</tool_call>\n\n");
+    let mut out = String::from(
+        "# 使用可能なツール\n\nツールを呼び出すには以下のXML形式を使用してください:\n<tool_call>{\"name\": \"ツール名\", \"arguments\": {パラメータ}}</tool_call>\n\n",
+    );
 
     for tool in tools {
-        out.push_str(&format!("## {}\n{}\nパラメータ: {}\n\n",
+        out.push_str(&format!(
+            "## {}\n{}\nパラメータ: {}\n\n",
             tool.name,
             tool.description,
             serde_json::to_string(&tool.parameters).unwrap_or_default(),

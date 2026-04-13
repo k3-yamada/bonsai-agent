@@ -127,10 +127,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_schema_version_is_positive() { assert!(SCHEMA_VERSION > 0); }
+    fn test_schema_version_is_positive() {
+        assert!(SCHEMA_VERSION > 0);
+    }
 
     #[test]
-    fn test_migrations_exist() { assert!(!MIGRATIONS.is_empty()); }
+    fn test_migrations_exist() {
+        assert!(!MIGRATIONS.is_empty());
+    }
 
     #[test]
     fn test_migrations_are_sequential() {
@@ -141,25 +145,47 @@ mod tests {
 
     #[test]
     fn test_schema_v1_contains_all_tables() {
-        for table in ["sessions", "messages", "memories", "memory_links", "memories_fts",
-            "experiences", "skills", "user_profile", "tasks", "scheduled_tasks",
-            "pending_confirmations", "audit_log", "inference_cache"] {
-            assert!(SCHEMA_V1.contains(table), "テーブル '{table}' が見つかりません");
+        for table in [
+            "sessions",
+            "messages",
+            "memories",
+            "memory_links",
+            "memories_fts",
+            "experiences",
+            "skills",
+            "user_profile",
+            "tasks",
+            "scheduled_tasks",
+            "pending_confirmations",
+            "audit_log",
+            "inference_cache",
+        ] {
+            assert!(
+                SCHEMA_V1.contains(table),
+                "テーブル '{table}' が見つかりません"
+            );
         }
     }
 
     #[test]
     fn test_schema_v2_contains_experiment_tables() {
         for table in ["experiments", "experiment_config"] {
-            assert!(SCHEMA_V2.contains(table), "V2テーブル '{table}' が見つかりません");
+            assert!(
+                SCHEMA_V2.contains(table),
+                "V2テーブル '{table}' が見つかりません"
+            );
         }
     }
 
     #[test]
-    fn test_schema_v1_has_wal_mode() { assert!(SCHEMA_V1.contains("journal_mode=WAL")); }
+    fn test_schema_v1_has_wal_mode() {
+        assert!(SCHEMA_V1.contains("journal_mode=WAL"));
+    }
 
     #[test]
-    fn test_schema_v1_has_foreign_keys() { assert!(SCHEMA_V1.contains("foreign_keys=ON")); }
+    fn test_schema_v1_has_foreign_keys() {
+        assert!(SCHEMA_V1.contains("foreign_keys=ON"));
+    }
 
     #[test]
     fn test_schema_v1_has_fts5_triggers() {

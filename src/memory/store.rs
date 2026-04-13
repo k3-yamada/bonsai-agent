@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::db::migrate;
 
@@ -44,11 +44,11 @@ impl MemoryStore {
 
     fn get_schema_version(&self) -> Result<u32> {
         // schema_versionテーブルが存在しない場合は0
-        let result = self.conn.query_row(
-            "SELECT MAX(version) FROM schema_version",
-            [],
-            |row| row.get::<_, u32>(0),
-        );
+        let result = self
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get::<_, u32>(0)
+            });
         match result {
             Ok(v) => Ok(v),
             Err(_) => Ok(0),
@@ -62,12 +62,7 @@ impl MemoryStore {
     // --- メモリ CRUD ---
 
     /// メモリを保存
-    pub fn save_memory(
-        &self,
-        content: &str,
-        category: &str,
-        tags: &[String],
-    ) -> Result<i64> {
+    pub fn save_memory(&self, content: &str, category: &str, tags: &[String]) -> Result<i64> {
         let tags_json = serde_json::to_string(tags)?;
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
@@ -79,7 +74,9 @@ impl MemoryStore {
 
     /// FTS5でメモリを検索
     pub fn search_memories(&self, query: &str, limit: usize) -> Result<Vec<MemoryRecord>> {
-        if query.is_empty() { return Ok(Vec::new()); }
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
         let safe_query = format!("\"{}\"", query.replace('"', ""));
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.content, m.category, m.tags, m.access_count, m.created_at
@@ -132,7 +129,8 @@ impl MemoryStore {
                 created_at: row.get(5)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// メモリ間リンクを作成
@@ -147,10 +145,7 @@ impl MemoryStore {
     // --- セッション ---
 
     /// セッションを保存
-    pub fn save_session(
-        &self,
-        session: &crate::agent::conversation::Session,
-    ) -> Result<()> {
+    pub fn save_session(&self, session: &crate::agent::conversation::Session) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT OR REPLACE INTO sessions (id, created_at, updated_at, summary) VALUES (?1, ?2, ?3, ?4)",
@@ -202,11 +197,15 @@ impl MemoryStore {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// セッションを読み込み
-    pub fn load_session(&self, session_id: &str) -> Result<Option<crate::agent::conversation::Session>> {
+    pub fn load_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::agent::conversation::Session>> {
         use crate::agent::conversation::{Message, Role, Session};
 
         let session_row = self.conn.query_row(
@@ -318,11 +317,9 @@ impl MemoryStore {
 
     /// メモリ総数
     pub fn memory_count(&self) -> Result<usize> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memories",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 }
@@ -365,10 +362,18 @@ mod tests {
     fn test_save_and_search_memory() {
         let store = test_store();
         store
-            .save_memory("Rust is a fast programming language", "fact", &["rust".to_string()])
+            .save_memory(
+                "Rust is a fast programming language",
+                "fact",
+                &["rust".to_string()],
+            )
             .unwrap();
         store
-            .save_memory("Python is a scripting language", "fact", &["python".to_string()])
+            .save_memory(
+                "Python is a scripting language",
+                "fact",
+                &["python".to_string()],
+            )
             .unwrap();
 
         let results = store.search_memories("Rust", 10).unwrap();
@@ -438,10 +443,7 @@ mod tests {
         let store = test_store();
         store.set_profile("lang", "ja").unwrap();
         store.set_profile("lang", "en").unwrap();
-        assert_eq!(
-            store.get_profile("lang").unwrap(),
-            Some("en".to_string())
-        );
+        assert_eq!(store.get_profile("lang").unwrap(), Some("en".to_string()));
     }
 
     #[test]

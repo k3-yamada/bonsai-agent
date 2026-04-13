@@ -62,11 +62,14 @@ impl McpConnection {
         };
 
         // initialize
-        conn.send_request("initialize", Some(serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
-        })))?;
+        conn.send_request(
+            "initialize",
+            Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
+            })),
+        )?;
 
         // initialized通知
         conn.send_notification("notifications/initialized")?;
@@ -75,7 +78,11 @@ impl McpConnection {
     }
 
     /// JSON-RPCリクエストを送信してレスポンスを受け取る
-    fn send_request(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    fn send_request(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
         let id = REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -84,13 +91,19 @@ impl McpConnection {
             params,
         };
 
-        let stdin = self.child.stdin.as_mut()
+        let stdin = self
+            .child
+            .stdin
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdinが利用不可"))?;
         let request_json = serde_json::to_string(&request)?;
         writeln!(stdin, "{request_json}")?;
         stdin.flush()?;
 
-        let stdout = self.child.stdout.as_mut()
+        let stdout = self
+            .child
+            .stdout
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdoutが利用不可"))?;
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
@@ -112,7 +125,10 @@ impl McpConnection {
             "method": method,
         });
 
-        let stdin = self.child.stdin.as_mut()
+        let stdin = self
+            .child
+            .stdin
+            .as_mut()
             .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdinが利用不可"))?;
         let json = serde_json::to_string(&request)?;
         writeln!(stdin, "{json}")?;
@@ -123,15 +139,23 @@ impl McpConnection {
     /// ツール一覧を取得
     pub fn list_tools(&mut self) -> Result<Vec<McpToolInfo>> {
         let result = self.send_request("tools/list", None)?;
-        let tools = result.get("tools")
+        let tools = result
+            .get("tools")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|t| {
                         Some(McpToolInfo {
                             name: t.get("name")?.as_str()?.to_string(),
-                            description: t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            input_schema: t.get("inputSchema").cloned().unwrap_or(serde_json::json!({})),
+                            description: t
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            input_schema: t
+                                .get("inputSchema")
+                                .cloned()
+                                .unwrap_or(serde_json::json!({})),
                         })
                     })
                     .collect()
@@ -142,13 +166,17 @@ impl McpConnection {
 
     /// ツールを呼び出す
     pub fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> Result<String> {
-        let result = self.send_request("tools/call", Some(serde_json::json!({
-            "name": name,
-            "arguments": arguments,
-        })))?;
+        let result = self.send_request(
+            "tools/call",
+            Some(serde_json::json!({
+                "name": name,
+                "arguments": arguments,
+            })),
+        )?;
 
         // MCP tool/call レスポンス: { content: [{ type: "text", text: "..." }] }
-        let text = result.get("content")
+        let text = result
+            .get("content")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .and_then(|c| c.get("text"))
@@ -187,7 +215,11 @@ pub struct McpToolWrapper {
 }
 
 impl McpToolWrapper {
-    pub fn new(info: McpToolInfo, server_name: &str, connection: Arc<Mutex<McpConnection>>) -> Self {
+    pub fn new(
+        info: McpToolInfo,
+        server_name: &str,
+        connection: Arc<Mutex<McpConnection>>,
+    ) -> Self {
         Self {
             info,
             server_name: server_name.to_string(),
@@ -214,10 +246,15 @@ impl Tool for McpToolWrapper {
     }
 
     fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let mut conn = self.connection.lock()
+        let mut conn = self
+            .connection
+            .lock()
             .map_err(|_| anyhow::anyhow!("MCP接続ロック取得失敗"))?;
         match conn.call_tool(&self.info.name, args) {
-            Ok(output) => Ok(ToolResult { output, success: true }),
+            Ok(output) => Ok(ToolResult {
+                output,
+                success: true,
+            }),
             Err(e) => Ok(ToolResult {
                 output: format!("MCPツールエラー: {e}"),
                 success: false,
@@ -297,7 +334,11 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         let config = McpServerConfig {
             name: "test".to_string(),
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-filesystem".to_string(), "/tmp".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                "/tmp".to_string(),
+            ],
         };
         let mut conn = McpConnection::spawn(&config).unwrap();
         let tools = conn.list_tools().unwrap();

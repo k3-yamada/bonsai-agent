@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
@@ -171,7 +171,9 @@ impl ExperimentLog {
                 "SELECT config_key, config_value FROM experiment_config WHERE experiment_id = ?1",
             )?;
             let config: HashMap<String, String> = config_stmt
-                .query_map(params![id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .query_map(params![id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -192,8 +194,7 @@ impl ExperimentLog {
 
     /// 承認率を計算
     pub fn acceptance_rate(conn: &Connection) -> Result<f64> {
-        let total: i64 =
-            conn.query_row("SELECT COUNT(*) FROM experiments", [], |r| r.get(0))?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM experiments", [], |r| r.get(0))?;
         if total == 0 {
             return Ok(0.0);
         }
@@ -238,7 +239,11 @@ mod tests {
 
     #[test]
     fn test_mutation_type_roundtrip() {
-        for mt in [MutationType::PromptRule, MutationType::AgentParam, MutationType::PromptHint] {
+        for mt in [
+            MutationType::PromptRule,
+            MutationType::AgentParam,
+            MutationType::PromptHint,
+        ] {
             let s = mt.as_str();
             let back = MutationType::parse(s).unwrap();
             assert_eq!(mt, back);
@@ -249,21 +254,33 @@ mod tests {
     fn test_experiment_from_results() {
         let baseline = BenchmarkResult {
             task_scores: vec![TaskScore {
-                task_id: "a".into(), completed: true, correct_tools: 1.0,
-                keyword_hits: 1.0, iterations_used: 1, iteration_budget: 3,
+                task_id: "a".into(),
+                completed: true,
+                correct_tools: 1.0,
+                keyword_hits: 1.0,
+                iterations_used: 1,
+                iteration_budget: 3,
             }],
             duration_secs: 5.0,
         };
         let experiment = BenchmarkResult {
             task_scores: vec![TaskScore {
-                task_id: "a".into(), completed: true, correct_tools: 1.0,
-                keyword_hits: 1.0, iterations_used: 0, iteration_budget: 3,
+                task_id: "a".into(),
+                completed: true,
+                correct_tools: 1.0,
+                keyword_hits: 1.0,
+                iterations_used: 0,
+                iteration_budget: 3,
             }],
             duration_secs: 6.0,
         };
         let exp = Experiment::from_results(
-            "exp_001".into(), MutationType::AgentParam,
-            "max_iterations: 10→12".into(), &baseline, &experiment, HashMap::new(),
+            "exp_001".into(),
+            MutationType::AgentParam,
+            "max_iterations: 10→12".into(),
+            &baseline,
+            &experiment,
+            HashMap::new(),
         );
         assert!(exp.delta > 0.0);
         assert!(exp.accepted);
@@ -278,7 +295,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].experiment_id, "exp_db_01");
         assert!(results[0].accepted);
-        assert_eq!(results[0].config_snapshot.get("max_iterations").unwrap(), "10");
+        assert_eq!(
+            results[0].config_snapshot.get("max_iterations").unwrap(),
+            "10"
+        );
     }
 
     #[test]

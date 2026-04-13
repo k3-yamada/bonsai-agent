@@ -137,7 +137,11 @@ impl LlmBackend for CachedBackend {
             on_token(&cached);
             return Ok(GenerateResult {
                 text: cached,
-                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, duration: std::time::Duration::ZERO },
+                usage: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    duration: std::time::Duration::ZERO,
+                },
                 model_id: self.inner.model_id().to_string(),
             });
         }
@@ -256,8 +260,12 @@ mod cached_tests {
         let cached = CachedBackend::new(Box::new(mock), 10);
         let cancel = CancellationToken::new();
 
-        let r1 = cached.generate(&[Message::user("a")], &[], &mut |_| {}, &cancel).unwrap();
-        let r2 = cached.generate(&[Message::user("b")], &[], &mut |_| {}, &cancel).unwrap();
+        let r1 = cached
+            .generate(&[Message::user("a")], &[], &mut |_| {}, &cancel)
+            .unwrap();
+        let r2 = cached
+            .generate(&[Message::user("b")], &[], &mut |_| {}, &cancel)
+            .unwrap();
         assert_ne!(r1.text, r2.text);
     }
 }

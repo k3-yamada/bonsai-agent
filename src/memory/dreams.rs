@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// Dreamingシステム: 定期的な振り返り + パターン検出（exbrain方式）
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub struct Pattern {
     pub name: String,
     pub count: i64,
-    pub trend: String,      // "increasing" / "stable" / "decreasing"
+    pub trend: String, // "increasing" / "stable" / "decreasing"
     pub last_seen: String,
 }
 
@@ -21,10 +21,10 @@ pub struct Pattern {
 pub struct DreamReport {
     pub timestamp: String,
     pub tool_usage: Vec<(String, i64)>,       // ツール使用頻度
-    pub failure_patterns: Vec<(String, i64)>,  // 失敗パターン
-    pub success_rate: f64,                     // 成功率
-    pub insights: Vec<String>,                 // 洞察
-    pub emerging_patterns: Vec<Pattern>,        // 新興パターン
+    pub failure_patterns: Vec<(String, i64)>, // 失敗パターン
+    pub success_rate: f64,                    // 成功率
+    pub insights: Vec<String>,                // 洞察
+    pub emerging_patterns: Vec<Pattern>,      // 新興パターン
 }
 
 /// Dreamingエンジン
@@ -79,7 +79,8 @@ impl<'a> Dreamer<'a> {
         let rows = stmt.query_map(params![cutoff], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 失敗パターンを集計
@@ -95,7 +96,8 @@ impl<'a> Dreamer<'a> {
         let rows = stmt.query_map(params![cutoff], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 成功率を計算
@@ -147,9 +149,7 @@ impl<'a> Dreamer<'a> {
         }
 
         if let Some((top_tool, count)) = tool_usage.first() {
-            insights.push(format!(
-                "最も使用されたツール: {top_tool} ({count}回)"
-            ));
+            insights.push(format!("最も使用されたツール: {top_tool} ({count}回)"));
         }
 
         if tool_usage.len() <= 1 && !tool_usage.is_empty() {
@@ -182,14 +182,17 @@ impl<'a> Dreamer<'a> {
         }
 
         // 繰り返し失敗パターン
-        let repeated_failures: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT error_detail) FROM experiences
+        let repeated_failures: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(DISTINCT error_detail) FROM experiences
              WHERE type = 'failure' AND created_at > ?1
              GROUP BY error_detail HAVING COUNT(*) >= 3
              LIMIT 1",
-            params![cutoff],
-            |row| row.get(0),
-        ).unwrap_or(0);
+                params![cutoff],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         if repeated_failures > 0 {
             patterns.push(Pattern {
                 name: "繰り返し失敗".to_string(),
@@ -200,11 +203,9 @@ impl<'a> Dreamer<'a> {
         }
 
         // スキル蓄積パターン
-        let skill_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM skills",
-            [],
-            |row| row.get(0),
-        )?;
+        let skill_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))?;
         if skill_count > 0 {
             patterns.push(Pattern {
                 name: "スキル蓄積".to_string(),
@@ -237,7 +238,8 @@ mod tests {
                 tool_name: Some("shell"),
                 error_type: None,
                 error_detail: None,
-            }).unwrap();
+            })
+            .unwrap();
         }
         for _ in 0..2 {
             exp.record(&RecordParams {
@@ -249,7 +251,8 @@ mod tests {
                 tool_name: Some("shell"),
                 error_type: Some("ToolExecError"),
                 error_detail: Some("Timeout"),
-            }).unwrap();
+            })
+            .unwrap();
         }
         store
     }

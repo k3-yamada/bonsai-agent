@@ -79,9 +79,9 @@ impl LlmBackend for MockLlmBackend {
         }
 
         let mut responses = self.responses.lock().unwrap();
-        let text = responses.pop().unwrap_or_else(|| {
-            "（モックのレスポンスが枯渇しました）".to_string()
-        });
+        let text = responses
+            .pop()
+            .unwrap_or_else(|| "（モックのレスポンスが枯渇しました）".to_string());
 
         let start = Instant::now();
 
@@ -127,10 +127,7 @@ mod tests {
 
     #[test]
     fn test_mock_multiple_responses() {
-        let mock = MockLlmBackend::new(vec![
-            "最初の回答".to_string(),
-            "2番目の回答".to_string(),
-        ]);
+        let mock = MockLlmBackend::new(vec!["最初の回答".to_string(), "2番目の回答".to_string()]);
         let cancel = CancellationToken::new();
         let noop = &mut |_: &str| {};
 
@@ -181,13 +178,8 @@ mod tests {
         let cancel = CancellationToken::new();
         let mut collected = String::new();
 
-        mock.generate(
-            &[],
-            &[],
-            &mut |t| collected.push_str(t),
-            &cancel,
-        )
-        .unwrap();
+        mock.generate(&[], &[], &mut |t| collected.push_str(t), &cancel)
+            .unwrap();
 
         // "A" + " " + "B" + " " + "C" + " "
         assert!(collected.contains("A"));

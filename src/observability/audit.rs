@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// 監査ログエントリ
@@ -45,11 +45,7 @@ impl<'a> AuditLog<'a> {
     }
 
     /// 監査ログを記録
-    pub fn log(
-        &self,
-        session_id: Option<&str>,
-        action: &AuditAction,
-    ) -> Result<()> {
+    pub fn log(&self, session_id: Option<&str>, action: &AuditAction) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let action_type = match action {
             AuditAction::LlmCall { .. } => "llm_call",
@@ -84,7 +80,8 @@ impl<'a> AuditLog<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 特定セッションの監査ログを取得
@@ -106,16 +103,15 @@ impl<'a> AuditLog<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 監査ログの総件数
     pub fn count(&self) -> Result<usize> {
-        let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM audit_log",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
         Ok(count as usize)
     }
 }
@@ -133,15 +129,17 @@ mod tests {
     fn test_log_llm_call() {
         let store = test_store();
         let audit = AuditLog::new(store.conn());
-        audit.log(
-            Some("session-1"),
-            &AuditAction::LlmCall {
-                prompt_tokens: 100,
-                completion_tokens: 50,
-                duration_ms: 1200,
-                model_id: "bonsai-8b".to_string(),
-            },
-        ).unwrap();
+        audit
+            .log(
+                Some("session-1"),
+                &AuditAction::LlmCall {
+                    prompt_tokens: 100,
+                    completion_tokens: 50,
+                    duration_ms: 1200,
+                    model_id: "bonsai-8b".to_string(),
+                },
+            )
+            .unwrap();
         assert_eq!(audit.count().unwrap(), 1);
     }
 
@@ -149,28 +147,32 @@ mod tests {
     fn test_log_tool_call() {
         let store = test_store();
         let audit = AuditLog::new(store.conn());
-        audit.log(
-            Some("session-1"),
-            &AuditAction::ToolCall {
-                tool_name: "shell".to_string(),
-                args: r#"{"command":"ls"}"#.to_string(),
-                success: true,
-                output_preview: "file1.txt\nfile2.txt".to_string(),
-            },
-        ).unwrap();
+        audit
+            .log(
+                Some("session-1"),
+                &AuditAction::ToolCall {
+                    tool_name: "shell".to_string(),
+                    args: r#"{"command":"ls"}"#.to_string(),
+                    success: true,
+                    output_preview: "file1.txt\nfile2.txt".to_string(),
+                },
+            )
+            .unwrap();
     }
 
     #[test]
     fn test_log_security_event() {
         let store = test_store();
         let audit = AuditLog::new(store.conn());
-        audit.log(
-            None,
-            &AuditAction::SecurityEvent {
-                event_type: "path_denied".to_string(),
-                detail: "~/.ssh/id_rsa へのアクセスをブロック".to_string(),
-            },
-        ).unwrap();
+        audit
+            .log(
+                None,
+                &AuditAction::SecurityEvent {
+                    event_type: "path_denied".to_string(),
+                    detail: "~/.ssh/id_rsa へのアクセスをブロック".to_string(),
+                },
+            )
+            .unwrap();
     }
 
     #[test]
@@ -178,15 +180,17 @@ mod tests {
         let store = test_store();
         let audit = AuditLog::new(store.conn());
         for i in 0..5 {
-            audit.log(
-                Some(&format!("s-{i}")),
-                &AuditAction::ToolCall {
-                    tool_name: "shell".to_string(),
-                    args: format!("cmd-{i}"),
-                    success: true,
-                    output_preview: String::new(),
-                },
-            ).unwrap();
+            audit
+                .log(
+                    Some(&format!("s-{i}")),
+                    &AuditAction::ToolCall {
+                        tool_name: "shell".to_string(),
+                        args: format!("cmd-{i}"),
+                        success: true,
+                        output_preview: String::new(),
+                    },
+                )
+                .unwrap();
         }
         let recent = audit.recent(3).unwrap();
         assert_eq!(recent.len(), 3);
@@ -198,15 +202,39 @@ mod tests {
     fn test_for_session() {
         let store = test_store();
         let audit = AuditLog::new(store.conn());
-        audit.log(Some("s1"), &AuditAction::ToolCall {
-            tool_name: "shell".into(), args: "a".into(), success: true, output_preview: String::new(),
-        }).unwrap();
-        audit.log(Some("s2"), &AuditAction::ToolCall {
-            tool_name: "shell".into(), args: "b".into(), success: true, output_preview: String::new(),
-        }).unwrap();
-        audit.log(Some("s1"), &AuditAction::ToolCall {
-            tool_name: "file_read".into(), args: "c".into(), success: true, output_preview: String::new(),
-        }).unwrap();
+        audit
+            .log(
+                Some("s1"),
+                &AuditAction::ToolCall {
+                    tool_name: "shell".into(),
+                    args: "a".into(),
+                    success: true,
+                    output_preview: String::new(),
+                },
+            )
+            .unwrap();
+        audit
+            .log(
+                Some("s2"),
+                &AuditAction::ToolCall {
+                    tool_name: "shell".into(),
+                    args: "b".into(),
+                    success: true,
+                    output_preview: String::new(),
+                },
+            )
+            .unwrap();
+        audit
+            .log(
+                Some("s1"),
+                &AuditAction::ToolCall {
+                    tool_name: "file_read".into(),
+                    args: "c".into(),
+                    success: true,
+                    output_preview: String::new(),
+                },
+            )
+            .unwrap();
 
         let s1_logs = audit.for_session("s1").unwrap();
         assert_eq!(s1_logs.len(), 2);

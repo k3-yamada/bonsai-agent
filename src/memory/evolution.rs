@@ -50,8 +50,7 @@ fn parse_arxiv_xml(xml: &str) -> Vec<ArxivEntry> {
                 .replace('\n', " ")
                 .trim()
                 .to_string();
-            let published = extract_xml_tag(entry_xml, "published")
-                .unwrap_or_default();
+            let published = extract_xml_tag(entry_xml, "published").unwrap_or_default();
 
             // 著者を抽出
             let mut authors = Vec::new();
@@ -70,7 +69,15 @@ fn parse_arxiv_xml(xml: &str) -> Vec<ArxivEntry> {
                     id,
                     title,
                     summary: if summary.len() > 500 {
-                        { let end = summary.char_indices().take_while(|(i, _)| *i <= 500).last().map(|(i, ch)| i + ch.len_utf8()).unwrap_or(summary.len()); format!("{}...", &summary[..end]) }
+                        {
+                            let end = summary
+                                .char_indices()
+                                .take_while(|(i, _)| *i <= 500)
+                                .last()
+                                .map(|(i, ch)| i + ch.len_utf8())
+                                .unwrap_or(summary.len());
+                            format!("{}...", &summary[..end])
+                        }
                     } else {
                         summary
                     },
@@ -193,7 +200,8 @@ impl<'a> EvolutionEngine<'a> {
         // 失敗経験からの提案
         let exp = crate::memory::experience::ExperienceStore::new(self.store.conn());
         let failures = exp.find_similar("failure", 5)?;
-        let failure_count = failures.iter()
+        let failure_count = failures
+            .iter()
             .filter(|e| e.exp_type == crate::memory::experience::ExperienceType::Failure)
             .count();
         if failure_count >= 3 {
@@ -206,7 +214,10 @@ impl<'a> EvolutionEngine<'a> {
         let skills = crate::memory::skill::SkillStore::new(self.store.conn());
         let all_skills = skills.list_all()?;
         if all_skills.is_empty() {
-            suggestions.push("まだスキルが蓄積されていません。繰り返しタスクをスキル化して効率を上げましょう。".to_string());
+            suggestions.push(
+                "まだスキルが蓄積されていません。繰り返しタスクをスキル化して効率を上げましょう。"
+                    .to_string(),
+            );
         }
 
         Ok(suggestions)
@@ -215,10 +226,44 @@ impl<'a> EvolutionEngine<'a> {
     pub fn apply_improvements(&self) -> Result<Vec<String>> {
         let mut applied = Vec::new();
         let exp = crate::memory::experience::ExperienceStore::new(self.store.conn());
-        let tool_names = ["shell", "file_read", "file_write", "git", "web_search", "web_fetch", "repomap"];
-        for tool in &tool_names { for (pat, cnt) in exp.failure_patterns(tool).unwrap_or_default() { if cnt >= 3 { let msg = format!("[auto-learn] {tool}:'{pat}' は{cnt}回失敗"); if self.store.search_memories(&pat, 1).unwrap_or_default().is_empty() { let _ = self.store.save_memory(&msg, "insight", &["auto-improve".into()]); applied.push(msg); } } } }
+        let tool_names = [
+            "shell",
+            "file_read",
+            "file_write",
+            "git",
+            "web_search",
+            "web_fetch",
+            "repomap",
+        ];
+        for tool in &tool_names {
+            for (pat, cnt) in exp.failure_patterns(tool).unwrap_or_default() {
+                if cnt >= 3 {
+                    let msg = format!("[auto-learn] {tool}:'{pat}' は{cnt}回失敗");
+                    if self
+                        .store
+                        .search_memories(&pat, 1)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        let _ = self
+                            .store
+                            .save_memory(&msg, "insight", &["auto-improve".into()]);
+                        applied.push(msg);
+                    }
+                }
+            }
+        }
         let dreamer = crate::memory::dreams::Dreamer::new(self.store.conn());
-        if let Ok(report) = dreamer.generate_report(7) && report.success_rate < 0.5 && report.success_rate > 0.0 { let msg = format!("[auto-learn] 成功率{:.0}%", report.success_rate * 100.0); let _ = self.store.save_memory(&msg, "insight", &["auto-improve".into()]); applied.push(msg); }
+        if let Ok(report) = dreamer.generate_report(7)
+            && report.success_rate < 0.5
+            && report.success_rate > 0.0
+        {
+            let msg = format!("[auto-learn] 成功率{:.0}%", report.success_rate * 100.0);
+            let _ = self
+                .store
+                .save_memory(&msg, "insight", &["auto-improve".into()]);
+            applied.push(msg);
+        }
         Ok(applied)
     }
 
@@ -237,7 +282,10 @@ impl<'a> EvolutionEngine<'a> {
         // auto-improveタグのメモリからも取得
         let auto_insights = self.store.search_memories("auto-improve", 10)?;
         for mem in &auto_insights {
-            if !mutations.iter().any(|m| { let prefix: String = mem.content.chars().take(20).collect(); m.contains(&prefix) }) {
+            if !mutations.iter().any(|m| {
+                let prefix: String = mem.content.chars().take(20).collect();
+                m.contains(&prefix)
+            }) {
                 mutations.push(mem.content.clone());
             }
         }
@@ -295,8 +343,14 @@ mod tests {
 
     #[test]
     fn test_extract_xml_tag() {
-        assert_eq!(extract_xml_tag("<title>Test</title>", "title"), Some("Test".to_string()));
-        assert_eq!(extract_xml_tag("<id>123</id>", "id"), Some("123".to_string()));
+        assert_eq!(
+            extract_xml_tag("<title>Test</title>", "title"),
+            Some("Test".to_string())
+        );
+        assert_eq!(
+            extract_xml_tag("<id>123</id>", "id"),
+            Some("123".to_string())
+        );
         assert_eq!(extract_xml_tag("<none>", "title"), None);
     }
 
@@ -313,7 +367,13 @@ mod tests {
     fn test_ingest_dedup() {
         let store = MemoryStore::in_memory().unwrap();
         // 手動でarxivメモリを追加
-        store.save_memory("[arxiv:2402.17764] test", "knowledge", &["arxiv".to_string()]).unwrap();
+        store
+            .save_memory(
+                "[arxiv:2402.17764] test",
+                "knowledge",
+                &["arxiv".to_string()],
+            )
+            .unwrap();
 
         let _engine = EvolutionEngine::new(&store);
         // 同じIDの論文は重複チェックでスキップされる
@@ -323,11 +383,18 @@ mod tests {
     #[test]
     fn test_parse_arxiv_xml_multibyte_summary() {
         let long_summary = "あ".repeat(200);
-        let xml = format!(r#"<feed><entry><id>http://arxiv.org/abs/9999.99999</id><title>Test</title><summary>{}</summary><published>2024-01-01</published></entry></feed>"#, long_summary);
+        let xml = format!(
+            r#"<feed><entry><id>http://arxiv.org/abs/9999.99999</id><title>Test</title><summary>{}</summary><published>2024-01-01</published></entry></feed>"#,
+            long_summary
+        );
         let entries = parse_arxiv_xml(&xml);
         assert_eq!(entries.len(), 1);
         assert!(entries[0].summary.ends_with("..."));
-        assert!(entries[0].summary.is_char_boundary(entries[0].summary.len()));
+        assert!(
+            entries[0]
+                .summary
+                .is_char_boundary(entries[0].summary.len())
+        );
     }
 
     // 実ネットワークテスト
@@ -355,7 +422,13 @@ mod tests {
     #[test]
     fn test_insight_based_mutations_with_data() {
         let store = MemoryStore::in_memory().unwrap();
-        store.save_memory("[auto-learn] shell:'rm' は3回失敗", "insight", &["auto-improve".into()]).unwrap();
+        store
+            .save_memory(
+                "[auto-learn] shell:'rm' は3回失敗",
+                "insight",
+                &["auto-improve".into()],
+            )
+            .unwrap();
         let engine = EvolutionEngine::new(&store);
         let mutations = engine.insight_based_mutations().unwrap();
         assert!(!mutations.is_empty());

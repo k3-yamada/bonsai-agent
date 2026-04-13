@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 /// タスクの状態
@@ -125,7 +125,9 @@ impl<'a> TaskManager<'a> {
     /// ステップを記録
     pub fn add_step(&self, task_id: &str, description: &str, outcome: &str) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        let task = self.get(task_id)?.ok_or_else(|| anyhow::anyhow!("タスクが見つかりません"))?;
+        let task = self
+            .get(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("タスクが見つかりません"))?;
 
         let mut steps = task.step_log;
         steps.push(StepRecord {
@@ -173,7 +175,8 @@ impl<'a> TaskManager<'a> {
 
         let rows = stmt.query_map([], |row| {
             let step_log_json: String = row.get(5)?;
-            let step_log: Vec<StepRecord> = serde_json::from_str(&step_log_json).unwrap_or_default();
+            let step_log: Vec<StepRecord> =
+                serde_json::from_str(&step_log_json).unwrap_or_default();
             Ok(Task {
                 id: row.get(0)?,
                 goal: row.get(1)?,
@@ -188,7 +191,8 @@ impl<'a> TaskManager<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// サブタスクを取得
@@ -200,7 +204,8 @@ impl<'a> TaskManager<'a> {
 
         let rows = stmt.query_map(params![parent_id], |row| {
             let step_log_json: String = row.get(5)?;
-            let step_log: Vec<StepRecord> = serde_json::from_str(&step_log_json).unwrap_or_default();
+            let step_log: Vec<StepRecord> =
+                serde_json::from_str(&step_log_json).unwrap_or_default();
             Ok(Task {
                 id: row.get(0)?,
                 goal: row.get(1)?,
@@ -215,7 +220,8 @@ impl<'a> TaskManager<'a> {
             })
         })?;
 
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }
 

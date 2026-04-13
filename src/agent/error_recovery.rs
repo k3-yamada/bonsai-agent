@@ -54,14 +54,13 @@ pub fn decide_recovery(mode: &FailureMode, attempt: usize, max_retries: usize) -
     match mode {
         FailureMode::ParseError(detail) => match detail {
             ParseErrorDetail::InvalidJson => RecoveryAction::RetryWithFix(
-                "前回の出力はJSON形式が不正でした。正しいJSON形式で<tool_call>を生成してください。".to_string(),
+                "前回の出力はJSON形式が不正でした。正しいJSON形式で<tool_call>を生成してください。"
+                    .to_string(),
             ),
-            ParseErrorDetail::MissingField(field) => RecoveryAction::RetryWithFix(
-                format!("前回のツール呼び出しにフィールド '{field}' が不足しています。必須フィールドを含めて再生成してください。"),
-            ),
-            ParseErrorDetail::UnexpectedFormat => {
-                RecoveryAction::RetryWithTemperatureDelta
-            }
+            ParseErrorDetail::MissingField(field) => RecoveryAction::RetryWithFix(format!(
+                "前回のツール呼び出しにフィールド '{field}' が不足しています。必須フィールドを含めて再生成してください。"
+            )),
+            ParseErrorDetail::UnexpectedFormat => RecoveryAction::RetryWithTemperatureDelta,
         },
         FailureMode::ToolExecError(detail) => match detail {
             ToolErrorDetail::PermissionDenied => RecoveryAction::SuggestAlternative(
@@ -71,17 +70,18 @@ pub fn decide_recovery(mode: &FailureMode, attempt: usize, max_retries: usize) -
                 "コマンドが見つかりません。代替コマンドを使用してください。".to_string(),
             ),
             ToolErrorDetail::Timeout => RecoveryAction::RetryWithFix(
-                "前回のコマンドがタイムアウトしました。より短時間で完了する方法を試してください。".to_string(),
+                "前回のコマンドがタイムアウトしました。より短時間で完了する方法を試してください。"
+                    .to_string(),
             ),
-            ToolErrorDetail::InvalidArguments(msg) => RecoveryAction::RetryWithFix(
-                format!("引数エラー: {msg}。引数を修正して再試行してください。"),
-            ),
-            ToolErrorDetail::ExitCodeNonZero(code) => RecoveryAction::RetryWithFix(
-                format!("コマンドが終了コード {code} で失敗しました。エラー内容を確認して修正してください。"),
-            ),
-            ToolErrorDetail::Unknown(msg) => RecoveryAction::RetryWithFix(
-                format!("不明なエラー: {msg}。別のアプローチを試してください。"),
-            ),
+            ToolErrorDetail::InvalidArguments(msg) => RecoveryAction::RetryWithFix(format!(
+                "引数エラー: {msg}。引数を修正して再試行してください。"
+            )),
+            ToolErrorDetail::ExitCodeNonZero(code) => RecoveryAction::RetryWithFix(format!(
+                "コマンドが終了コード {code} で失敗しました。エラー内容を確認して修正してください。"
+            )),
+            ToolErrorDetail::Unknown(msg) => RecoveryAction::RetryWithFix(format!(
+                "不明なエラー: {msg}。別のアプローチを試してください。"
+            )),
         },
         FailureMode::ReasoningError => RecoveryAction::RetryWithTemperatureDelta,
         FailureMode::LoopDetected => RecoveryAction::Abort(
@@ -222,11 +222,7 @@ mod tests {
 
     #[test]
     fn test_recovery_tool_timeout() {
-        let action = decide_recovery(
-            &FailureMode::ToolExecError(ToolErrorDetail::Timeout),
-            0,
-            3,
-        );
+        let action = decide_recovery(&FailureMode::ToolExecError(ToolErrorDetail::Timeout), 0, 3);
         assert!(matches!(action, RecoveryAction::RetryWithFix(_)));
     }
 

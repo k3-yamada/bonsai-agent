@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-
 use crate::agent::agent_loop::AgentConfig;
 use crate::agent::benchmark::BenchmarkSuite;
 use crate::agent::experiment_log::{Experiment, ExperimentLog, MutationType};
@@ -218,18 +217,19 @@ pub fn run_experiment_loop(
         }
 
         if let Some(max) = loop_config.max_experiments
-            && experiment_count >= max {
-                eprintln!("[lab] 最大実験回数({max})に到達");
-                break;
+            && experiment_count >= max
+        {
+            eprintln!("[lab] 最大実験回数({max})に到達");
+            break;
         }
 
         // a. 仮説生成
         let mutation = generator.next_mutation(experiment_count);
         let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let experiment_id = format!("exp_{ts}_{:04}", experiment_count);
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let experiment_id = format!("exp_{ts}_{:04}", experiment_count);
         eprintln!(
             "[lab] 実験 {experiment_id}: {} — {}",
             mutation.mutation_type.as_str(),
@@ -267,7 +267,9 @@ pub fn run_experiment_loop(
 
         // f. ログ記録
         ExperimentLog::save_to_db(store.conn(), &exp)?;
-        if let Some(tsv) = &loop_config.tsv_path { ExperimentLog::append_tsv(tsv, &exp)?; }
+        if let Some(tsv) = &loop_config.tsv_path {
+            ExperimentLog::append_tsv(tsv, &exp)?;
+        }
 
         experiments.push(exp);
         experiment_count += 1;
@@ -285,7 +287,14 @@ pub fn run_experiment_loop(
 
     let total = experiments.len();
     let accepted = experiments.iter().filter(|e| e.accepted).count();
-    eprintln!("[lab] 完了: {total}実験, {accepted}承認 ({:.0}%)", if total > 0 { accepted as f64 / total as f64 * 100.0 } else { 0.0 });
+    eprintln!(
+        "[lab] 完了: {total}実験, {accepted}承認 ({:.0}%)",
+        if total > 0 {
+            accepted as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
 
     Ok(experiments)
 }
