@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## プロジェクト概要
 
 `bonsai-agent` — Bonsai-8B（1ビット量子化Qwen3-8B、1.28GB）で動作するRust製自律型エージェント。
-Mac M2 16GB上でllama-server HTTP API経由で推論。302テスト、46ソースファイル。
+Mac M2 16GB上でllama-server HTTP API経由で推論。349テスト、49ソースファイル。
 
 ## ビルド・テストコマンド
 
@@ -36,7 +36,9 @@ src/
 │   ├── error_recovery.rs          # FailureMode(6種), CircuitBreaker, LoopDetector
 │   ├── compaction.rs              # 4段階コンテキストコンパクション
 │   ├── checkpoint.rs              # git stashチェックポイント/ロールバック
-│   └── task.rs                    # TaskState状態マシン（中断/再開/サブタスク）
+│   ├── task.rs                    # TaskState状態マシン（中断/再開/サブタスク）
+│   ├── experiment.rs              # ExperimentLoop — 自律的自己改善ループ
+│   └── experiment_log.rs          # 実験ログ（SQLite+TSV永続化）
 ├── tools/
 │   ├── mod.rs                     # Tool トレイト + ToolRegistry（動的選択）
 │   ├── shell.rs / file.rs / git.rs / web.rs / repomap.rs
