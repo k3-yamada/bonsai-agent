@@ -248,7 +248,7 @@ fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> Tas
 
     TaskScore {
         task_id: task.id.clone(),
-        completed: true,
+        completed: !result.answer.starts_with("[中断]"),
         correct_tools,
         keyword_hits,
         iterations_used: result.iterations_used,

@@ -90,7 +90,7 @@ impl HypothesisGenerator {
     pub fn add_insight_mutation(&mut self, insight: &str) {
         self.rules.push(PromptRuleCandidate {
             rule: insight.to_string(),
-            description: format!("insight: {}", &insight[..insight.len().min(50)]),
+            description: format!("insight: {}", insight.chars().take(50).collect::<String>()),
         });
     }
 }

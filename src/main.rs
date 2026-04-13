@@ -526,35 +526,29 @@ fn get_db_path() -> String {
 }
 
 fn ctrlc_handler(cancel: CancellationToken) {
-    std::thread::spawn(move || {
-        // シグナルハンドラは別スレッドで待機
-        let (tx, rx) = std::sync::mpsc::channel();
-        ctrlc_channel(tx);
-        let _ = rx.recv();
-        cancel.cancel();
-        eprintln!("\n中断します...");
-    });
-}
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Ctrl+Cシグナルを受け取るチャネル（簡易実装）
-fn ctrlc_channel(tx: std::sync::mpsc::Sender<()>) {
+    static SIGNALED: AtomicBool = AtomicBool::new(false);
+
+    // SAFETY: AtomicBoolのstore()はasync-signal-safe
+    extern "C" fn sigint_handler(_: libc::c_int) {
+        SIGNALED.store(true, Ordering::Relaxed);
+    }
+
+    // シグナルハンドラを登録（Mutexを使わない）
     unsafe {
         libc::signal(
             libc::SIGINT,
             sigint_handler as *const () as libc::sighandler_t,
         );
     }
-    // グローバル変数でチャネル送信を管理（簡易実装）
-    SIGINT_TX.lock().unwrap().replace(tx);
-}
 
-use std::sync::Mutex;
-static SIGINT_TX: Mutex<Option<std::sync::mpsc::Sender<()>>> = Mutex::new(None);
-
-extern "C" fn sigint_handler(_: libc::c_int) {
-    if let Ok(guard) = SIGINT_TX.lock()
-        && let Some(tx) = guard.as_ref()
-    {
-        let _ = tx.send(());
-    }
+    // ポーリングスレッドでフラグを監視
+    std::thread::spawn(move || {
+        while !SIGNALED.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        cancel.cancel();
+        eprintln!("\n中断します...");
+    });
 }

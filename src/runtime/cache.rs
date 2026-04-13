@@ -108,6 +108,8 @@ impl CachedBackend {
     fn compute_prompt_hash(messages: &[Message], tools: &[ToolSchema]) -> String {
         let mut hasher = DefaultHasher::new();
         for msg in messages {
+            // roleも含めて異なるメッセージ順序を区別
+            format!("{:?}", msg.role).hash(&mut hasher);
             msg.content.hash(&mut hasher);
         }
         for tool in tools {
@@ -133,7 +135,12 @@ impl LlmBackend for CachedBackend {
         let key = InferenceCache::compute_key(self.inner.model_id(), &prompt_hash);
 
         // キャッシュヒット
-        if let Some(cached) = self.cache.lock().unwrap().get(key).map(|s| s.to_string()) {
+        let mut guard = self
+            .cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("キャッシュロック取得失敗: {e}"))?;
+        if let Some(cached) = guard.get(key).map(|s| s.to_string()) {
+            drop(guard);
             on_token(&cached);
             return Ok(GenerateResult {
                 text: cached,
@@ -146,9 +153,14 @@ impl LlmBackend for CachedBackend {
             });
         }
 
+        drop(guard);
+
         // キャッシュミス: 内部バックエンド呼び出し
         let result = self.inner.generate(messages, tools, on_token, cancel)?;
-        self.cache.lock().unwrap().put(key, result.text.clone());
+        self.cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("キャッシュロック取得失敗: {e}"))?
+            .put(key, result.text.clone());
         Ok(result)
     }
 }
