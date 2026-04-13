@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -41,6 +41,8 @@ static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 /// MCPサーバープロセスとの接続
 pub struct McpConnection {
     child: Child,
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
     #[allow(dead_code)]
     config: McpServerConfig,
 }
@@ -48,7 +50,7 @@ pub struct McpConnection {
 impl McpConnection {
     /// MCPサーバーを子プロセスとして起動
     pub fn spawn(config: &McpServerConfig) -> Result<Self> {
-        let child = Command::new(&config.command)
+        let mut child = Command::new(&config.command)
             .args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -56,8 +58,20 @@ impl McpConnection {
             .spawn()
             .map_err(|e| anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command))?;
 
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdin取得失敗"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdout取得失敗"))?;
+        let reader = BufReader::new(stdout);
+
         let mut conn = Self {
             child,
+            stdin,
+            reader,
             config: config.clone(),
         };
 
@@ -91,23 +105,12 @@ impl McpConnection {
             params,
         };
 
-        let stdin = self
-            .child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdinが利用不可"))?;
         let request_json = serde_json::to_string(&request)?;
-        writeln!(stdin, "{request_json}")?;
-        stdin.flush()?;
+        writeln!(self.stdin, "{request_json}")?;
+        self.stdin.flush()?;
 
-        let stdout = self
-            .child
-            .stdout
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdoutが利用不可"))?;
-        let mut reader = BufReader::new(stdout);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        self.reader.read_line(&mut line)?;
 
         let response: JsonRpcResponse = serde_json::from_str(line.trim())?;
 
@@ -125,14 +128,9 @@ impl McpConnection {
             "method": method,
         });
 
-        let stdin = self
-            .child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdinが利用不可"))?;
         let json = serde_json::to_string(&request)?;
-        writeln!(stdin, "{json}")?;
-        stdin.flush()?;
+        writeln!(self.stdin, "{json}")?;
+        self.stdin.flush()?;
         Ok(())
     }
 
