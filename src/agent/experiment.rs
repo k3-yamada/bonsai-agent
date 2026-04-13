@@ -27,8 +27,10 @@ pub enum MutationAction {
     RemovePromptRule(String),
     /// max_iterationsを変更
     SetMaxIterations(usize),
-    /// max_tools_selectedを変更（AgentConfigにはないが将来用）
+    /// max_retriesを変更
     SetMaxRetries(usize),
+    /// 動的ツール選択数を変更
+    SetMaxToolsSelected(usize),
 }
 
 /// 仮説生成器: ルールベースで次の変異候補を選択
@@ -126,6 +128,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
     let mut config = AgentConfig {
         max_iterations: base_config.max_iterations,
         max_retries: base_config.max_retries,
+        max_tools_selected: base_config.max_tools_selected,
         system_prompt: base_config.system_prompt.clone(),
     };
 
@@ -148,6 +151,9 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         MutationAction::SetMaxRetries(n) => {
             config.max_retries = *n;
         }
+        MutationAction::SetMaxToolsSelected(n) => {
+            config.max_tools_selected = *n;
+        }
     }
 
     config
@@ -158,6 +164,10 @@ pub fn config_snapshot(config: &AgentConfig) -> HashMap<String, String> {
     HashMap::from([
         ("max_iterations".into(), config.max_iterations.to_string()),
         ("max_retries".into(), config.max_retries.to_string()),
+        (
+            "max_tools_selected".into(),
+            config.max_tools_selected.to_string(),
+        ),
         (
             "system_prompt_len".into(),
             config.system_prompt.len().to_string(),
@@ -307,6 +317,7 @@ mod tests {
         AgentConfig {
             max_iterations: 10,
             max_retries: 3,
+            max_tools_selected: 5,
             system_prompt: "test prompt\n1. ルール1\n2. ルール2".into(),
         }
     }

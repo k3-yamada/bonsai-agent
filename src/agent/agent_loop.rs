@@ -21,6 +21,7 @@ use crate::tools::ToolRegistry;
 pub struct AgentConfig {
     pub max_iterations: usize,
     pub max_retries: usize,
+    pub max_tools_selected: usize,
     pub system_prompt: String,
 }
 
@@ -29,6 +30,7 @@ impl Default for AgentConfig {
         Self {
             max_iterations: 10,
             max_retries: 3,
+            max_tools_selected: 5,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
         }
     }
@@ -122,7 +124,9 @@ pub fn execute_step(
         .map(|m| m.content.as_str())
         .unwrap_or("");
 
-    let selected_tools = ctx.tools.select_relevant(last_user_msg, 5);
+    let selected_tools = ctx
+        .tools
+        .select_relevant(last_user_msg, ctx.config.max_tools_selected);
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
     // 2. LLM呼び出し（ストリーミング対応）
