@@ -1,5 +1,11 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Mutex;
+
+use crate::agent::conversation::Message;
+use crate::cancel::CancellationToken;
+use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
+use crate::tools::ToolSchema;
 
 /// 推論結果キャッシュ。model_id + messages + tools のハッシュをキーに使用。
 pub struct InferenceCache {
@@ -83,6 +89,66 @@ impl Default for InferenceCache {
     }
 }
 
+/// キャッシュ付きLLMバックエンド（--lab専用）
+/// 同一入力に対して同一出力を返すことでベンチマーク結果を安定化
+pub struct CachedBackend {
+    inner: Box<dyn LlmBackend>,
+    cache: Mutex<InferenceCache>,
+}
+
+impl CachedBackend {
+    pub fn new(inner: Box<dyn LlmBackend>, max_entries: usize) -> Self {
+        Self {
+            inner,
+            cache: Mutex::new(InferenceCache::new(max_entries)),
+        }
+    }
+
+    /// messagesとtoolsからハッシュキーを生成
+    fn compute_prompt_hash(messages: &[Message], tools: &[ToolSchema]) -> String {
+        let mut hasher = DefaultHasher::new();
+        for msg in messages {
+            msg.content.hash(&mut hasher);
+        }
+        for tool in tools {
+            tool.name.hash(&mut hasher);
+        }
+        format!("{:x}", hasher.finish())
+    }
+}
+
+impl LlmBackend for CachedBackend {
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
+
+    fn generate(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        on_token: &mut dyn FnMut(&str),
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<GenerateResult> {
+        let prompt_hash = Self::compute_prompt_hash(messages, tools);
+        let key = InferenceCache::compute_key(self.inner.model_id(), &prompt_hash);
+
+        // キャッシュヒット
+        if let Some(cached) = self.cache.lock().unwrap().get(key).map(|s| s.to_string()) {
+            on_token(&cached);
+            return Ok(GenerateResult {
+                text: cached,
+                usage: TokenUsage { prompt_tokens: 0, completion_tokens: 0, duration: std::time::Duration::ZERO },
+                model_id: self.inner.model_id().to_string(),
+            });
+        }
+
+        // キャッシュミス: 内部バックエンド呼び出し
+        let result = self.inner.generate(messages, tools, on_token, cancel)?;
+        self.cache.lock().unwrap().put(key, result.text.clone());
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +226,38 @@ mod tests {
         cache.put(2, "b".to_string());
         cache.clear();
         assert!(cache.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cached_tests {
+    use super::*;
+    use crate::runtime::inference::MockLlmBackend;
+
+    #[test]
+    fn test_cached_backend_miss_then_hit() {
+        let mock = MockLlmBackend::new(vec!["回答A".to_string()]);
+        let cached = CachedBackend::new(Box::new(mock), 10);
+        let cancel = CancellationToken::new();
+        let msgs = vec![Message::user("hello")];
+
+        // 1回目: キャッシュミス → モックから取得
+        let r1 = cached.generate(&msgs, &[], &mut |_| {}, &cancel).unwrap();
+        assert_eq!(r1.text, "回答A");
+
+        // 2回目: キャッシュヒット → モックは空だが成功
+        let r2 = cached.generate(&msgs, &[], &mut |_| {}, &cancel).unwrap();
+        assert_eq!(r2.text, "回答A");
+    }
+
+    #[test]
+    fn test_cached_backend_different_prompts() {
+        let mock = MockLlmBackend::new(vec!["回答1".to_string(), "回答2".to_string()]);
+        let cached = CachedBackend::new(Box::new(mock), 10);
+        let cancel = CancellationToken::new();
+
+        let r1 = cached.generate(&[Message::user("a")], &[], &mut |_| {}, &cancel).unwrap();
+        let r2 = cached.generate(&[Message::user("b")], &[], &mut |_| {}, &cancel).unwrap();
+        assert_ne!(r1.text, r2.text);
     }
 }
