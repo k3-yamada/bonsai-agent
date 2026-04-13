@@ -336,70 +336,7 @@ pub fn run_agent_loop_with_session(
 
     let secrets_filter = SecretsFilter::default();
 
-    let vault_path = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("bonsai-agent")
-        .join("vault");
-    let vault = crate::knowledge::vault::Vault::new(&vault_path).ok();
-    if let Some(ref v) = vault {
-        let stocks = crate::knowledge::extractor::extract_stock(&task_context, &session.id);
-        let _ = v.append_all(&stocks);
-    }
-    let embedder = create_embedder();
-
-    // ハイブリッド検索: 関連メモリをシステムプロンプトに注入
-    if let Some(s) = store {
-        let search = HybridSearch::new(s, embedder.as_ref());
-        let memories = search.search(&task_context, 3).unwrap_or_default();
-        if !memories.is_empty() {
-            let memory_context: String = memories
-                .iter()
-                .map(|r| format!("- {}", r.memory.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-            session.add_message(Message::system(format!(
-                "関連する過去の記憶:\n{memory_context}"
-            )));
-        }
-
-        // 類似経験を検索して注入
-        let exp = ExperienceStore::new(s.conn());
-        let past = exp.find_similar(&task_context, 3).unwrap_or_default();
-        if !past.is_empty() {
-            let exp_context: String = past
-                .iter()
-                .map(|e| {
-                    let prefix = match e.exp_type {
-                        ExperienceType::Success => "成功",
-                        ExperienceType::Failure => "失敗（避けよ）",
-                        ExperienceType::Insight => "学び",
-                    };
-                    format!("- [{prefix}] {}: {}", e.action, e.outcome)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            session.add_message(Message::system(format!("過去の経験:\n{exp_context}")));
-        }
-
-        // 関連スキルをプロンプトに注入
-        let skills = SkillStore::new(s.conn());
-        let matching_skills = skills.find_matching(&task_context, 3).unwrap_or_default();
-        if !matching_skills.is_empty() {
-            let skill_context: String = matching_skills
-                .iter()
-                .map(|sk| {
-                    format!(
-                        "- スキル「{}」: {} (ツール: {})",
-                        sk.name, sk.description, sk.tool_chain
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            session.add_message(Message::system(format!(
-                "利用可能なスキル（過去の成功パターン）:\n{skill_context}\n上記のパターンが適用可能な場合は参考にしてください。"
-            )));
-        }
-    }
+    inject_contextual_memories(session, &task_context, store);
 
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
@@ -428,27 +365,7 @@ pub fn run_agent_loop_with_session(
 
         match outcome {
             StepOutcome::FinalAnswer(answer) => {
-                // セッション保存 + 経験記録（成功）
-                if let Some(s) = store {
-                    let _ = s.save_session(session);
-                    let exp = ExperienceStore::new(s.conn());
-                    let _ = exp.record(&RecordParams {
-                        exp_type: ExperienceType::Success,
-                        task_context: &task_context,
-                        action: &answer,
-                        outcome: "completed",
-                        lesson: None,
-                        tool_name: None,
-                        error_type: None,
-                        error_detail: None,
-                    });
-                    // スキル昇格チェック（3回成功で昇格）
-                    let skills = SkillStore::new(s.conn());
-                    let _ = skills.promote_from_experiences(s.conn(), 3);
-                    let evo = crate::memory::evolution::EvolutionEngine::new(s);
-                    let _ = evo.auto_collect();
-                    let _ = evo.apply_improvements();
-                }
+                record_success(store, session, &task_context, &answer);
                 return Ok(AgentLoopResult {
                     answer,
                     iterations_used: final_iteration,
@@ -456,21 +373,7 @@ pub fn run_agent_loop_with_session(
                 });
             }
             StepOutcome::Aborted(reason) => {
-                // セッション保存 + 経験記録（失敗）
-                if let Some(s) = store {
-                    let _ = s.save_session(session);
-                    let exp = ExperienceStore::new(s.conn());
-                    let _ = exp.record(&RecordParams {
-                        exp_type: ExperienceType::Insight,
-                        task_context: &task_context,
-                        action: "aborted",
-                        outcome: &reason,
-                        lesson: Some(&reason),
-                        tool_name: None,
-                        error_type: Some("Aborted"),
-                        error_detail: None,
-                    });
-                }
+                record_abort(store, session, &task_context, &reason);
                 return Ok(AgentLoopResult {
                     answer: format!("[中断] {reason}"),
                     iterations_used: final_iteration,
@@ -493,6 +396,120 @@ pub fn run_agent_loop_with_session(
         iterations_used: final_iteration,
         tools_called: all_tools,
     })
+}
+
+/// コンテキストメモリ・経験・スキルをセッションに注入
+fn inject_contextual_memories(
+    session: &mut Session,
+    task_context: &str,
+    store: Option<&MemoryStore>,
+) {
+    let vault_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("bonsai-agent")
+        .join("vault");
+    let vault = crate::knowledge::vault::Vault::new(&vault_path).ok();
+    if let Some(ref v) = vault {
+        let stocks = crate::knowledge::extractor::extract_stock(task_context, &session.id);
+        let _ = v.append_all(&stocks);
+    }
+    let embedder = create_embedder();
+
+    let Some(s) = store else { return };
+
+    // ハイブリッド検索: 関連メモリ
+    let search = HybridSearch::new(s, embedder.as_ref());
+    let memories = search.search(task_context, 3).unwrap_or_default();
+    if !memories.is_empty() {
+        let ctx: String = memories
+            .iter()
+            .map(|r| format!("- {}", r.memory.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        session.add_message(Message::system(format!("関連する過去の記憶:\n{ctx}")));
+    }
+
+    // 類似経験
+    let exp = ExperienceStore::new(s.conn());
+    let past = exp.find_similar(task_context, 3).unwrap_or_default();
+    if !past.is_empty() {
+        let ctx: String = past
+            .iter()
+            .map(|e| {
+                let prefix = match e.exp_type {
+                    ExperienceType::Success => "成功",
+                    ExperienceType::Failure => "失敗（避けよ）",
+                    ExperienceType::Insight => "学び",
+                };
+                format!("- [{prefix}] {}: {}", e.action, e.outcome)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        session.add_message(Message::system(format!("過去の経験:\n{ctx}")));
+    }
+
+    // 関連スキル
+    let skills = SkillStore::new(s.conn());
+    let matching = skills.find_matching(task_context, 3).unwrap_or_default();
+    if !matching.is_empty() {
+        let ctx: String = matching
+            .iter()
+            .map(|sk| {
+                format!(
+                    "- スキル「{}」: {} (ツール: {})",
+                    sk.name, sk.description, sk.tool_chain
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        session.add_message(Message::system(format!(
+            "利用可能なスキル（過去の成功パターン）:\n{ctx}\n上記のパターンが適用可能な場合は参考にしてください。"
+        )));
+    }
+}
+
+/// 成功時のセッション保存・経験記録・スキル昇格
+fn record_success(
+    store: Option<&MemoryStore>,
+    session: &Session,
+    task_context: &str,
+    answer: &str,
+) {
+    let Some(s) = store else { return };
+    let _ = s.save_session(session);
+    let exp = ExperienceStore::new(s.conn());
+    let _ = exp.record(&RecordParams {
+        exp_type: ExperienceType::Success,
+        task_context,
+        action: answer,
+        outcome: "completed",
+        lesson: None,
+        tool_name: None,
+        error_type: None,
+        error_detail: None,
+    });
+    let skills = SkillStore::new(s.conn());
+    let _ = skills.promote_from_experiences(s.conn(), 3);
+    let evo = crate::memory::evolution::EvolutionEngine::new(s);
+    let _ = evo.auto_collect();
+    let _ = evo.apply_improvements();
+}
+
+/// 中断時のセッション保存・経験記録
+fn record_abort(store: Option<&MemoryStore>, session: &Session, task_context: &str, reason: &str) {
+    let Some(s) = store else { return };
+    let _ = s.save_session(session);
+    let exp = ExperienceStore::new(s.conn());
+    let _ = exp.record(&RecordParams {
+        exp_type: ExperienceType::Insight,
+        task_context,
+        action: "aborted",
+        outcome: reason,
+        lesson: Some(reason),
+        tool_name: None,
+        error_type: Some("Aborted"),
+        error_detail: None,
+    });
 }
 
 /// ParsedOutputから回答テキストを構築
