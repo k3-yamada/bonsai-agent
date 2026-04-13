@@ -5,13 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## プロジェクト概要
 
 `bonsai-agent` — Bonsai-8B（1ビット量子化Qwen3-8B、1.28GB）で動作するRust製自律型エージェント。
-Mac M2 16GB上でllama-server HTTP API経由で推論。349テスト、49ソースファイル。
+Mac M2 16GB上でllama-server HTTP API経由で推論。353テスト、58ソースファイル。
 
 ## ビルド・テストコマンド
 
 ```bash
 cargo build                    # ビルド
-cargo test                     # ユニットテスト（302テスト）
+cargo test                     # ユニットテスト（346テスト）
 cargo test -- --ignored        # 統合テスト（llama-server/ネットワーク必要）
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマットチェック
