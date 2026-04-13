@@ -222,6 +222,29 @@ impl<'a> EvolutionEngine<'a> {
         Ok(applied)
     }
 
+    /// 実験ループ用: Dreamerのinsightからプロンプトルール候補を生成
+    pub fn insight_based_mutations(&self) -> Result<Vec<String>> {
+        let mut mutations = Vec::new();
+
+        // Dreamerレポートからinsightを取得
+        let dreamer = crate::memory::dreams::Dreamer::new(self.store.conn());
+        if let Ok(report) = dreamer.generate_report(7) {
+            for insight in &report.insights {
+                mutations.push(insight.clone());
+            }
+        }
+
+        // auto-improveタグのメモリからも取得
+        let auto_insights = self.store.search_memories("auto-improve", 10)?;
+        for mem in &auto_insights {
+            if !mutations.iter().any(|m| { let prefix: String = mem.content.chars().take(20).collect(); m.contains(&prefix) }) {
+                mutations.push(mem.content.clone());
+            }
+        }
+
+        Ok(mutations)
+    }
+
     /// 定期実行用: 関心領域のarxiv論文を自動収集
     pub fn auto_collect(&self) -> Result<usize> {
         let queries = [
@@ -317,6 +340,25 @@ mod tests {
         for e in &entries {
             println!("  [{} ] {}", e.id, e.title);
         }
+    }
+
+    #[test]
+    fn test_insight_based_mutations_empty() {
+        let store = MemoryStore::in_memory().unwrap();
+        let engine = EvolutionEngine::new(&store);
+        let mutations = engine.insight_based_mutations().unwrap();
+        // Dreamerがルールベースのinsightを返す場合もある
+        // エラーなく実行できることを確認
+        assert!(mutations.len() < 100);
+    }
+
+    #[test]
+    fn test_insight_based_mutations_with_data() {
+        let store = MemoryStore::in_memory().unwrap();
+        store.save_memory("[auto-learn] shell:'rm' は3回失敗", "insight", &["auto-improve".into()]).unwrap();
+        let engine = EvolutionEngine::new(&store);
+        let mutations = engine.insight_based_mutations().unwrap();
+        assert!(!mutations.is_empty());
     }
 
     #[test]
