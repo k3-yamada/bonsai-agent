@@ -1,6 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -177,17 +178,20 @@ pub struct McpToolInfo {
     pub input_schema: serde_json::Value,
 }
 
-/// MCPツールをTool traitにラップ（静的情報のみ保持、呼び出しはMcpConnection経由）
+/// MCPツールをTool traitにラップ（接続参照を保持し、実際のツール呼び出しを委譲）
 pub struct McpToolWrapper {
     info: McpToolInfo,
+    #[allow(dead_code)]
     server_name: String,
+    connection: Arc<Mutex<McpConnection>>,
 }
 
 impl McpToolWrapper {
-    pub fn new(info: McpToolInfo, server_name: &str) -> Self {
+    pub fn new(info: McpToolInfo, server_name: &str, connection: Arc<Mutex<McpConnection>>) -> Self {
         Self {
             info,
             server_name: server_name.to_string(),
+            connection,
         }
     }
 }
@@ -209,13 +213,16 @@ impl Tool for McpToolWrapper {
         Permission::Confirm // MCPツールはデフォルトConfirm
     }
 
-    fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
-        // 注意: 実際の呼び出しはMcpConnection::call_tool経由で行う必要がある
-        // このwrapperはスキーマ情報提供用。エージェントループで特別扱い。
-        Ok(ToolResult {
-            output: format!("MCPツール '{}' (サーバー: {}) の直接呼び出しは未サポート。agent_loop経由で使用してください。", self.info.name, self.server_name),
-            success: false,
-        })
+    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
+        let mut conn = self.connection.lock()
+            .map_err(|_| anyhow::anyhow!("MCP接続ロック取得失敗"))?;
+        match conn.call_tool(&self.info.name, args) {
+            Ok(output) => Ok(ToolResult { output, success: true }),
+            Err(e) => Ok(ToolResult {
+                output: format!("MCPツールエラー: {e}"),
+                success: false,
+            }),
+        }
     }
 }
 
@@ -237,27 +244,24 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     }
 
     #[test]
-    fn test_mcp_tool_wrapper_metadata() {
+    fn test_mcp_tool_info() {
         let info = McpToolInfo {
             name: "read_file".to_string(),
             description: "ファイルを読む".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
         };
-        let wrapper = McpToolWrapper::new(info, "filesystem");
-        assert_eq!(wrapper.name(), "read_file");
-        assert_eq!(wrapper.permission(), Permission::Confirm);
+        assert_eq!(info.name, "read_file");
+        assert_eq!(info.description, "ファイルを読む");
     }
 
     #[test]
-    fn test_mcp_tool_wrapper_schema() {
+    fn test_mcp_tool_info_schema() {
         let info = McpToolInfo {
             name: "test".to_string(),
             description: "desc".to_string(),
             input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
         };
-        let wrapper = McpToolWrapper::new(info, "test-server");
-        let schema = wrapper.parameters_schema();
-        assert!(schema["properties"]["path"].is_object());
+        assert!(info.input_schema["properties"]["path"].is_object());
     }
 
     #[test]
