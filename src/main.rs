@@ -16,6 +16,7 @@ use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
 use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
+use bonsai_agent::agent::experiment::{run_experiment_loop, ExperimentLoopConfig};
 use bonsai_agent::tools::ToolRegistry;
 
 #[derive(Parser)]
@@ -72,6 +73,14 @@ struct Cli {
     /// MCPサーバー
     #[arg(long)]
     mcp_server: bool,
+
+    /// 実験ループ（自律的自己改善）
+    #[arg(long)]
+    lab: bool,
+
+    /// 実験回数上限
+    #[arg(long, default_value = "10")]
+    lab_experiments: usize,
 }
 
 fn main() -> Result<()> {
@@ -114,6 +123,37 @@ fn main() -> Result<()> {
     // Ctrl+Cハンドラ
     let cancel_clone = cancel.clone();
     ctrlc_handler(cancel_clone);
+
+    if cli.lab {
+        let db_path = get_db_path();
+        let store = MemoryStore::open(&db_path)?;
+        let backend: Box<dyn bonsai_agent::runtime::inference::LlmBackend> = if cli.mock {
+            Box::new(MockLlmBackend::new(
+                (0..10000).map(|_| "1024".to_string()).collect(),
+            ))
+        } else {
+            let b = LlamaServerBackend::connect(&server_url, &app_config.model.model_id);
+            if !b.is_healthy() {
+                eprintln!("エラー: llama-server ({server_url}) に接続できません。");
+                std::process::exit(1);
+            }
+            Box::new(b)
+        };
+        let tsv_path = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("bonsai-agent")
+            .join("experiments.tsv");
+        let loop_config = ExperimentLoopConfig {
+            tsv_path: Some(tsv_path),
+            max_experiments: Some(cli.lab_experiments),
+            dreamer_interval: 10,
+        };
+        let experiments = run_experiment_loop(
+            &config, backend.as_ref(), &tools, &path_guard, &cancel, &store, &loop_config,
+        )?;
+        println!("\n実験完了: {}件", experiments.len());
+        return Ok(());
+    }
 
     if cli.evolve {
         let db_path = get_db_path();

@@ -19,6 +19,22 @@ pub struct AppConfig {
     pub hooks: crate::tools::hooks::HooksConfig,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentConfig {
+    pub max_experiments: usize,
+    pub dreamer_interval: usize,
+}
+
+impl Default for ExperimentConfig {
+    fn default() -> Self {
+        Self {
+            max_experiments: 10,
+            dreamer_interval: 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginsConfig {
