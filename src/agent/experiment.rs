@@ -56,26 +56,49 @@ impl Default for HypothesisGenerator {
 }
 
 impl HypothesisGenerator {
-    /// 次の変異候補を生成（ラウンドロビン）
+    /// 次の変異候補を生成（10サイクルローテーション）
     pub fn next_mutation(&mut self, experiment_count: usize) -> Mutation {
-        // 3種のmutationをローテーション:
+        // 10種のmutationをローテーション:
         // 0,1,2: プロンプトルール追加
-        // 3: max_iterations増加
-        // 4: max_iterations減少
-        let cycle = experiment_count % 5;
+        // 3,4: max_iterations変更
+        // 5,6: max_tools_selected変更
+        // 7,8: max_retries変更
+        // 9: プロンプトルール追加（追加枠）
+        let cycle = experiment_count % 10;
 
         match cycle {
             3 => Mutation {
                 mutation_type: MutationType::AgentParam,
-                detail: "max_iterations: +2".into(),
+                detail: "max_iterations: 12 (+2)".into(),
                 apply: MutationAction::SetMaxIterations(12),
             },
             4 => Mutation {
                 mutation_type: MutationType::AgentParam,
-                detail: "max_iterations: -2".into(),
+                detail: "max_iterations: 8 (-2)".into(),
                 apply: MutationAction::SetMaxIterations(8),
             },
+            5 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_tools_selected: 3 (-2)".into(),
+                apply: MutationAction::SetMaxToolsSelected(3),
+            },
+            6 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_tools_selected: 7 (+2)".into(),
+                apply: MutationAction::SetMaxToolsSelected(7),
+            },
+            7 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_retries: 1 (-2)".into(),
+                apply: MutationAction::SetMaxRetries(1),
+            },
+            8 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_retries: 5 (+2)".into(),
+                apply: MutationAction::SetMaxRetries(5),
+            },
             _ => {
+                // サイクル 0,1,2,9 はプロンプトルール
                 let rule = &self.rules[self.current_index % self.rules.len()];
                 let mutation = Mutation {
                     mutation_type: MutationType::PromptRule,
