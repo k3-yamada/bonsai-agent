@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::agent::compaction::{CompactionConfig, compact_if_needed};
 use crate::agent::conversation::{Message, ParsedOutput, Session};
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
