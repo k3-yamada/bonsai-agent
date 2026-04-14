@@ -61,6 +61,7 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSettings {
+    pub soul_path: Option<std::path::PathBuf>,
     pub max_iterations: usize,
     pub max_retries: usize,
     pub shell_timeout_secs: u64,
@@ -96,6 +97,7 @@ impl Default for ModelConfig {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
+            soul_path: None,
             max_iterations: 10,
             max_retries: 3,
             shell_timeout_secs: 30,
@@ -216,5 +218,24 @@ max_iterations = 20
     fn test_config_path() {
         let path = AppConfig::config_path();
         assert!(path.to_string_lossy().contains("bonsai-agent"));
+    }
+
+    #[test]
+    fn test_soul_path_default_none() {
+        let config = AppConfig::default();
+        assert!(config.agent.soul_path.is_none());
+    }
+
+    #[test]
+    fn test_soul_path_from_toml() {
+        let toml_str = r#"
+[agent]
+soul_path = "/tmp/SOUL.md"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.agent.soul_path.as_ref().unwrap().to_str().unwrap(),
+            "/tmp/SOUL.md"
+        );
     }
 }
