@@ -157,7 +157,7 @@ impl ExperimentLog {
         if needs_header {
             writeln!(
                 file,
-                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs"
+                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance"
             )?;
         }
 
