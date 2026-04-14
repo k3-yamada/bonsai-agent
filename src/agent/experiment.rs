@@ -321,7 +321,7 @@ pub fn run_experiment_loop(
                 generator.add_insight_mutation(insight);
                 eprintln!("[lab] Dreamer insight追加: {insight}");
             }
-            for skill in \&report.skill_promotions {
+            for skill in &report.skill_promotions {
                 eprintln!("[lab] スキル自動昇格: {skill}");
             }
         }
