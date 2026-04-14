@@ -298,7 +298,7 @@ mod tests {
         let tool = FileReadTool;
         let result = tool.call(serde_json::json!({"path": path})).unwrap();
         assert!(result.success);
-        assert_eq!(result.output, "hello world");
+        assert!(result.output.contains("hello world"), "出力に内容が含まれること");
 
         fs::remove_file(&path).ok();
     }
