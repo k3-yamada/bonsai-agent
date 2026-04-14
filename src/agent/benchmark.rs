@@ -297,6 +297,7 @@ impl BenchmarkSuite {
     }
 
     /// 各タスクをk回実行してpass^k指標を計算
+    #[allow(clippy::too_many_arguments)]
     pub fn run_k(
         &self,
         config: &AgentConfig,

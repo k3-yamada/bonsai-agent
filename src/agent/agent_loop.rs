@@ -450,10 +450,10 @@ pub fn load_soul(soul_path: &Option<std::path::PathBuf>) -> Option<String> {
     .collect();
 
     for path in candidates {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if !content.trim().is_empty() {
-                return Some(content);
-            }
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && !content.trim().is_empty()
+        {
+            return Some(content);
         }
     }
     None

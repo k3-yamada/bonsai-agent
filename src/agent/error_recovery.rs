@@ -87,7 +87,7 @@ impl ContinueSite {
             .cloned()
             .unwrap_or(FailureMode::ReasoningError);
 
-        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES + 1 {
+        if self.consecutive_failures > MAX_CONSECUTIVE_FAILURES {
             // Stage 3: 安全停止
             return RecoveryAction::ExplainAndStop(format!(
                 "{}回連続で失敗しました。安全のため中断します。最後の原因: {:?}",
