@@ -358,4 +358,36 @@ mod tests {
         assert_eq!(report.success_rate, 0.0);
         assert!(report.tool_usage.is_empty());
     }
+
+    #[test]
+    fn test_dream_light() {
+        let store = setup();
+        let dreamer = Dreamer::new(store.conn());
+        let report = dreamer.dream_light(7).unwrap();
+        assert_eq!(report.phase, DreamPhase::Light);
+        assert!(report.failure_patterns.is_empty(), "Lightはfailure_patternsを収集しない");
+        assert!(!report.tool_usage.is_empty());
+    }
+
+    #[test]
+    fn test_dream_deep() {
+        let store = setup();
+        let dreamer = Dreamer::new(store.conn());
+        let report = dreamer.dream_deep(7).unwrap();
+        assert_eq!(report.phase, DreamPhase::Deep);
+        assert!(!report.tool_usage.is_empty());
+    }
+
+    #[test]
+    fn test_dream_phase_difference() {
+        let store = setup();
+        let dreamer = Dreamer::new(store.conn());
+        let light = dreamer.dream_light(7).unwrap();
+        let deep = dreamer.dream_deep(7).unwrap();
+        assert_eq!(light.phase, DreamPhase::Light);
+        assert_eq!(deep.phase, DreamPhase::Deep);
+        // Deepはfailure_patternsも分析
+        // Lightは空
+        assert!(light.failure_patterns.is_empty());
+    }
 }
