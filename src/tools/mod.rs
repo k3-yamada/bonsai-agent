@@ -344,4 +344,29 @@ mod tests {
         // JSONスキーマが含まれない
         assert!(!compact.contains("properties"));
     }
+
+    #[test]
+    fn test_task_boost_file_query() {
+        let reg = build_registry();
+        let selected = reg.select_relevant("ファイルを読みたい", 3);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        // file系ツールがブーストされて上位に来る
+        assert_eq!(names[0], "file_read");
+    }
+
+    #[test]
+    fn test_task_boost_git_query() {
+        let reg = build_registry();
+        let selected = reg.select_relevant("gitのコミット履歴を見たい", 3);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"git"));
+    }
+
+    #[test]
+    fn test_task_boost_no_boost() {
+        let reg = build_registry();
+        // ブーストキーワードなしのクエリ
+        let selected = reg.select_relevant("天気を教えて", 3);
+        assert_eq!(selected.len(), 3);
+    }
 }
