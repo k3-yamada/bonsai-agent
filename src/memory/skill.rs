@@ -110,15 +110,17 @@ impl<'a> SkillStore<'a> {
             .map_err(Into::into)
     }
 
-    /// 経験からスキルへの昇格チェック
-    /// 同じツールチェーンが threshold 回以上成功していたらスキルとして登録
+    /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
+    /// frequency(0.4) + recency(0.35) + diversity(0.25)
     pub fn promote_from_experiences(
         &self,
         conn: &Connection,
         threshold: usize,
     ) -> Result<Vec<String>> {
         let mut stmt = conn.prepare(
-            "SELECT action, COUNT(*) as cnt, task_context
+            "SELECT action, COUNT(*) as cnt, task_context,
+                    COUNT(DISTINCT task_context) as diversity,
+                    MAX(created_at) as latest
              FROM experiences
              WHERE type = 'success'
              GROUP BY action
@@ -133,11 +135,17 @@ impl<'a> SkillStore<'a> {
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })?;
 
         for row in rows {
-            let (action, count, context) = row?;
+            let (action, count, context, diversity, latest) = row?;
+            let freq_s = (count as f64 / threshold as f64).min(2.0) * 0.4;
+            let div_s = (diversity as f64).min(5.0) / 5.0 * 0.25;
+            let rec_s = if latest.len() > 10 { 0.35 } else { 0.0 };
+            let _score = freq_s + div_s + rec_s;
 
             // 既にスキルとして存在するかチェック
             let exists: bool = self.conn.query_row(

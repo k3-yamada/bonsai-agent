@@ -21,7 +21,9 @@ impl Tool for FileReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "読み取るファイルのパス" }
+                "path": { "type": "string", "description": "読み取るファイルのパス" },
+                "offset": { "type": "integer", "description": "読み始める行(0始まり)" },
+                "limit": { "type": "integer", "description": "最大行数(省略時100)" }
             },
             "required": ["path"]
         })
@@ -37,11 +39,19 @@ impl Tool for FileReadTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("'path' パラメータが必要です"))?;
 
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
         match std::fs::read_to_string(path) {
-            Ok(content) => Ok(ToolResult {
-                output: content,
-                success: true,
-            }),
+            Ok(fc) => {
+                let lines: Vec<&str> = fc.lines().collect();
+                let total = lines.len();
+                let s = offset.min(total);
+                let e = (s + limit).min(total);
+                let numbered: Vec<String> = lines[s..e].iter().enumerate()
+                    .map(|(i, l)| format!("{:4}| {l}", s + i + 1)).collect();
+                let hdr = format!("[{path}] ({total}行, 表示:{}-{})", s + 1, e);
+                Ok(ToolResult { output: format!("{hdr}\n{}", numbered.join("\n")), success: true })
+            },
             Err(e) => Ok(ToolResult {
                 output: format!("ファイル読み取りエラー: {e}"),
                 success: false,
