@@ -272,13 +272,12 @@ mod tests {
     fn t_flush_saves_to_store() {
         let store = crate::memory::store::MemoryStore::in_memory().unwrap();
         let mut msgs = vec![Message::system("s")];
-        // 7つのメッセージ（boundary = 7-6 = 1、index 0のsystemのみ対象外）
-        for i in 0..3 {
+        for i in 0..10 {
             msgs.push(Message::user(format!("q{i}")));
-            msgs.push(Message::assistant("a".repeat(150)));
+            msgs.push(Message::assistant("important context data ".repeat(8)));
         }
         flush_before_compaction(&msgs, Some(&store));
-        let results = store.search_memories("important context", 10).unwrap();
+        let results = store.search_memories("important", 10).unwrap();
         assert!(!results.is_empty(), "フラッシュされたメモリが検索可能であること");
     }
     #[test]
