@@ -422,6 +422,13 @@ pub fn run_agent_loop_with_session(
             }
             StepOutcome::Continue(step_tools) => {
                 all_tools.extend(step_tools);
+                let (lv, _offloaded) = compact_if_needed(
+                    &mut session.messages,
+                    &CompactionConfig::default(),
+                );
+                if lv > 0 {
+                    eprintln!("[compact] level {lv} applied (iter {iteration})");
+                }
                 continue;
             }
         }
