@@ -410,8 +410,15 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn test_fuzzy_replace_whitespace_difference() {
-        let content = "fn main() {\n    println!("hello");\n}";
+        let content = "alpha   beta";
+        let old = "  alpha beta  ";
+        let result = fuzzy_find_replace(content, old, "gamma");
+        assert!(result.is_some());
+        let (_, w) = result.unwrap();
+        assert!(w.contains("模糊"));
+    }
         let old_text = "fn main() {\n  println!("hello");\n}"; // インデント違い
         let new_text = "fn main() {\n    println!("world");\n}";
         let result = fuzzy_find_replace(content, old_text, new_text);
