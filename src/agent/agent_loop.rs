@@ -437,6 +437,28 @@ pub fn run_agent_loop_with_session(
     })
 }
 
+/// SOUL.mdからペルソナを読み込む
+/// 検索順: (1) 明示パス, (2) .bonsai/SOUL.md, (3) ~/.config/bonsai-agent/SOUL.md
+pub fn load_soul(soul_path: &Option<std::path::PathBuf>) -> Option<String> {
+    let candidates: Vec<std::path::PathBuf> = [
+        soul_path.clone(),
+        Some(std::path::PathBuf::from(".bonsai/SOUL.md")),
+        dirs::config_dir().map(|d| d.join("bonsai-agent").join("SOUL.md")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    for path in candidates {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if !content.trim().is_empty() {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
 /// コンテキストメモリ・経験・スキルをセッションに注入
 fn inject_contextual_memories(
     session: &mut Session,
@@ -906,5 +928,41 @@ mod tests {
     fn test_stall_detector_default_threshold() {
         let sd = StallDetector::default();
         assert_eq!(sd.stall_threshold, 3);
+    }
+
+    // --- SOUL.md テスト ---
+
+    #[test]
+    fn test_load_soul_missing_is_none() {
+        let result = load_soul(&Some(std::path::PathBuf::from("/tmp/nonexistent_soul_bonsai.md")));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_load_soul_from_explicit_path() {
+        let path = format!("/tmp/bonsai-test-soul-{}.md", uuid::Uuid::new_v4());
+        std::fs::write(&path, "私はテスト用ペルソナです").unwrap();
+        let result = load_soul(&Some(std::path::PathBuf::from(&path)));
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("ペルソナ"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_soul_empty_file_is_none() {
+        let path = format!("/tmp/bonsai-test-soul-empty-{}.md", uuid::Uuid::new_v4());
+        std::fs::write(&path, "   ").unwrap();
+        let result = load_soul(&Some(std::path::PathBuf::from(&path)));
+        assert!(result.is_none());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_soul_none_path() {
+        // Noneパスの場合、.bonsai/SOUL.mdなどを探すが通常存在しない
+        let result = load_soul(&None);
+        // テスト環境では存在しないのでNone（存在する場合はSome）
+        // assertはしない — 環境依存
+        let _ = result;
     }
 }
