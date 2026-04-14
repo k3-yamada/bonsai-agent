@@ -25,6 +25,17 @@ pub struct DreamReport {
     pub success_rate: f64,                    // 成功率
     pub insights: Vec<String>,                // 洞察
     pub emerging_patterns: Vec<Pattern>,      // 新興パターン
+    pub phase: DreamPhase,                    // Light or Deep
+    pub skill_promotions: Vec<String>,        // Deep時のスキル昇格推薦
+}
+
+/// Dreamingフェーズ
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DreamPhase {
+    /// Light: 高速な候補収集・重複排除（毎ステップ実行可能）
+    Light,
+    /// Deep: パターン分析・スキル昇格推薦（定期実行）
+    Deep,
 }
 
 /// Dreamingエンジン
@@ -64,7 +75,44 @@ impl<'a> Dreamer<'a> {
             success_rate,
             insights,
             emerging_patterns,
+            phase: DreamPhase::Deep,
+            skill_promotions: Vec::new(),
         })
+    }
+
+
+    /// Light Dreaming: 高速な統計収集（毎回実行可能）
+    pub fn dream_light(&self, days: i64) -> Result<DreamReport> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let now = chrono::Utc::now().to_rfc3339();
+        let tool_usage = self.tool_usage_stats(&cutoff)?;
+        let success_rate = self.success_rate(&cutoff)?;
+        let insights = self.generate_insights(&tool_usage, &[], success_rate);
+
+        Ok(DreamReport {
+            timestamp: now,
+            tool_usage,
+            failure_patterns: Vec::new(),
+            success_rate,
+            insights,
+            emerging_patterns: Vec::new(),
+            phase: DreamPhase::Light,
+            skill_promotions: Vec::new(),
+        })
+    }
+
+    /// Deep Dreaming: パターン分析+スキル昇格推薦（定期実行）
+    pub fn dream_deep(&self, days: i64) -> Result<DreamReport> {
+        let mut report = self.generate_report(days)?;
+        report.phase = DreamPhase::Deep;
+
+        // スキル昇格候補を検出
+        let skill_store = crate::memory::skill::SkillStore::new(self.conn);
+        if let Ok(promoted) = skill_store.promote_from_experiences(self.conn, 3) {
+            report.skill_promotions = promoted;
+        }
+
+        Ok(report)
     }
 
     /// ツール使用頻度を集計
