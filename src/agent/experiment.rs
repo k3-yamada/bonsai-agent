@@ -315,11 +315,14 @@ pub fn run_experiment_loop(
 
         // g. Dreamer統合（N実験ごと）
         if experiment_count % loop_config.dreamer_interval == 0
-            && let Ok(report) = crate::memory::dreams::Dreamer::new(store.conn()).generate_report(7)
+            && let Ok(report) = crate::memory::dreams::Dreamer::new(store.conn()).dream_deep(7)
         {
             for insight in &report.insights {
                 generator.add_insight_mutation(insight);
                 eprintln!("[lab] Dreamer insight追加: {insight}");
+            }
+            for skill in \&report.skill_promotions {
+                eprintln!("[lab] スキル自動昇格: {skill}");
             }
         }
     }
