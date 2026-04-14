@@ -894,9 +894,12 @@ mod tests {
     #[test]
     fn test_stall_detector_same_output_hash() {
         let mut sd = StallDetector::new(3);
+        // 初回はハッシュが0→42で変化するため進捗あり
+        assert!(!sd.record_step(true, 42));
+        // 2回目以降は同じハッシュ → 停滞カウント
         assert!(!sd.record_step(true, 42));
         assert!(!sd.record_step(true, 42));
-        assert!(sd.record_step(true, 42));
+        assert!(sd.record_step(true, 42)); // 3回停滞で検出
     }
 
     #[test]
