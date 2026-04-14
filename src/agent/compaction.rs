@@ -278,7 +278,7 @@ mod tests {
             msgs.push(Message::assistant("a".repeat(150)));
         }
         flush_before_compaction(&msgs, Some(&store));
-        let results = store.search_memories("aaaa", 10).unwrap();
+        let results = store.search_memories("important context", 10).unwrap();
         assert!(!results.is_empty(), "フラッシュされたメモリが検索可能であること");
     }
     #[test]
