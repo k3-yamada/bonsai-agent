@@ -224,7 +224,7 @@ mod tests {
         let mut m = vec![
             Message::system("s"), Message::user("q0"),
             Message::assistant("assistant output here"),
-            Message::tool("tool result with enough content to compress", "t0"),
+            Message::tool("tool result with enough content to compress and it must be over fifty characters long for testing", "t0"),
             Message::user("q1"), Message::assistant("a1"), Message::tool("r1 short", "t1"),
         ];
         compact_level1(&mut m, &CompactionConfig { placeholder_keep_recent: 3, ..Default::default() });
