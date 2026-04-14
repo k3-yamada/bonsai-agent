@@ -132,6 +132,18 @@ impl ToolRegistry {
         output
     }
 
+
+    /// 名前+説明のみのコンパクト形式（パラメータスキーマ省略でトークン節約）
+    pub fn format_schemas_compact(&self, tools: &[&dyn Tool]) -> String {
+        if tools.is_empty() {
+            return String::new();
+        }
+        let mut output = String::from("# 使用可能なツール\n\n");
+        for tool in tools {
+            output.push_str(&format!("- **{}**: {}\n", tool.name(), tool.description()));
+        }
+        output
+    }
     /// 登録済みツール名のHashSetを返す（バリデーション用）
     pub fn known_names(&self) -> std::collections::HashSet<String> {
         self.tools.keys().cloned().collect()
@@ -282,5 +294,42 @@ mod tests {
         let schema = tool.schema();
         assert_eq!(schema.name, "shell");
         assert!(!schema.description.is_empty());
+    }
+
+    #[test]
+    fn test_format_schemas_compact() {
+        let reg = build_registry();
+        let all: Vec<&dyn Tool> = reg.tools.values().map(|t| t.as_ref()).collect();
+        let compact = reg.format_schemas_compact(&all);
+        let full = reg.format_schemas(&all);
+        // compact版はフル版より短い
+        assert!(compact.len() < full.len());
+        // 名前と説明は含まれる
+        assert!(compact.contains("file_read"));
+        assert!(compact.contains("shell"));
+    }
+
+    #[test]
+    fn test_format_schemas_compact_empty() {
+        let reg = build_registry();
+        let compact = reg.format_schemas_compact(&[]);
+        assert!(compact.is_empty());
+    }
+
+    #[test]
+    fn test_format_schemas_compact_has_description() {
+        let reg = build_registry();
+        let tool = reg.get("file_read").unwrap();
+        let compact = reg.format_schemas_compact(&[tool]);
+        assert!(compact.contains("ファイル"));
+    }
+
+    #[test]
+    fn test_format_schemas_compact_no_params() {
+        let reg = build_registry();
+        let tool = reg.get("shell").unwrap();
+        let compact = reg.format_schemas_compact(&[tool]);
+        // JSONスキーマが含まれない
+        assert!(!compact.contains("properties"));
     }
 }
