@@ -92,6 +92,7 @@ impl ToolRegistry {
     pub fn select_relevant(&self, query: &str, max: usize) -> Vec<&dyn Tool> {
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+        let task_boost = Self::detect_task_boost(&query_lower);
 
         let mut scored: Vec<(&dyn Tool, usize)> = self
             .tools
@@ -103,6 +104,7 @@ impl ToolRegistry {
                     .iter()
                     .filter(|w| name.contains(*w) || desc.contains(*w))
                     .count();
+                if task_boost.iter().any(|b| name.contains(b)) { score += 2; }
                 (tool.as_ref(), score)
             })
             .collect();
@@ -111,6 +113,16 @@ impl ToolRegistry {
         scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
 
         scored.into_iter().take(max).map(|(t, _)| t).collect()
+    }
+
+    /// タスク種別からブーストするツール名プレフィックスを検出
+    fn detect_task_boost(query: &str) -> Vec<&'static str> {
+        let mut b = Vec::new();
+        if query.contains("ファイル") || query.contains("読") || query.contains("書") { b.push("file"); }
+        if query.contains("コマンド") || query.contains("実行") || query.contains("ビルド") { b.push("shell"); }
+        if query.contains("git") || query.contains("コミット") { b.push("git"); }
+        if query.contains("検索") || query.contains("探") { b.push("web"); b.push("file"); }
+        b
     }
 
     /// 選択されたツールのスキーマをシステムプロンプト用にフォーマット
