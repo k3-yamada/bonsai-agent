@@ -20,6 +20,17 @@ impl Default for CompactionConfig {
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages.iter().map(|m| m.content.len().div_ceil(4)).sum()
 }
+/// AI+Toolメッセージペアを検出
+pub fn find_ai_tool_pairs(messages: &[Message]) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    for i in 0..messages.len().saturating_sub(1) {
+        if matches!(messages[i].role, Role::Assistant) && matches!(messages[i + 1].role, Role::Tool) {
+            pairs.push((i, i + 1));
+        }
+    }
+    pairs
+}
+
 pub fn compact_level0(messages: &mut [Message], config: &CompactionConfig) -> Vec<String> {
     let mut off = Vec::new();
     for msg in messages.iter_mut() {
@@ -47,7 +58,16 @@ pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
     if t <= config.placeholder_keep_recent {
         return;
     }
-    for msg in messages[..t - config.placeholder_keep_recent].iter_mut() {
+    let boundary = t - config.placeholder_keep_recent;
+    let pairs = find_ai_tool_pairs(messages);
+    let protected: std::collections::HashSet<usize> = pairs
+        .iter()
+        .flat_map(|&(a, b)| {
+            if a >= boundary || b >= boundary { vec![a, b] } else { vec![] }
+        })
+        .collect();
+    for (i, msg) in messages[..boundary].iter_mut().enumerate() {
+        if protected.contains(&i) { continue; }
         if matches!(msg.role, Role::Tool) && msg.content.len() > 50 {
             let id = msg.tool_call_id.as_deref().unwrap_or("?");
             msg.content = format!("[prev:{id}]");
@@ -182,5 +202,46 @@ mod tests {
         let mut m = vec![Message::user("hi")];
         let (lv, _) = compact_if_needed(&mut m, &CompactionConfig::default());
         assert_eq!(lv, 0);
+    }
+
+    #[test]
+    fn t_find_pairs() {
+        let m = vec![Message::system("s"), Message::user("q"), Message::assistant("a"), Message::tool("r", "t1")];
+        assert_eq!(find_ai_tool_pairs(&m), vec![(2, 3)]);
+    }
+    #[test]
+    fn t_pair_multiple() {
+        let m = vec![Message::assistant("a1"), Message::tool("r1", "t1"), Message::assistant("a2"), Message::tool("r2", "t2")];
+        assert_eq!(find_ai_tool_pairs(&m).len(), 2);
+    }
+    #[test]
+    fn t_pair_none() {
+        let m = vec![Message::user("q"), Message::assistant("a"), Message::user("q2")];
+        assert!(find_ai_tool_pairs(&m).is_empty());
+    }
+    #[test]
+    fn t_l1_no_orphan() {
+        let mut m = vec![
+            Message::system("s"), Message::user("q0"),
+            Message::assistant("assistant output here"),
+            Message::tool("tool result with enough content to compress", "t0"),
+            Message::user("q1"), Message::assistant("a1"), Message::tool("r1 short", "t1"),
+        ];
+        compact_level1(&mut m, &CompactionConfig { placeholder_keep_recent: 3, ..Default::default() });
+        // idx3はペア(2,3)の一部だが、境界=4なのでidx3<4→圧縮対象
+        assert!(m[3].content.contains("[prev:"));
+    }
+    #[test]
+    fn t_l1_protect_boundary_pair() {
+        let mut m = vec![
+            Message::system("s"), Message::user("q0"),
+            Message::assistant("old assistant content long"),
+            Message::tool("old tool content long enough", "old"),
+            Message::assistant("boundary assistant"),
+            Message::tool("boundary tool content long enough", "bnd"),
+        ];
+        // keep_recent=2 → boundary=4, pair(4,5) both >= 4 → protected
+        compact_level1(&mut m, &CompactionConfig { placeholder_keep_recent: 2, ..Default::default() });
+        assert!(!m[5].content.contains("[prev:"));
     }
 }
