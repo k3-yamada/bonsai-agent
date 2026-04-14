@@ -100,7 +100,7 @@ impl ToolRegistry {
             .map(|tool| {
                 let name = tool.name().to_lowercase();
                 let desc = tool.description().to_lowercase();
-                let score = query_words
+                let mut score = query_words
                     .iter()
                     .filter(|w| name.contains(*w) || desc.contains(*w))
                     .count();
