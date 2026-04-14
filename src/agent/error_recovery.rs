@@ -306,9 +306,12 @@ impl LoopDetector {
             self.recent_hashes.remove(0);
         }
 
-        // Layer 3: 頻度
-        let freq = self.action_frequency.entry(hash).or_insert(0);
-        *freq += 1;
+        // Layer 3: 頻度カウント
+        let freq_count = {
+            let freq = self.action_frequency.entry(hash).or_insert(0);
+            *freq += 1;
+            *freq
+        };
 
         // 判定1: 完全文字列一致による連続検出
         if self.recent_actions.len() >= self.repeat_threshold {
@@ -332,7 +335,7 @@ impl LoopDetector {
         }
 
         // 判定4: 頻度閾値超過
-        if *freq >= self.frequency_threshold {
+        if freq_count >= self.frequency_threshold {
             return true;
         }
 
