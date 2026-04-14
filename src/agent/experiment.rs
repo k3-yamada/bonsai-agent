@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::agent::agent_loop::AgentConfig;
-use crate::agent::benchmark::BenchmarkSuite;
+use crate::agent::benchmark::{BenchmarkSuite, MultiRunConfig};
 use crate::agent::experiment_log::{Experiment, ExperimentLog, MutationType};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
@@ -231,13 +231,17 @@ pub fn run_experiment_loop(
     let suite = BenchmarkSuite::default_tasks();
     let mut generator = HypothesisGenerator::default();
     let mut experiments: Vec<Experiment> = Vec::new();
+    let multi = MultiRunConfig { k: 3, jitter_seed: true };
+    let pass_threshold = 0.5;
 
-    // 1. ベースライン計測
-    eprintln!("[lab] ベースライン計測中...");
-    let mut baseline = suite.run(base_config, backend, tools, path_guard, cancel)?;
+    // 1. ベースライン計測（pass^k版）
+    eprintln!("[lab] ベースライン計測中（k={}）...", multi.k);
+    let mut baseline = suite.run_k(base_config, backend, tools, path_guard, cancel, &multi, pass_threshold)?;
     eprintln!(
-        "[lab] ベースライン: {:.4} ({:.1}s)",
+        "[lab] ベースライン: score={:.4} pass@k={:.4} pass_consec={:.4} ({:.1}s)",
         baseline.composite_score(),
+        baseline.composite_pass_at_k(),
+        baseline.composite_pass_consecutive_k(),
         baseline.duration_secs
     );
 
@@ -272,12 +276,12 @@ pub fn run_experiment_loop(
         // b. 変異適用
         let modified_config = apply_mutation(base_config, &mutation);
 
-        // c. ベンチマーク実行
-        let result = suite.run(&modified_config, backend, tools, path_guard, cancel)?;
+        // c. ベンチマーク実行（pass^k版）
+        let result = suite.run_k(&modified_config, backend, tools, path_guard, cancel, &multi, pass_threshold)?;
         let snapshot = config_snapshot(&modified_config);
 
-        // d. 評価
-        let exp = Experiment::from_results(
+        // d. 評価（pass^k指標を含む）
+        let exp = Experiment::from_multi_results(
             experiment_id,
             mutation.mutation_type,
             mutation.detail,
@@ -287,8 +291,10 @@ pub fn run_experiment_loop(
         );
 
         eprintln!(
-            "[lab]   score: {:.4} (delta: {:+.4}) → {}",
+            "[lab]   score={:.4} pass@k={:.4} consec={:.4} (delta: {:+.4}) → {}",
             exp.experiment_score,
+            exp.pass_at_k.unwrap_or(0.0),
+            exp.pass_consecutive_k.unwrap_or(0.0),
             exp.delta,
             if exp.accepted { "ACCEPT" } else { "REJECT" }
         );

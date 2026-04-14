@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use crate::agent::benchmark::BenchmarkResult;
+use crate::agent::benchmark::{BenchmarkResult, MultiRunBenchmarkResult};
 
 /// 変異の種類
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,6 +49,9 @@ pub struct Experiment {
     pub accepted: bool,
     pub duration_secs: f64,
     pub config_snapshot: HashMap<String, String>,
+    pub pass_at_k: Option<f64>,
+    pub pass_consecutive_k: Option<f64>,
+    pub score_variance: Option<f64>,
 }
 
 impl Experiment {
@@ -74,6 +77,39 @@ impl Experiment {
             accepted: delta > 0.0,
             duration_secs: experiment.duration_secs,
             config_snapshot,
+            pass_at_k: None,
+            pass_consecutive_k: None,
+            score_variance: None,
+        }
+    }
+
+    pub fn from_multi_results(
+        experiment_id: String,
+        mutation_type: MutationType,
+        mutation_detail: String,
+        baseline: &MultiRunBenchmarkResult,
+        experiment: &MultiRunBenchmarkResult,
+        config_snapshot: HashMap<String, String>,
+    ) -> Self {
+        let baseline_score = baseline.composite_score();
+        let experiment_score = experiment.composite_score();
+        let delta = experiment_score - baseline_score;
+        Self {
+            experiment_id,
+            mutation_type,
+            mutation_detail,
+            baseline_score,
+            experiment_score,
+            delta,
+            accepted: delta > 0.0,
+            duration_secs: experiment.duration_secs,
+            config_snapshot,
+            pass_at_k: Some(experiment.composite_pass_at_k()),
+            pass_consecutive_k: Some(experiment.composite_pass_consecutive_k()),
+            score_variance: Some(
+                experiment.task_scores.iter().map(|s| s.variance).sum::<f64>()
+                    / experiment.task_scores.len().max(1) as f64,
+            ),
         }
     }
 }
@@ -187,6 +223,9 @@ impl ExperimentLog {
                 accepted: accepted != 0,
                 duration_secs: dur,
                 config_snapshot: config,
+                pass_at_k: None,
+                pass_consecutive_k: None,
+                score_variance: None,
             });
         }
         Ok(experiments)
@@ -234,6 +273,9 @@ mod tests {
             accepted: delta > 0.0,
             duration_secs: 10.0,
             config_snapshot: HashMap::from([("max_iterations".into(), "10".into())]),
+            pass_at_k: None,
+            pass_consecutive_k: None,
+            score_variance: None,
         }
     }
 
