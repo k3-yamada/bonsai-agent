@@ -263,10 +263,15 @@ pub fn execute_step(
                 .filter(|i| i.severity == Severity::Block)
                 .map(|i| i.message.as_str())
                 .collect();
-            session.add_message(Message::tool(
-                format!("バリデーションエラー: {}", block_issues.join(", ")),
-                &tool_call.name,
-            ));
+            let alt = match tool_call.name.as_str() {
+                    "shell" => "代替: file_readやgitツールを使用してください。",
+                    "file_write" => "代替: 許可されたディレクトリ内のパスを指定してください。",
+                    _ => "別のツールまたはパラメータで再試行してください。",
+                };
+                session.add_message(Message::tool(
+                    format!("拒否: {}。{}", block_issues.join(", "), alt),
+                    &tool_call.name,
+                ));
             continue;
         }
 
