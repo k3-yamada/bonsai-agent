@@ -163,7 +163,7 @@ impl ExperimentLog {
 
         writeln!(
             file,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}",
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}",
             exp.experiment_id,
             exp.mutation_type.as_str(),
             exp.mutation_detail.replace('\t', " "),
@@ -172,6 +172,9 @@ impl ExperimentLog {
             exp.delta,
             exp.accepted,
             exp.duration_secs,
+            exp.pass_at_k.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.pass_consecutive_k.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.score_variance.map_or("-".to_string(), |v| format!("{v:.6}")),
         )?;
         Ok(())
     }
@@ -401,7 +404,7 @@ mod tests {
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
         let data_line = content.lines().nth(1).unwrap();
-        assert_eq!(data_line.split('\t').count(), 8);
+        assert_eq!(data_line.split('\t').count(), 11);
     }
 
     #[test]
