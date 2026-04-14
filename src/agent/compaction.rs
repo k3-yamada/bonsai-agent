@@ -1,4 +1,5 @@
 use crate::agent::conversation::{Message, Role};
+use crate::memory::store::MemoryStore;
 pub struct CompactionConfig {
     pub large_output_threshold: usize,
     pub placeholder_keep_recent: usize,
@@ -107,6 +108,28 @@ pub fn compact_level3(messages: &mut Vec<Message>, config: &CompactionConfig) {
     messages.clear();
     messages.extend(sys);
     messages.extend(rec);
+}
+
+/// コンパクション前のメモリフラッシュ: 削除対象のAssistant発言を要約してMemoryStoreに退避
+pub fn flush_before_compaction(messages: &[Message], store: Option<&MemoryStore>) {
+    let Some(store) = store else { return };
+    let boundary = messages.len().saturating_sub(6);
+    let mut flushed = Vec::new();
+    for msg in &messages[..boundary] {
+        if matches!(msg.role, Role::Assistant) && msg.content.len() > 100 {
+            let summary: String = msg.content.chars().take(200).collect();
+            flushed.push(summary);
+        }
+    }
+    if flushed.is_empty() { return; }
+    let combined = flushed.join("\n---\n");
+    if let Err(e) = store.save_memory(
+        &combined,
+        "context_flush",
+        &["compaction".to_string()],
+    ) {
+        eprintln!("[flush] メモリ保存失敗: {e}");
+    }
 }
 #[allow(clippy::possible_missing_else)]
 pub fn compact_if_needed(
@@ -243,5 +266,25 @@ mod tests {
         // keep_recent=2 → boundary=4, pair(4,5) both >= 4 → protected
         compact_level1(&mut m, &CompactionConfig { placeholder_keep_recent: 2, ..Default::default() });
         assert!(!m[5].content.contains("[prev:"));
+    }
+
+    #[test]
+    fn t_flush_saves_to_store() {
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let mut msgs = vec![Message::system("s")];
+        // 7つのメッセージ（boundary = 7-6 = 1、index 0のsystemのみ対象外）
+        for i in 0..3 {
+            msgs.push(Message::user(format!("q{i}")));
+            msgs.push(Message::assistant("a".repeat(150)));
+        }
+        flush_before_compaction(&msgs, Some(&store));
+        let results = store.search_memories("aaaa", 10).unwrap();
+        assert!(!results.is_empty(), "フラッシュされたメモリが検索可能であること");
+    }
+    #[test]
+    fn t_flush_no_store() {
+        let msgs = vec![Message::assistant("x".repeat(200))];
+        flush_before_compaction(&msgs, None);
+        // パニックしないことを確認
     }
 }
