@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 /// 失敗モードの大分類
@@ -40,6 +42,76 @@ pub enum RecoveryAction {
     Abort(String),
     /// ユーザーに説明して終了
     ExplainAndStop(String),
+    /// コンテキスト圧縮+再計画指示を注入
+    Replan(String),
+}
+
+/// Continue Sites: 段階的回復エスカレーション（CC記事P3 + 松尾研知見）
+pub const MAX_CONSECUTIVE_FAILURES: usize = 3;
+
+pub struct ContinueSite {
+    consecutive_failures: usize,
+    last_failure_mode: Option<FailureMode>,
+}
+
+impl ContinueSite {
+    pub fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            last_failure_mode: None,
+        }
+    }
+
+    /// 成功を記録（連続失敗カウンタをリセット）
+    pub fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.last_failure_mode = None;
+    }
+
+    /// 失敗を記録
+    pub fn record_failure(&mut self, mode: FailureMode) {
+        self.consecutive_failures += 1;
+        self.last_failure_mode = Some(mode);
+    }
+
+    /// 連続失敗数
+    pub fn consecutive_failures(&self) -> usize {
+        self.consecutive_failures
+    }
+
+    /// 段階的エスカレーション: 1-2回→RetryWithFix、3回→Replan、4+回→ExplainAndStop
+    pub fn decide_escalated_recovery(&self, max_retries: usize) -> RecoveryAction {
+        let mode = self
+            .last_failure_mode
+            .as_ref()
+            .cloned()
+            .unwrap_or(FailureMode::ReasoningError);
+
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES + 1 {
+            // Stage 3: 安全停止
+            return RecoveryAction::ExplainAndStop(format!(
+                "{}回連続で失敗しました。安全のため中断します。最後の原因: {:?}",
+                self.consecutive_failures, mode
+            ));
+        }
+
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            // Stage 2: 再計画
+            return RecoveryAction::Replan(
+                "前のアプローチが失敗しました。目標を再確認し、別の方法で再計画してください。"
+                    .to_string(),
+            );
+        }
+
+        // Stage 1: 通常のリカバリ
+        decide_recovery(&mode, self.consecutive_failures.saturating_sub(1), max_retries)
+    }
+}
+
+impl Default for ContinueSite {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// 失敗モードに応じたリカバリ戦略を決定
@@ -111,11 +183,10 @@ impl CircuitBreaker {
         if let Some((count, last_failure)) = self.failure_counts.get(tool_name)
             && *count >= self.threshold
         {
-            // クールダウン期間が経過していればリセット
             if last_failure.elapsed() >= self.cooldown {
-                return true; // クールダウン完了 → 再試行可能
+                return true;
             }
-            return false; // まだクールダウン中
+            return false;
         }
         true
     }
@@ -150,41 +221,128 @@ impl Default for CircuitBreaker {
     }
 }
 
-/// ループ検出器: 同じツール呼び出しパターンの繰り返しを検出
+/// ループ検出器: 2層検出（ハッシュ+頻度）
 pub struct LoopDetector {
+    // 既存: 完全文字列一致（後方互換）
     recent_actions: Vec<String>,
+    // Layer 2: salient fieldハッシュによる近似検出
+    recent_hashes: Vec<u64>,
+    // Layer 3: ハッシュ別累計頻度
+    action_frequency: HashMap<u64, usize>,
     max_history: usize,
     repeat_threshold: usize,
+    frequency_threshold: usize,
 }
 
 impl LoopDetector {
     pub fn new(max_history: usize, repeat_threshold: usize) -> Self {
         Self {
             recent_actions: Vec::new(),
+            recent_hashes: Vec::new(),
+            action_frequency: HashMap::new(),
             max_history,
             repeat_threshold,
+            frequency_threshold: 30,
         }
+    }
+
+    /// 頻度閾値を設定
+    pub fn with_frequency_threshold(mut self, threshold: usize) -> Self {
+        self.frequency_threshold = threshold;
+        self
+    }
+
+    /// salient fieldハッシュ: ツール名 + ソート済みトップレベル引数キーのみ
+    fn salient_hash(action: &str) -> u64 {
+        // action形式: "tool_name:args_json" or "tool_name"
+        let normalized = if let Some((tool, args)) = action.split_once(':') {
+            // JSONからキーのみ抽出
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(args) {
+                if let Some(obj) = val.as_object() {
+                    let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+                    keys.sort();
+                    format!("{tool}:{}", keys.join(","))
+                } else {
+                    tool.to_string()
+                }
+            } else {
+                tool.to_string()
+            }
+        } else {
+            action.to_string()
+        };
+
+        let mut hasher = DefaultHasher::new();
+        normalized.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// 循環パターン検出（A→B→A→B）
+    fn detect_cycle(&self) -> bool {
+        let n = self.recent_hashes.len();
+        if n < 4 {
+            return false;
+        }
+        // 周期2チェック: 最後4つが [a,b,a,b] パターン
+        let last4 = &self.recent_hashes[n - 4..];
+        if last4[0] == last4[2] && last4[1] == last4[3] && last4[0] != last4[1] {
+            return true;
+        }
+        false
     }
 
     /// アクションを記録し、ループが検出されたらtrueを返す
     pub fn record_and_check(&mut self, action: &str) -> bool {
+        // 完全文字列一致（既存ロジック）
         self.recent_actions.push(action.to_string());
         if self.recent_actions.len() > self.max_history {
             self.recent_actions.remove(0);
         }
 
-        // 直近N回が全て同じアクションかチェック
+        // Layer 2: ハッシュ
+        let hash = Self::salient_hash(action);
+        self.recent_hashes.push(hash);
+        if self.recent_hashes.len() > self.max_history {
+            self.recent_hashes.remove(0);
+        }
+
+        // Layer 3: 頻度
+        let freq = self.action_frequency.entry(hash).or_insert(0);
+        *freq += 1;
+
+        // 判定1: 完全文字列一致による連続検出
         if self.recent_actions.len() >= self.repeat_threshold {
             let last_n = &self.recent_actions[self.recent_actions.len() - self.repeat_threshold..];
             if last_n.iter().all(|a| a == &last_n[0]) {
                 return true;
             }
         }
+
+        // 判定2: ハッシュ一致による近似検出
+        if self.recent_hashes.len() >= self.repeat_threshold {
+            let last_n = &self.recent_hashes[self.recent_hashes.len() - self.repeat_threshold..];
+            if last_n.iter().all(|h| h == &last_n[0]) {
+                return true;
+            }
+        }
+
+        // 判定3: 循環パターン検出
+        if self.detect_cycle() {
+            return true;
+        }
+
+        // 判定4: 頻度閾値超過
+        if *freq >= self.frequency_threshold {
+            return true;
+        }
+
         false
     }
 
     pub fn reset(&mut self) {
         self.recent_actions.clear();
+        self.recent_hashes.clear();
+        self.action_frequency.clear();
     }
 }
 
@@ -248,6 +406,67 @@ mod tests {
         assert!(matches!(action, RecoveryAction::RetryWithTemperatureDelta));
     }
 
+    // --- ContinueSite ---
+
+    #[test]
+    fn test_continue_site_stage1_retry() {
+        let mut cs = ContinueSite::new();
+        cs.record_failure(FailureMode::ParseError(ParseErrorDetail::InvalidJson));
+        let action = cs.decide_escalated_recovery(3);
+        // 1回目の失敗→リトライ
+        assert!(matches!(action, RecoveryAction::RetryWithFix(_)));
+    }
+
+    #[test]
+    fn test_continue_site_stage2_replan() {
+        let mut cs = ContinueSite::new();
+        for _ in 0..MAX_CONSECUTIVE_FAILURES {
+            cs.record_failure(FailureMode::ParseError(ParseErrorDetail::InvalidJson));
+        }
+        let action = cs.decide_escalated_recovery(3);
+        assert!(matches!(action, RecoveryAction::Replan(_)));
+    }
+
+    #[test]
+    fn test_continue_site_stage3_safe_stop() {
+        let mut cs = ContinueSite::new();
+        for _ in 0..=MAX_CONSECUTIVE_FAILURES {
+            cs.record_failure(FailureMode::ReasoningError);
+        }
+        let action = cs.decide_escalated_recovery(3);
+        assert!(matches!(action, RecoveryAction::ExplainAndStop(_)));
+    }
+
+    #[test]
+    fn test_continue_site_success_resets() {
+        let mut cs = ContinueSite::new();
+        cs.record_failure(FailureMode::ReasoningError);
+        cs.record_failure(FailureMode::ReasoningError);
+        cs.record_success();
+        assert_eq!(cs.consecutive_failures(), 0);
+        // リセット後は1回目→リトライ
+        cs.record_failure(FailureMode::ParseError(ParseErrorDetail::InvalidJson));
+        let action = cs.decide_escalated_recovery(3);
+        assert!(matches!(action, RecoveryAction::RetryWithFix(_)));
+    }
+
+    #[test]
+    fn test_continue_site_different_failures() {
+        let mut cs = ContinueSite::new();
+        cs.record_failure(FailureMode::ParseError(ParseErrorDetail::InvalidJson));
+        cs.record_failure(FailureMode::ToolExecError(ToolErrorDetail::Timeout));
+        cs.record_failure(FailureMode::ReasoningError);
+        // 3回連続失敗（種類は異なる）→Replan
+        let action = cs.decide_escalated_recovery(3);
+        assert!(matches!(action, RecoveryAction::Replan(_)));
+    }
+
+    #[test]
+    fn test_continue_site_default() {
+        let cs = ContinueSite::default();
+        assert_eq!(cs.consecutive_failures(), 0);
+    }
+
     // --- CircuitBreaker ---
 
     #[test]
@@ -261,10 +480,10 @@ mod tests {
         let mut cb = CircuitBreaker::new(3, Duration::from_secs(60));
         cb.record_failure("shell");
         cb.record_failure("shell");
-        assert!(cb.is_available("shell")); // まだ2回
+        assert!(cb.is_available("shell"));
 
         cb.record_failure("shell");
-        assert!(!cb.is_available("shell")); // 3回目でトリップ
+        assert!(!cb.is_available("shell"));
     }
 
     #[test]
@@ -285,7 +504,7 @@ mod tests {
         assert!(!cb.is_available("shell"));
 
         std::thread::sleep(Duration::from_millis(60));
-        assert!(cb.is_available("shell")); // クールダウン完了
+        assert!(cb.is_available("shell"));
     }
 
     #[test]
@@ -294,10 +513,10 @@ mod tests {
         cb.record_failure("shell");
         cb.record_failure("shell");
         assert!(!cb.is_available("shell"));
-        assert!(cb.is_available("file_read")); // 別ツールは影響なし
+        assert!(cb.is_available("file_read"));
     }
 
-    // --- LoopDetector ---
+    // --- LoopDetector (既存+拡張) ---
 
     #[test]
     fn test_loop_detector_no_loop() {
@@ -312,7 +531,7 @@ mod tests {
         let mut ld = LoopDetector::new(10, 3);
         assert!(!ld.record_and_check("ls"));
         assert!(!ld.record_and_check("ls"));
-        assert!(ld.record_and_check("ls")); // 3回連続でループ検出
+        assert!(ld.record_and_check("ls"));
     }
 
     #[test]
@@ -329,6 +548,60 @@ mod tests {
         ld.record_and_check("ls");
         ld.record_and_check("ls");
         ld.reset();
-        assert!(!ld.record_and_check("ls")); // リセット後は1回目
+        assert!(!ld.record_and_check("ls"));
+    }
+
+    // --- 2層ループ検出テスト ---
+
+    #[test]
+    fn test_loop_detector_near_duplicate() {
+        // salient hashが同一になるケース（引数のキーが同じ、値のみ違う）
+        let mut ld = LoopDetector::new(10, 3);
+        assert!(!ld.record_and_check(r#"file_read:{"path":"README.md"}"#));
+        assert!(!ld.record_and_check(r#"file_read:{"path":"./README.md"}"#));
+        // salient hash = "file_read:path" で同一 → 3回目で検出
+        assert!(ld.record_and_check(r#"file_read:{"path":"/tmp/README.md"}"#));
+    }
+
+    #[test]
+    fn test_loop_detector_cyclic_pattern() {
+        // A→B→A→B パターン
+        let mut ld = LoopDetector::new(10, 3);
+        assert!(!ld.record_and_check("file_read"));
+        assert!(!ld.record_and_check("shell"));
+        assert!(!ld.record_and_check("file_read"));
+        assert!(ld.record_and_check("shell")); // 4つ目で循環検出
+    }
+
+    #[test]
+    fn test_loop_detector_frequency_threshold() {
+        let mut ld = LoopDetector::new(100, 50).with_frequency_threshold(5);
+        // 同じアクションを間隔を置いて5回 → 頻度閾値で検出
+        for i in 0..4 {
+            assert!(!ld.record_and_check("shell"));
+            assert!(!ld.record_and_check(&format!("other_{i}")));
+        }
+        assert!(ld.record_and_check("shell")); // 5回目
+    }
+
+    #[test]
+    fn test_salient_hash_normalization() {
+        // 同じツール名+同じキー → 同じハッシュ
+        let h1 = LoopDetector::salient_hash(r#"file_read:{"path":"a.txt"}"#);
+        let h2 = LoopDetector::salient_hash(r#"file_read:{"path":"b.txt"}"#);
+        assert_eq!(h1, h2, "同じキーなのでハッシュが一致すべき");
+
+        // 異なるキー → 異なるハッシュ
+        let h3 = LoopDetector::salient_hash(r#"shell:{"command":"ls"}"#);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_loop_detector_backward_compat() {
+        // 既存の完全文字列一致テストが引き続き動作
+        let mut ld = LoopDetector::new(10, 3);
+        assert!(!ld.record_and_check("exact_same_string"));
+        assert!(!ld.record_and_check("exact_same_string"));
+        assert!(ld.record_and_check("exact_same_string"));
     }
 }
