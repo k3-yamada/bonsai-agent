@@ -461,4 +461,28 @@ mod tests {
         let result = fuzzy_find_replace(content, old_text, "new");
         assert!(result.is_none());
     }
+
+    #[test]
+    fn test_read_with_line_numbers() {
+        let path = temp_path("lines");
+        fs::write(&path, "line1\nline2\nline3").unwrap();
+        let tool = FileReadTool;
+        let result = tool.call(serde_json::json!({"path": &path})).unwrap();
+        assert!(result.output.contains("1|"), "行番号が含まれること");
+        assert!(result.output.contains("line1"));
+        assert!(result.output.contains("3行"));
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_read_with_offset_limit() {
+        let path = temp_path("offset");
+        fs::write(&path, "a\nb\nc\nd\ne").unwrap();
+        let tool = FileReadTool;
+        let result = tool.call(serde_json::json!({"path": &path, "offset": 1, "limit": 2})).unwrap();
+        assert!(result.output.contains("b"), "offset=1でbから開始");
+        assert!(result.output.contains("c"), "limit=2でcまで含む");
+        assert!(!result.output.contains("| a"), "aは含まない");
+        fs::remove_file(&path).ok();
+    }
 }
