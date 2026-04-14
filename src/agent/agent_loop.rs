@@ -92,6 +92,45 @@ pub enum StepOutcome {
     Aborted(String),
 }
 
+
+/// 停滞検出器: 進捗のないステップが続いた場合に再計画を促す
+pub struct StallDetector {
+    no_progress_count: usize,
+    stall_threshold: usize,
+    last_output_hash: u64,
+}
+
+impl StallDetector {
+    pub fn new(threshold: usize) -> Self {
+        Self {
+            no_progress_count: 0,
+            stall_threshold: threshold,
+            last_output_hash: 0,
+        }
+    }
+
+    /// ステップ結果を記録し、停滞を検出したらtrueを返す
+    pub fn record_step(&mut self, tools_succeeded: bool, output_hash: u64) -> bool {
+        if !tools_succeeded || output_hash == self.last_output_hash {
+            self.no_progress_count += 1;
+        } else {
+            self.no_progress_count = 0;
+        }
+        self.last_output_hash = output_hash;
+        self.no_progress_count >= self.stall_threshold
+    }
+
+    pub fn reset(&mut self) {
+        self.no_progress_count = 0;
+    }
+}
+
+impl Default for StallDetector {
+    fn default() -> Self {
+        Self::new(3)
+    }
+}
+
 /// ステップ実行に必要なコンテキスト
 pub struct StepContext<'a> {
     pub backend: &'a dyn LlmBackend,
@@ -829,5 +868,40 @@ mod tests {
         )
         .unwrap();
         assert!(result.answer.contains("中断"));
+    }
+
+    // --- StallDetector テスト ---
+
+    #[test]
+    fn test_stall_detector_no_progress() {
+        let mut sd = StallDetector::new(3);
+        assert!(!sd.record_step(false, 1));
+        assert!(!sd.record_step(false, 2));
+        assert!(sd.record_step(false, 3));
+    }
+
+    #[test]
+    fn test_stall_detector_resets_on_progress() {
+        let mut sd = StallDetector::new(3);
+        assert!(!sd.record_step(false, 1));
+        assert!(!sd.record_step(false, 2));
+        assert!(!sd.record_step(true, 99));
+        assert!(!sd.record_step(false, 100));
+        assert!(!sd.record_step(false, 101));
+        assert!(sd.record_step(false, 102));
+    }
+
+    #[test]
+    fn test_stall_detector_same_output_hash() {
+        let mut sd = StallDetector::new(3);
+        assert!(!sd.record_step(true, 42));
+        assert!(!sd.record_step(true, 42));
+        assert!(sd.record_step(true, 42));
+    }
+
+    #[test]
+    fn test_stall_detector_default_threshold() {
+        let sd = StallDetector::default();
+        assert_eq!(sd.stall_threshold, 3);
     }
 }
