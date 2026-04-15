@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -12,6 +12,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         description: "実験ログ: experiments, experiment_config テーブル",
         sql: SCHEMA_V2,
+    },
+    Migration {
+        version: 3,
+        description: "Event Sourcing: 統一イベントストリーム + audit_logインデックス強化",
+        sql: SCHEMA_V3,
     },
 ];
 
@@ -122,6 +127,23 @@ CREATE TABLE IF NOT EXISTS experiment_config (
 );
 "#;
 
+const SCHEMA_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_data TEXT NOT NULL,
+    step_index INTEGER,
+    parent_event_id INTEGER REFERENCES events(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action_type ON audit_log(action_type);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +207,17 @@ mod tests {
     #[test]
     fn test_schema_v1_has_foreign_keys() {
         assert!(SCHEMA_V1.contains("foreign_keys=ON"));
+    }
+
+    #[test]
+    fn test_schema_v3_contains_events_table() {
+        assert!(SCHEMA_V3.contains("events"), "V3にeventsテーブルが必要");
+        assert!(SCHEMA_V3.contains("idx_events_session"), "V3にセッションインデックスが必要");
+    }
+
+    #[test]
+    fn test_migrations_count_matches_version() {
+        assert_eq!(MIGRATIONS.len(), SCHEMA_VERSION as usize);
     }
 
     #[test]

@@ -383,6 +383,7 @@ pub fn run_agent_loop_with_session(
     let secrets_filter = SecretsFilter::default();
 
     inject_contextual_memories(session, &task_context, store);
+    inject_planning_step(session, &task_context);
 
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
@@ -490,6 +491,76 @@ fn log_step_outcome(
     }
 }
 
+/// タスクの複雑さを判定（複数ステップが必要か）
+fn detect_task_complexity(input: &str) -> bool {
+    let complex_signals = [
+        "作成して", "実装して", "修正して", "リファクタ",
+        "調べて", "分析して", "比較して", "設計して",
+        "テストを書", "ビルドして", "デプロイ",
+        "ファイルを.*して.*して",  // 複数動詞
+    ];
+    let signal_count = complex_signals
+        .iter()
+        .filter(|s| input.contains(*s))
+        .count();
+    // 2つ以上のシグナル or 長い入力（複雑なタスクの兆候）
+    signal_count >= 2 || input.len() > 200
+}
+
+/// 複雑タスクに計画プレステップを注入
+fn inject_planning_step(session: &mut Session, task_context: &str) {
+    if detect_task_complexity(task_context) {
+        session.add_message(Message::system(
+            "このタスクは複数ステップが必要です。まず <think> タグ内で計画を立ててから実行してください。\n\
+             計画フォーマット:\n\
+             1. [ステップ名] - [使用ツール]\n\
+             2. [ステップ名] - [使用ツール]\n\
+             計画を立てたら、ステップ1から順に実行してください。".to_string(),
+        ));
+        eprintln!("[pipeline] 複雑タスク検出 → 計画プレステップ注入");
+    }
+}
+
+/// Vault知識を選択的にセッションに注入（関連カテゴリのみ）
+fn inject_vault_knowledge(
+    session: &mut Session,
+    task_context: &str,
+    vault: &crate::knowledge::vault::Vault,
+) {
+    use crate::knowledge::extractor::StockCategory;
+    let categories: Vec<StockCategory> = [
+        ("決", StockCategory::Decision),
+        ("パターン", StockCategory::Pattern),
+        ("学", StockCategory::Insight),
+        ("好", StockCategory::Preference),
+    ]
+    .iter()
+    .filter(|(keyword, _)| task_context.contains(keyword))
+    .map(|(_, cat)| cat.clone())
+    .collect();
+
+    if categories.is_empty() {
+        return;
+    }
+
+    let mut vault_ctx = Vec::new();
+    for cat in &categories {
+        if let Ok(content) = vault.read_category(cat) {
+            let lines: Vec<&str> = content.lines().filter(|l| l.starts_with("- [")).take(3).collect();
+            if !lines.is_empty() {
+                vault_ctx.extend(lines.iter().map(|l| l.to_string()));
+            }
+        }
+    }
+
+    if !vault_ctx.is_empty() {
+        session.add_message(Message::system(format!(
+            "関連する蓄積知識:\n{}",
+            vault_ctx.join("\n")
+        )));
+    }
+}
+
 /// SOUL.mdからペルソナを読み込む
 /// 検索順: (1) 明示パス, (2) .bonsai/SOUL.md, (3) ~/.config/bonsai-agent/SOUL.md
 pub fn load_soul(soul_path: &Option<std::path::PathBuf>) -> Option<String> {
@@ -526,6 +597,8 @@ fn inject_contextual_memories(
     if let Some(ref v) = vault {
         let stocks = crate::knowledge::extractor::extract_stock(task_context, &session.id);
         let _ = v.append_all(&stocks);
+        // Vault知識の選択的注入（関連カテゴリのみ）
+        inject_vault_knowledge(session, task_context, v);
     }
     let embedder = create_embedder();
 
@@ -1075,4 +1148,36 @@ mod tests {
             "StepOutcomeが監査ログに記録されるべき"
         );
     }
+
+    // テスト: タスク複雑さ検出
+    #[test]
+    fn test_detect_task_complexity_simple() {
+        assert!(!detect_task_complexity("天気は？"));
+        assert!(!detect_task_complexity("ファイルを読んで"));
+    }
+
+    #[test]
+    fn test_detect_task_complexity_complex() {
+        assert!(detect_task_complexity("テストを書いて、実装して、リファクタリングして"));
+        assert!(detect_task_complexity(&"a".repeat(201)));
+    }
+
+    // テスト: 計画プレステップ注入
+    #[test]
+    fn test_inject_planning_step_complex() {
+        let mut session = Session::new();
+        session.add_message(Message::user("テストを書いて実装して"));
+        inject_planning_step(&mut session, "テストを書いて、実装して、リファクタリングして");
+        let has_plan = session.messages.iter().any(|m| m.content.contains("計画"));
+        assert!(has_plan, "複雑タスクに計画プレステップが注入されるべき");
+    }
+
+    #[test]
+    fn test_inject_planning_step_simple() {
+        let mut session = Session::new();
+        inject_planning_step(&mut session, "天気は？");
+        let msg_count = session.messages.len();
+        assert_eq!(msg_count, 0, "単純タスクには計画プレステップ不要");
+    }
+
 }

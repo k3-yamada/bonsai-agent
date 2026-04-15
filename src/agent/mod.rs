@@ -9,3 +9,5 @@ pub mod experiment_log;
 pub mod parse;
 pub mod task;
 pub mod validate;
+
+pub mod event_store;
