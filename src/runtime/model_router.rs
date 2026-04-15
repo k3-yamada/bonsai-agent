@@ -11,6 +11,64 @@ pub enum ModelSelection {
     Gemma4E4B,
 }
 
+
+/// パイプラインステージ（Advisor Tool パターン）
+/// 各ステージで異なるプロンプト/モデル戦略を適用
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineStage {
+    /// 探索: ファイル読み込み、情報収集（ツール実行あり）
+    Explore,
+    /// 計画: 戦略策定（ツール実行なし、思考のみ）
+    Plan,
+    /// 実行: 計画に基づくツール実行
+    Execute,
+    /// 検証: 成果物の確認（ツール実行なし）
+    Verify,
+    /// アドバイス: 外部アドバイザーへの相談（将来: API連携）
+    Advise,
+}
+
+/// アドバイザー設定（Anthropic Advisor Tool パターン準拠）
+#[derive(Debug, Clone)]
+pub struct AdvisorConfig {
+    /// アドバイザー呼び出しの最大回数（max_uses相当）
+    pub max_uses: usize,
+    /// 現在の呼び出し回数
+    pub calls_used: usize,
+    /// アドバイザー応答の最大トークン数（推奨: 400-700）
+    pub max_advisor_tokens: usize,
+    /// 外部APIエンドポイント（None = ローカルモデルで代替）
+    pub api_endpoint: Option<String>,
+}
+
+impl Default for AdvisorConfig {
+    fn default() -> Self {
+        Self {
+            max_uses: 3,
+            calls_used: 0,
+            max_advisor_tokens: 700,
+            api_endpoint: None,
+        }
+    }
+}
+
+impl AdvisorConfig {
+    /// アドバイザー呼び出しが可能か
+    pub fn can_advise(&self) -> bool {
+        self.calls_used < self.max_uses
+    }
+
+    /// 呼び出しを記録
+    pub fn record_call(&mut self) {
+        self.calls_used += 1;
+    }
+
+    /// 残り呼び出し回数
+    pub fn remaining(&self) -> usize {
+        self.max_uses.saturating_sub(self.calls_used)
+    }
+}
+
 /// タスクコンテキスト（モデル選択の入力）
 pub struct TaskContext {
     pub has_image: bool,
@@ -215,5 +273,46 @@ mod tests {
     fn test_model_selection_debug() {
         assert_eq!(format!("{:?}", ModelSelection::Bonsai), "Bonsai");
         assert_eq!(format!("{:?}", ModelSelection::Gemma4E4B), "Gemma4E4B");
+    }
+
+    // --- PipelineStage テスト ---
+
+    #[test]
+    fn test_pipeline_stage_debug() {
+        assert_eq!(format!("{:?}", PipelineStage::Plan), "Plan");
+        assert_eq!(format!("{:?}", PipelineStage::Execute), "Execute");
+        assert_eq!(format!("{:?}", PipelineStage::Advise), "Advise");
+    }
+
+    // --- AdvisorConfig テスト ---
+
+    #[test]
+    fn test_advisor_config_default() {
+        let config = AdvisorConfig::default();
+        assert_eq!(config.max_uses, 3);
+        assert_eq!(config.calls_used, 0);
+        assert!(config.can_advise());
+        assert_eq!(config.remaining(), 3);
+    }
+
+    #[test]
+    fn test_advisor_config_max_uses() {
+        let mut config = AdvisorConfig::default();
+        config.record_call();
+        config.record_call();
+        assert!(config.can_advise());
+        assert_eq!(config.remaining(), 1);
+        config.record_call();
+        assert!(!config.can_advise());
+        assert_eq!(config.remaining(), 0);
+    }
+
+    #[test]
+    fn test_advisor_config_api_endpoint() {
+        let config = AdvisorConfig {
+            api_endpoint: Some("http://localhost:8081".to_string()),
+            ..Default::default()
+        };
+        assert!(config.api_endpoint.is_some());
     }
 }

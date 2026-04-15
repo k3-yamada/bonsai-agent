@@ -418,6 +418,19 @@ pub fn run_agent_loop_with_session(
         match outcome {
             StepOutcome::FinalAnswer(answer) => {
                 log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
+                // Advisor パターン: 複雑タスクの初回回答は検証ステップを挿入
+                if iteration > 0
+                    && detect_task_complexity(&task_context)
+                    && !answer.contains("[検証済]")
+                    && iteration < config.max_iterations - 1
+                {
+                    session.add_message(Message::system(
+                        "回答前に検証: 目標を達成できていますか？不足があれば補完してください。問題なければ回答に[検証済]を含めてください。".to_string(),
+                    ));
+                    eprintln!("[advisor] 完了前自己検証ステップ挿入 (iter {iteration})");
+                    all_tools.extend(Vec::<String>::new());
+                    continue;
+                }
                 record_success(store, session, &task_context, &answer);
                 return Ok(AgentLoopResult {
                     answer,
@@ -510,14 +523,15 @@ fn detect_task_complexity(input: &str) -> bool {
 /// 複雑タスクに計画プレステップを注入
 fn inject_planning_step(session: &mut Session, task_context: &str) {
     if detect_task_complexity(task_context) {
+        // Advisor Tool パターン: 100語以内・列挙形式でトークン35-45%削減（Anthropic実測）
         session.add_message(Message::system(
-            "このタスクは複数ステップが必要です。まず <think> タグ内で計画を立ててから実行してください。\n\
-             計画フォーマット:\n\
-             1. [ステップ名] - [使用ツール]\n\
-             2. [ステップ名] - [使用ツール]\n\
-             計画を立てたら、ステップ1から順に実行してください。".to_string(),
+            "このタスクは複数ステップが必要です。\n\
+             <think> 内で計画を立ててから実行。計画は100語以内、列挙形式で:\n\
+             1. [ステップ] - [ツール]\n\
+             2. [ステップ] - [ツール]\n\
+             計画後、ステップ1から順に実行。完了前に成果を検証。".to_string(),
         ));
-        eprintln!("[pipeline] 複雑タスク検出 → 計画プレステップ注入");
+        eprintln!("[advisor] 複雑タスク検出 → 簡潔計画プレステップ注入");
     }
 }
 
