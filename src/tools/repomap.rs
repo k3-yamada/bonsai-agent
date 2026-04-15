@@ -97,6 +97,16 @@ fn extract_syms(path: &Path) -> Vec<String> {
         ],
         "py" => vec![r"def\s+\w+\s*\(", r"class\s+\w+"],
         "ts" | "tsx" | "js" => vec![r"(export\s+)?function\s+\w+", r"(export\s+)?class\s+\w+"],
+        "go" => vec![r"func\s+(\(\w+\s+\*?\w+\)\s+)?\w+", r"type\s+\w+\s+(struct|interface)"],
+        "java" => vec![
+            r"(public\s+|private\s+|protected\s+)?(static\s+)?class\s+\w+",
+            r"(public\s+|private\s+|protected\s+)?(static\s+)?\w+\s+\w+\s*\(",
+        ],
+        "c" | "cpp" | "h" => vec![
+            r"(typedef\s+)?struct\s+\w+",
+            r"(typedef\s+)?enum\s+\w+",
+            r"\w+\s+\w+\s*\([^)]*\)\s*[;{]",
+        ],
         _ => return vec![],
     };
     let mut syms = Vec::new();
@@ -135,5 +145,33 @@ mod tests {
     fn t_none() {
         let m = gen_map(Path::new("/nonexistent"), 2).unwrap();
         assert!(m.contains("no source"));
+    }
+
+    #[test]
+    fn t_go_syms() {
+        let dir = tempfile::tempdir().unwrap();
+        let go_file = dir.path().join("main.go");
+        std::fs::write(&go_file, "package main\n\nfunc main() {\n}\n\ntype Server struct {\n}\n").unwrap();
+        let syms = extract_syms(&go_file);
+        assert!(syms.iter().any(|s| s.contains("func main")), "Go func: {syms:?}");
+        assert!(syms.iter().any(|s| s.contains("type Server")), "Go type: {syms:?}");
+    }
+
+    #[test]
+    fn t_java_syms() {
+        let dir = tempfile::tempdir().unwrap();
+        let java_file = dir.path().join("App.java");
+        std::fs::write(&java_file, "public class App {\n  public void run() {}\n}\n").unwrap();
+        let syms = extract_syms(&java_file);
+        assert!(syms.iter().any(|s| s.contains("class App")), "Java class: {syms:?}");
+    }
+
+    #[test]
+    fn t_c_syms() {
+        let dir = tempfile::tempdir().unwrap();
+        let c_file = dir.path().join("util.h");
+        std::fs::write(&c_file, "typedef struct Node {\n  int val;\n} Node;\n\nvoid init_node(Node *n);\n").unwrap();
+        let syms = extract_syms(&c_file);
+        assert!(syms.iter().any(|s| s.contains("struct Node")), "C struct: {syms:?}");
     }
 }

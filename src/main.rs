@@ -18,6 +18,7 @@ use bonsai_agent::tools::arxiv::ArxivTool;
 use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
 use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::shell::ShellTool;
+use bonsai_agent::tools::repomap::RepoMapTool;
 use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
 
 #[derive(Parser)]
@@ -178,6 +179,7 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
     tools.register(Box::new(WebSearchTool));
     tools.register(Box::new(WebFetchTool));
     tools.register(Box::new(ArxivTool));
+    tools.register(Box::new(RepoMapTool));
     tools
 }
 

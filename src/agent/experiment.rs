@@ -124,23 +124,19 @@ impl HypothesisGenerator {
 fn default_prompt_rules() -> Vec<PromptRuleCandidate> {
     vec![
         PromptRuleCandidate {
-            rule: "9. ツール呼び出しの前に必ず <think> タグで考える".into(),
+            rule: "10. ツール呼び出しの前に必ず <think> タグで考える".into(),
             description: "ツール使用前に思考を強制".into(),
         },
         PromptRuleCandidate {
-            rule: "9. 複数ステップが必要な場合、まず計画を <think> に書いてから実行する".into(),
-            description: "マルチステップ計画の強制".into(),
-        },
-        PromptRuleCandidate {
-            rule: "9. エラーが発生したら原因を <think> で分析してから次の行動を決める".into(),
+            rule: "10. エラーが発生したら原因を <think> で分析してから次の行動を決める".into(),
             description: "エラー分析の強制".into(),
         },
         PromptRuleCandidate {
-            rule: "9. ツール結果が期待と違う場合、別のツールを試す".into(),
+            rule: "10. ツール結果が期待と違う場合、別のツールを試す".into(),
             description: "フォールバック戦略".into(),
         },
         PromptRuleCandidate {
-            rule: "9. ファイル操作の前にパスの存在を確認する".into(),
+            rule: "10. ファイル操作の前にパスの存在を確認する".into(),
             description: "ファイル存在確認の強制".into(),
         },
     ]

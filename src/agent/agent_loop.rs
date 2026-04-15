@@ -72,6 +72,7 @@ Gitの状態を確認する:
 6. ツール結果を元に簡潔に回答する
 7. わからないことは「わからない」と答える
 8. 「検索して」→ web_search。URLが分かっている時だけ web_fetch
+9. 複数ステップが必要な場合、まず計画を <think> に書いてから実行する
 "#;
 
 /// エージェントループの構造化戻り値
@@ -398,8 +399,10 @@ pub fn run_agent_loop_with_session(
 
     let mut all_tools: Vec<String> = Vec::new();
     let mut final_iteration = 0;
+    let mut consecutive_failures: usize = 0;
     for iteration in 0..config.max_iterations {
         final_iteration = iteration + 1;
+        let step_start = std::time::Instant::now();
         let outcome = execute_step(
             session,
             &ctx,
@@ -408,8 +411,12 @@ pub fn run_agent_loop_with_session(
             iteration,
         )?;
 
+
+        let duration_ms = step_start.elapsed().as_millis() as u64;
+
         match outcome {
             StepOutcome::FinalAnswer(answer) => {
+                log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
                 record_success(store, session, &task_context, &answer);
                 return Ok(AgentLoopResult {
                     answer,
@@ -418,6 +425,8 @@ pub fn run_agent_loop_with_session(
                 });
             }
             StepOutcome::Aborted(reason) => {
+                consecutive_failures += 1;
+                log_step_outcome(store, session, iteration, "aborted", duration_ms, &[], consecutive_failures);
                 record_abort(store, session, &task_context, &reason);
                 return Ok(AgentLoopResult {
                     answer: format!("[中断] {reason}"),
@@ -426,6 +435,12 @@ pub fn run_agent_loop_with_session(
                 });
             }
             StepOutcome::Continue(step_tools) => {
+                if step_tools.is_empty() {
+                    consecutive_failures += 1;
+                } else {
+                    consecutive_failures = 0;
+                }
+                log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, consecutive_failures);
                 all_tools.extend(step_tools);
                 let (lv, _offloaded) = compact_if_needed(
                     &mut session.messages,
@@ -448,6 +463,31 @@ pub fn run_agent_loop_with_session(
         iterations_used: final_iteration,
         tools_called: all_tools,
     })
+}
+
+/// ステップ結果を監査ログに記録
+fn log_step_outcome(
+    store: Option<&MemoryStore>,
+    session: &Session,
+    step_index: usize,
+    outcome: &str,
+    duration_ms: u64,
+    tools_used: &[String],
+    consecutive_failures: usize,
+) {
+    if let Some(s) = store {
+        let audit = AuditLog::new(s.conn());
+        let _ = audit.log(
+            Some(&session.id),
+            &AuditAction::StepOutcome {
+                step_index,
+                outcome: outcome.to_string(),
+                duration_ms,
+                tools_used: tools_used.to_vec(),
+                consecutive_failures,
+            },
+        );
+    }
 }
 
 /// SOUL.mdからペルソナを読み込む
@@ -977,5 +1017,62 @@ mod tests {
         // テスト環境では存在しないのでNone（存在する場合はSome）
         // assertはしない — 環境依存
         let _ = result;
+    }
+
+    // テスト: デフォルトシステムプロンプトに計画強制ルールが含まれる
+    #[test]
+    fn test_default_prompt_contains_plan_rule() {
+        let config = AgentConfig::default();
+        assert!(
+            config.system_prompt.contains("計画"),
+            "デフォルトプロンプトに計画強制ルールが含まれるべき"
+        );
+    }
+
+    // テスト: RepoMapツールがレジストリに登録される
+    #[test]
+    fn test_repomap_registered() {
+        let reg = test_registry_with_repomap();
+        assert!(reg.get("repo_map").is_some(), "repo_mapが登録されるべき");
+    }
+
+    fn test_registry_with_repomap() -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(EchoTool));
+        reg.register(Box::new(crate::tools::repomap::RepoMapTool));
+        reg
+    }
+
+    // テスト: StepOutcomeが監査ログに記録される
+    #[test]
+    fn test_step_outcome_audit_logged() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mock = MockLlmBackend::single("回答です。");
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        run_agent_loop(
+            "test",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            Some(&store),
+        )
+        .unwrap();
+
+        let audit = AuditLog::new(store.conn());
+        let entries = audit.recent(50).unwrap();
+        let step_outcomes: Vec<_> = entries
+            .iter()
+            .filter(|e| e.action_type == "step_outcome")
+            .collect();
+        assert!(
+            !step_outcomes.is_empty(),
+            "StepOutcomeが監査ログに記録されるべき"
+        );
     }
 }
