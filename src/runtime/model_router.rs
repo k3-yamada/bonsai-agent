@@ -154,12 +154,11 @@ impl AdvisorConfig {
         if let Some(endpoint) = &self.api_endpoint {
             let model = self.api_model.as_deref().unwrap_or("gpt-4o-mini");
             let key_status = if self.api_key.is_some() { "設定済" } else { "未設定(env検出)" };
-            eprintln!(
-                "[advisor] リモートモード: endpoint={}, model={}, key={}, max_uses={}, timeout={}s",
+            log_event(LogLevel::Info, "advisor", &format!("リモートモード: endpoint={}, model={}, key={}, max_uses={}, timeout={}s",
                 endpoint, model, key_status, self.max_uses, self.timeout_secs
-            );
+            ));
         } else {
-            eprintln!("[advisor] ローカルモード (max_uses={}, 検証+再計画)", self.max_uses);
+            log_event(LogLevel::Info, "advisor", &format!("ローカルモード (max_uses={}, 検証+再計画)", self.max_uses));
         }
     }
 

@@ -502,11 +502,11 @@ fn create_task_start_checkpoint(
     };
     match mgr.create(&desc) {
         Ok(id) => {
-            bonsai_log!(Info, "checkpoint", "タスク開始時CP作成 id={id}");
+            log_event(LogLevel::Info, "checkpoint", &format!("タスク開始時CP作成 id={id}"));
             Some(id)
         }
         Err(e) => {
-            bonsai_log!(Warn, "checkpoint", "CP作成失敗（無視）: {e}");
+            log_event(LogLevel::Warn, "checkpoint", &format!("CP作成失敗（無視）: {e}"));
             None
         }
     }
@@ -568,7 +568,7 @@ fn handle_outcome(
                 &CompactionConfig::default(),
             );
             if lv > 0 {
-                bonsai_log!(Debug, "compact", "level {lv} applied (iter {iteration})");
+                log_event(LogLevel::Debug, "compact", &format!("level {lv} applied (iter {iteration})"));
             }
             OutcomeAction::Continue
         }
@@ -694,7 +694,7 @@ fn inject_replan_on_stall(
         return false;
     }
     if !advisor.can_advise() {
-        bonsai_log!(Warn, "stall", "停滞検出だが advisor max_uses 到達");
+        log_event(LogLevel::Warn, "stall", "停滞検出だが advisor max_uses 到達");
         stall_detector.reset();
         return false;
     }
@@ -772,7 +772,7 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
              2. [ステップ] - [ツール]\n\
              計画後、ステップ1から順に実行。完了前に成果を検証。".to_string(),
         ));
-        bonsai_log!(Info, "advisor", "複雑タスク検出 → 簡潔計画プレステップ注入");
+        log_event(LogLevel::Info, "advisor", "複雑タスク検出 → 簡潔計画プレステップ注入");
     }
 }
 

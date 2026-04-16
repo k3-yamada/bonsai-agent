@@ -1,3 +1,4 @@
+use crate::observability::logger::{log_event, LogLevel};
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -233,7 +234,7 @@ pub fn run_experiment_loop(
     let pass_threshold = 0.5;
 
     // 1. ベースライン計測（pass^k版）
-    eprintln!("[lab] ベースライン計測中（k={}）...", multi.k);
+    log_event(LogLevel::Info, "lab", &format!("ベースライン計測中（k={}）...", multi.k));
     let mut baseline = suite.run_k(base_config, backend, tools, path_guard, cancel, &multi, pass_threshold)?;
     eprintln!(
         "[lab] ベースライン: score={:.4} pass@k={:.4} pass_consec={:.4} ({:.1}s)",
@@ -247,14 +248,14 @@ pub fn run_experiment_loop(
     let mut experiment_count = 0;
     loop {
         if cancel.is_cancelled() {
-            eprintln!("[lab] キャンセルされました");
+            log_event(LogLevel::Warn, "lab", "キャンセルされました");
             break;
         }
 
         if let Some(max) = loop_config.max_experiments
             && experiment_count >= max
         {
-            eprintln!("[lab] 最大実験回数({max})に到達");
+            log_event(LogLevel::Info, "lab", &format!("最大実験回数({max})に到達"));
             break;
         }
 
@@ -317,10 +318,10 @@ pub fn run_experiment_loop(
         {
             for insight in &report.insights {
                 generator.add_insight_mutation(insight);
-                eprintln!("[lab] Dreamer insight追加: {insight}");
+                log_event(LogLevel::Info, "lab", &format!("Dreamer insight追加: {insight}"));
             }
             for skill in &report.skill_promotions {
-                eprintln!("[lab] スキル自動昇格: {skill}");
+                log_event(LogLevel::Info, "lab", &format!("スキル自動昇格: {skill}"));
             }
         }
     }

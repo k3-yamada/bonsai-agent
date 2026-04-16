@@ -1,9 +1,10 @@
+use crate::observability::logger::{log_event, LogLevel};
 use crate::memory::store::MemoryStore;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 pub fn start_api_server(store: &MemoryStore, port: u16) {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).expect("API起動失敗");
-    eprintln!("API: http://127.0.0.1:{port}");
+    log_event(LogLevel::Info, "server", "API: http://127.0.0.1:{port}");
     for stream in listener.incoming().flatten() {
         let mut reader = BufReader::new(&stream);
         let mut req = String::new();
