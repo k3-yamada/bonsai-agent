@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use bonsai_agent::agent::agent_loop::{AgentConfig, run_agent_loop, run_agent_loop_with_session};
+use bonsai_agent::agent::checkpoint::CheckpointManager;
 use bonsai_agent::agent::conversation::Message;
 use bonsai_agent::agent::experiment::{ExperimentLoopConfig, run_experiment_loop};
 use bonsai_agent::agent::validate::PathGuard;
@@ -83,6 +84,14 @@ struct Cli {
     /// 実験回数上限
     #[arg(long, default_value = "10")]
     lab_experiments: usize,
+
+    /// チェックポイント一覧
+    #[arg(long)]
+    checkpoints: bool,
+
+    /// 指定IDのチェックポイントにロールバック
+    #[arg(long)]
+    rollback: Option<i64>,
 }
 
 /// 共有コンテキスト（各モードハンドラに渡す）
@@ -156,6 +165,12 @@ fn main() -> Result<()> {
     }
     if cli.audit {
         return handle_audit_mode(&store);
+    }
+    if cli.checkpoints {
+        return handle_checkpoints_mode(&store);
+    }
+    if let Some(cp_id) = cli.rollback {
+        return handle_rollback_mode(&store, cp_id);
     }
     if let Some(resume_id) = &cli.resume {
         return handle_resume_mode(&ctx, &store, resume_id);
@@ -336,6 +351,54 @@ fn handle_tasks_mode(store: &MemoryStore) -> Result<()> {
             println!("[{state}] {} (ステップ: {})", t.goal, t.step_log.len());
             println!("  ID: {}", &t.id[..8]);
         }
+    }
+    Ok(())
+}
+
+fn handle_checkpoints_mode(store: &MemoryStore) -> Result<()> {
+    let all = CheckpointManager::load_persisted(store.conn(), None)?;
+    if all.is_empty() {
+        println!("チェックポイントなし");
+        return Ok(());
+    }
+    let stats = CheckpointManager::stats(store.conn(), None)?;
+    println!("=== チェックポイント一覧 ({} 件, ロールバック率 {:.0}%) ===", stats.total, stats.rollback_rate() * 100.0);
+    for cp in &all {
+        let rb = cp.rolled_back_at.as_deref().unwrap_or("-");
+        let git = cp.git_ref.as_deref().unwrap_or("(変更なし)");
+        println!("  [{}] {} | git:{} | rb:{} | {}", cp.id, cp.description, git, rb, cp.timestamp);
+    }
+    Ok(())
+}
+
+fn handle_rollback_mode(store: &MemoryStore, cp_id: i64) -> Result<()> {
+    let all = CheckpointManager::load_persisted(store.conn(), None)?;
+    let cp = all
+        .iter()
+        .find(|c| c.id == cp_id)
+        .ok_or_else(|| anyhow::anyhow!("チェックポイント {} が見つかりません", cp_id))?;
+    if cp.git_ref.is_none() {
+        println!("チェックポイント {} にはgit stashがありません（変更なしでした）", cp_id);
+        return Ok(());
+    }
+    // DB+gitで直接ロールバック実行
+    let git_ref = cp.git_ref.as_ref().unwrap();
+    let _ = std::process::Command::new("git").args(["checkout", "."]).output();
+    let success = std::process::Command::new("git")
+        .args(["stash", "apply", git_ref])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    // DB 記録
+    let now = chrono::Utc::now().to_rfc3339();
+    store.conn().execute(
+        "UPDATE checkpoints SET rolled_back_at = ?1 WHERE id = ?2",
+        rusqlite::params![&now, cp_id],
+    )?;
+    if success {
+        println!("チェックポイント {} にロールバックしました: {}", cp_id, cp.description);
+    } else {
+        println!("ロールバック失敗: git stash apply {} がエラー", git_ref);
     }
     Ok(())
 }
