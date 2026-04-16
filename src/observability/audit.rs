@@ -40,6 +40,17 @@ pub enum AuditAction {
         tools_used: Vec<String>,
         consecutive_failures: usize,
     },
+    /// アドバイザー呼出（コスト追跡・観測性）
+    AdvisorCall {
+        /// "verification" or "replan"
+        role: String,
+        /// "remote" (外部API) or "local" (組込みプロンプト)
+        source: String,
+        /// 投入プロンプト長（文字数、近似トークン量）
+        prompt_len: usize,
+        /// HTTP呼出時間（ms、ローカルは0）
+        duration_ms: u64,
+    },
 }
 
 /// 監査ログライター（append-only）
@@ -60,6 +71,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::ToolCall { .. } => "tool_call",
             AuditAction::SecurityEvent { .. } => "security_event",
             AuditAction::StepOutcome { .. } => "step_outcome",
+            AuditAction::AdvisorCall { .. } => "advisor_call",
         };
         let action_data = serde_json::to_string(action)?;
 

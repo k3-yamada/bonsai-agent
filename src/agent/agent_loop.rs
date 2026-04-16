@@ -427,7 +427,7 @@ pub fn run_agent_loop_with_session(
                 log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
                 // Advisor パターン: 複雑タスクの初回回答は検証ステップを挿入
                 // max_uses (デフォルト3) で過剰な検証を抑制
-                if inject_verification_step(session, &mut advisor, &task_context, &answer, iteration, config.max_iterations) {
+                if inject_verification_step(session, &mut advisor, &task_context, &answer, iteration, config.max_iterations, store) {
                     continue;
                 }
                 record_success(store, session, &task_context, &answer);
@@ -458,7 +458,7 @@ pub fn run_agent_loop_with_session(
                 all_tools.extend(step_tools);
                 // 停滞検出→Advisor再計画
                 let output_hash = compute_output_hash(session);
-                inject_replan_on_stall(session, &mut stall_detector, &mut advisor, &task_context, tools_succeeded, output_hash);
+                inject_replan_on_stall(session, &mut stall_detector, &mut advisor, &task_context, tools_succeeded, output_hash, store);
                 let (lv, _offloaded) = compact_if_needed(
                     &mut session.messages,
                     &CompactionConfig::default(),
@@ -523,22 +523,65 @@ fn detect_task_complexity(input: &str) -> bool {
     signal_count >= 2 || input.len() > 200
 }
 
+/// アドバイザー応答解決の戻り値
+struct AdvisorResolution {
+    prompt: String,
+    source: &'static str, // "remote" or "local"
+    duration_ms: u64,
+}
+
 /// アドバイザー応答を解決（remote優先→ローカルフォールバック、共通ヘルパー）
 fn resolve_advisor_prompt(
     advisor: &AdvisorConfig,
     role: AdvisorRole,
     task_context: &str,
-) -> String {
+) -> AdvisorResolution {
+    let start = std::time::Instant::now();
     match advisor.try_remote_advice(role, task_context) {
         Ok(Some(remote)) => {
-            eprintln!("[advisor] 外部アドバイザー応答取得 role={:?} ({}文字)", role, remote.len());
-            remote
+            let duration_ms = start.elapsed().as_millis() as u64;
+            eprintln!("[advisor] 外部アドバイザー応答取得 role={:?} ({}文字, {}ms)", role, remote.len(), duration_ms);
+            AdvisorResolution { prompt: remote, source: "remote", duration_ms }
         }
-        Ok(None) => advisor.local_prompt_for(role, task_context),
+        Ok(None) => AdvisorResolution {
+            prompt: advisor.local_prompt_for(role, task_context),
+            source: "local",
+            duration_ms: 0,
+        },
         Err(e) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
             eprintln!("[advisor] 外部API失敗 role={role:?}、ローカルにフォールバック: {e}");
-            advisor.local_prompt_for(role, task_context)
+            AdvisorResolution {
+                prompt: advisor.local_prompt_for(role, task_context),
+                source: "local",
+                duration_ms,
+            }
         }
+    }
+}
+
+/// Advisor呼出を監査ログに記録
+fn log_advisor_call(
+    store: Option<&MemoryStore>,
+    session: &Session,
+    role: AdvisorRole,
+    resolution: &AdvisorResolution,
+) {
+    if let Some(s) = store {
+        let audit = AuditLog::new(s.conn());
+        let role_str = match role {
+            AdvisorRole::Verification => "verification",
+            AdvisorRole::Replan => "replan",
+        };
+        let _ = audit.log(
+            Some(&session.id),
+            &AuditAction::AdvisorCall {
+                role: role_str.to_string(),
+                source: resolution.source.to_string(),
+                prompt_len: resolution.prompt.chars().count(),
+                duration_ms: resolution.duration_ms,
+            },
+        );
     }
 }
 
@@ -552,6 +595,7 @@ fn inject_replan_on_stall(
     task_context: &str,
     tools_succeeded: bool,
     output_hash: u64,
+    store: Option<&MemoryStore>,
 ) -> bool {
     if !stall_detector.record_step(tools_succeeded, output_hash) {
         return false;
@@ -561,8 +605,9 @@ fn inject_replan_on_stall(
         stall_detector.reset();
         return false;
     }
-    let prompt = resolve_advisor_prompt(advisor, AdvisorRole::Replan, task_context);
-    session.add_message(Message::system(prompt));
+    let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Replan, task_context);
+    log_advisor_call(store, session, AdvisorRole::Replan, &resolution);
+    session.add_message(Message::system(resolution.prompt));
     advisor.record_call();
     stall_detector.reset();
     eprintln!(
@@ -601,6 +646,7 @@ fn inject_verification_step(
     answer: &str,
     iteration: usize,
     max_iterations: usize,
+    store: Option<&MemoryStore>,
 ) -> bool {
     if iteration == 0
         || !advisor.can_advise()
@@ -610,8 +656,9 @@ fn inject_verification_step(
     {
         return false;
     }
-    let prompt = resolve_advisor_prompt(advisor, AdvisorRole::Verification, task_context);
-    session.add_message(Message::system(prompt));
+    let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Verification, task_context);
+    log_advisor_call(store, session, AdvisorRole::Verification, &resolution);
+    session.add_message(Message::system(resolution.prompt));
     advisor.record_call();
     eprintln!(
         "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
@@ -1329,6 +1376,7 @@ mod tests {
             "部分的な回答",
             1, // iteration > 0
             10,
+            None,
         );
         assert!(injected, "複雑タスクは検証ステップを挿入");
         assert_eq!(advisor.calls_used, 1);
@@ -1347,6 +1395,7 @@ mod tests {
             "回答",
             0, // 初回
             10,
+            None,
         );
         assert!(!injected);
         assert_eq!(advisor.calls_used, 0);
@@ -1364,6 +1413,7 @@ mod tests {
             "[検証済] 完了しました",
             1,
             10,
+            None,
         );
         assert!(!injected);
     }
@@ -1384,6 +1434,7 @@ mod tests {
             "回答",
             1,
             10,
+            None,
         );
         assert!(!injected);
     }
@@ -1400,6 +1451,7 @@ mod tests {
             "晴れです",
             1,
             10,
+            None,
         );
         assert!(!injected);
     }
@@ -1411,10 +1463,10 @@ mod tests {
         let mut stall = StallDetector::new(3);
         let mut advisor = AdvisorConfig::default();
         // 1〜2回目: 検出されない
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
         // 3回目: 停滞検出→再計画注入
-        assert!(inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
+        assert!(inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
         assert_eq!(advisor.calls_used, 1);
         assert!(session.messages.iter().any(|m| m.content.contains("停滞")));
     }
@@ -1426,12 +1478,11 @@ mod tests {
         let mut stall = StallDetector::new(2);
         let mut advisor = AdvisorConfig {
             max_uses: 1,
-            calls_used: 1, // 既に上限
+            calls_used: 1,
             ..Default::default()
         };
-        // 閾値到達するが advisor は呼ばれない
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
-        let injected = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0);
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
+        let injected = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None);
         assert!(!injected, "max_uses超過時は注入しない");
         assert_eq!(advisor.calls_used, 1, "calls_usedは増えない");
     }
@@ -1442,10 +1493,9 @@ mod tests {
         let mut session = Session::new();
         let mut stall = StallDetector::new(2);
         let mut advisor = AdvisorConfig::default();
-        // 進捗あり→停滞カウンタリセット
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 1));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 2));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 3));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 1, None));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 2, None));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 3, None));
         assert_eq!(advisor.calls_used, 0);
     }
 
@@ -1467,7 +1517,47 @@ mod tests {
         let advisor = AdvisorConfig::default();
         let v = resolve_advisor_prompt(&advisor, AdvisorRole::Verification, "task");
         let r = resolve_advisor_prompt(&advisor, AdvisorRole::Replan, "task");
-        assert!(v.contains("検証"));
-        assert!(r.contains("停滞"));
+        assert_eq!(v.source, "local");
+        assert_eq!(r.source, "local");
+        assert_eq!(v.duration_ms, 0);
+        assert!(v.prompt.contains("検証"));
+        assert!(r.prompt.contains("停滞"));
+    }
+
+    // テスト: log_advisor_call は store=None でもパニックしない
+    #[test]
+    fn test_log_advisor_call_with_no_store() {
+        let session = Session::new();
+        let resolution = AdvisorResolution {
+            prompt: "test".to_string(),
+            source: "local",
+            duration_ms: 0,
+        };
+        // store=None: 何もしない（パニックしない）
+        log_advisor_call(None, &session, AdvisorRole::Verification, &resolution);
+    }
+
+    // テスト: log_advisor_call が store にエントリを追加
+    #[test]
+    fn test_log_advisor_call_writes_to_store() {
+        use crate::memory::store::MemoryStore;
+        let store = MemoryStore::in_memory().unwrap();
+        let session = Session::new();
+        let resolution = AdvisorResolution {
+            prompt: "verification prompt content".to_string(),
+            source: "remote",
+            duration_ms: 123,
+        };
+        log_advisor_call(Some(&store), &session, AdvisorRole::Verification, &resolution);
+
+        let audit = AuditLog::new(store.conn());
+        let entries = audit.for_session(&session.id).unwrap();
+        let advisor_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.action_type == "advisor_call")
+            .collect();
+        assert_eq!(advisor_entries.len(), 1);
+        assert!(advisor_entries[0].action_data.contains("\"role\":\"verification\""));
+        assert!(advisor_entries[0].action_data.contains("\"source\":\"remote\""));
     }
 }
