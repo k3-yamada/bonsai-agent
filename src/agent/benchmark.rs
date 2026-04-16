@@ -335,6 +335,7 @@ impl BenchmarkSuite {
                     max_tools_selected: config.max_tools_selected,
                     system_prompt,
                     advisor: config.advisor.clone(),
+                    auto_checkpoint: false, // ベンチマークではCP不要
                 };
 
                 let store = MemoryStore::in_memory()?;
@@ -391,6 +392,7 @@ impl BenchmarkSuite {
                 max_tools_selected: config.max_tools_selected,
                 system_prompt: config.system_prompt.clone(),
                 advisor: config.advisor.clone(),
+                auto_checkpoint: false,
             };
 
             let store = MemoryStore::in_memory()?;

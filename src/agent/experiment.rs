@@ -150,6 +150,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         max_tools_selected: base_config.max_tools_selected,
         system_prompt: base_config.system_prompt.clone(),
         advisor: base_config.advisor.clone(),
+        auto_checkpoint: base_config.auto_checkpoint,
     };
 
     match &mutation.apply {
@@ -349,6 +350,7 @@ mod tests {
             max_tools_selected: 5,
             system_prompt: "test prompt\n1. ルール1\n2. ルール2".into(),
             advisor: Default::default(),
+            auto_checkpoint: false,
         }
     }
 

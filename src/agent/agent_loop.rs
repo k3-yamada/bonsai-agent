@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::compaction::{CompactionConfig, compact_if_needed};
 use crate::agent::conversation::{Message, ParsedOutput, Session};
 use crate::agent::error_recovery::{
@@ -27,6 +28,8 @@ pub struct AgentConfig {
     pub system_prompt: String,
     /// アドバイザー設定（完了前自己検証の呼び出し回数を制御）
     pub advisor: AdvisorConfig,
+    /// タスク開始時に自動チェックポイント作成（git stash + DB永続化）
+    pub auto_checkpoint: bool,
 }
 
 impl Default for AgentConfig {
@@ -37,6 +40,7 @@ impl Default for AgentConfig {
             max_tools_selected: 5,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             advisor: AdvisorConfig::default(),
+            auto_checkpoint: true,
         }
     }
 }
@@ -389,6 +393,11 @@ pub fn run_agent_loop_with_session(
     inject_contextual_memories(session, &task_context, store);
     inject_planning_step(session, &task_context);
 
+    // タスク開始時の自動チェックポイント（auto_checkpoint=true 時、git+DB）
+    if config.auto_checkpoint {
+        let _ = create_task_start_checkpoint(session, &task_context, store);
+    }
+
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
     let mut stall_detector = StallDetector::default();
@@ -480,6 +489,34 @@ pub fn run_agent_loop_with_session(
         iterations_used: final_iteration,
         tools_called: all_tools,
     })
+}
+
+/// タスク開始時の自動チェックポイントを作成
+///
+/// store があれば SQLite 永続化、なければインメモリ。
+/// git stash 失敗 / リポジトリ外でも黙殺（コア機能ではない）。
+fn create_task_start_checkpoint(
+    session: &Session,
+    task_context: &str,
+    store: Option<&MemoryStore>,
+) -> Option<i64> {
+    let desc = format!("auto-start: {}", task_context.chars().take(60).collect::<String>());
+    let session_id = session.id.clone();
+    let mut mgr = if let Some(s) = store {
+        CheckpointManager::with_persistence(s.conn(), Some(session_id))
+    } else {
+        CheckpointManager::new()
+    };
+    match mgr.create(&desc) {
+        Ok(id) => {
+            eprintln!("[checkpoint] タスク開始時CP作成 id={id}");
+            Some(id)
+        }
+        Err(e) => {
+            eprintln!("[checkpoint] CP作成失敗（無視）: {e}");
+            None
+        }
+    }
 }
 
 /// ステップ結果を監査ログに記録
@@ -1559,5 +1596,38 @@ mod tests {
         assert_eq!(advisor_entries.len(), 1);
         assert!(advisor_entries[0].action_data.contains("\"role\":\"verification\""));
         assert!(advisor_entries[0].action_data.contains("\"source\":\"remote\""));
+    }
+
+    // テスト: AgentConfig に auto_checkpoint デフォルト値 true
+    #[test]
+    fn test_agent_config_default_auto_checkpoint_enabled() {
+        let config = AgentConfig::default();
+        assert!(config.auto_checkpoint);
+    }
+
+    // テスト: create_task_start_checkpoint — store なしでも動作
+    #[test]
+    fn test_create_task_start_checkpoint_no_store() {
+        let session = Session::new();
+        // git stash の結果に依存するが、関数自体は panic しない
+        let _id = create_task_start_checkpoint(&session, "テストタスク", None);
+        // インメモリ or git失敗 のどちらでもOK
+    }
+
+    // テスト: create_task_start_checkpoint — store ありで永続化
+    #[test]
+    fn test_create_task_start_checkpoint_with_store() {
+        use crate::agent::checkpoint::CheckpointManager;
+        use crate::memory::store::MemoryStore;
+        let store = MemoryStore::in_memory().unwrap();
+        let session = Session::new();
+        let id_opt = create_task_start_checkpoint(&session, "永続化テスト", Some(&store));
+        // git stash が成功する場合（リポ内）は Some、失敗してもエラーなし
+        if let Some(id) = id_opt {
+            assert!(id > 0, "永続IDは正");
+            let loaded = CheckpointManager::load_persisted(store.conn(), Some(&session.id)).unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert!(loaded[0].description.contains("auto-start"));
+        }
     }
 }
