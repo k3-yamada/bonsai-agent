@@ -532,7 +532,7 @@ struct AdvisorResolution {
 
 /// アドバイザー応答を解決（remote優先→ローカルフォールバック、共通ヘルパー）
 fn resolve_advisor_prompt(
-    advisor: &AdvisorConfig,
+    advisor: &mut AdvisorConfig,
     role: AdvisorRole,
     task_context: &str,
 ) -> AdvisorResolution {
@@ -1514,9 +1514,9 @@ mod tests {
     // テスト: resolve_advisor_prompt はリモート未設定時にローカルを返す
     #[test]
     fn test_resolve_advisor_prompt_local_when_no_endpoint() {
-        let advisor = AdvisorConfig::default();
-        let v = resolve_advisor_prompt(&advisor, AdvisorRole::Verification, "task");
-        let r = resolve_advisor_prompt(&advisor, AdvisorRole::Replan, "task");
+        let mut advisor = AdvisorConfig::default();
+        let v = resolve_advisor_prompt(&mut advisor, AdvisorRole::Verification, "task");
+        let r = resolve_advisor_prompt(&mut advisor, AdvisorRole::Replan, "task");
         assert_eq!(v.source, "local");
         assert_eq!(r.source, "local");
         assert_eq!(v.duration_ms, 0);

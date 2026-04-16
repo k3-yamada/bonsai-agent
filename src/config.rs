@@ -93,6 +93,7 @@ impl AdvisorSettings {
             timeout_secs: self.timeout_secs,
             verification_prompt,
             replan_prompt,
+            cache: std::collections::HashMap::new(),
         }
     }
 

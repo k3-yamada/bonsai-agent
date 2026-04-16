@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::agent::conversation::Message;
 
 /// モデル選択
@@ -51,6 +53,11 @@ pub struct AdvisorConfig {
     pub verification_prompt: String,
     /// 停滞時再計画プロンプト（api_endpoint未設定時に使用）
     pub replan_prompt: String,
+    /// セッション内キャッシュ（同一role+task_contextの重複API呼出を回避）
+    /// キー: hash(role, task_context)、値: 外部APIのレスポンス本文
+    /// セッションごとにクローンされるため、セッション境界で自動リセット
+    #[doc(hidden)]
+    pub cache: HashMap<u64, String>,
 }
 
 /// デフォルトの完了前自己検証プロンプト
@@ -102,6 +109,7 @@ impl Default for AdvisorConfig {
             timeout_secs: 10,
             verification_prompt: DEFAULT_VERIFICATION_PROMPT.to_string(),
             replan_prompt: DEFAULT_REPLAN_PROMPT.to_string(),
+            cache: HashMap::new(),
         }
     }
 }
@@ -141,20 +149,37 @@ impl AdvisorConfig {
         }
     }
 
+    /// キャッシュキーを計算（role + task_context のハッシュ）
+    fn cache_key(role: AdvisorRole, task_context: &str) -> u64 {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        (role as u8).hash(&mut h);
+        task_context.hash(&mut h);
+        h.finish()
+    }
+
     /// 外部アドバイザーAPIから指示を取得（OpenAI互換 /chat/completions）
     ///
     /// `role` で検証/再計画を切り替え。戻り値:
     /// - `Ok(None)`: api_endpoint未設定（フォールバック必要）
-    /// - `Ok(Some(advice))`: 外部APIから取得成功
+    /// - `Ok(Some(advice))`: 外部APIから取得成功（キャッシュヒット含む）
     /// - `Err(_)`: ネットワーク/JSON エラー（呼び出し側でフォールバック推奨）
+    ///
+    /// 同一 role + task_context の重複呼出はキャッシュから返却（セッション境界で自動リセット）
     pub fn try_remote_advice(
-        &self,
+        &mut self,
         role: AdvisorRole,
         task_context: &str,
     ) -> anyhow::Result<Option<String>> {
         let Some(endpoint) = self.api_endpoint.as_deref() else {
             return Ok(None);
         };
+        // キャッシュヒット
+        let key = Self::cache_key(role, task_context);
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(Some(cached.clone()));
+        }
+
         let model = self.api_model.as_deref().unwrap_or("gpt-4o-mini");
         let body = serde_json::json!({
             "model": model,
@@ -182,6 +207,7 @@ impl AdvisorConfig {
         if content.is_empty() {
             anyhow::bail!("外部アドバイザー応答が空");
         }
+        self.cache.insert(key, content.clone());
         Ok(Some(content))
     }
 }
@@ -458,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_try_remote_advice_no_endpoint_returns_none() {
-        let config = AdvisorConfig::default();
+        let mut config = AdvisorConfig::default();
         let result = config
             .try_remote_advice(AdvisorRole::Verification, "テスト")
             .unwrap();
@@ -467,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_try_remote_advice_invalid_endpoint_returns_err() {
-        let config = AdvisorConfig {
+        let mut config = AdvisorConfig {
             api_endpoint: Some("http://127.0.0.1:1/invalid".to_string()),
             timeout_secs: 1,
             ..Default::default()
@@ -514,5 +540,62 @@ mod tests {
         assert!(config.api_key.is_none());
         assert!(config.api_model.is_none());
         assert_eq!(config.timeout_secs, 10);
+    }
+
+    #[test]
+    fn test_cache_key_differs_by_role() {
+        let k_v = AdvisorConfig::cache_key(AdvisorRole::Verification, "task");
+        let k_r = AdvisorConfig::cache_key(AdvisorRole::Replan, "task");
+        assert_ne!(k_v, k_r);
+    }
+
+    #[test]
+    fn test_cache_key_differs_by_context() {
+        let k1 = AdvisorConfig::cache_key(AdvisorRole::Verification, "task A");
+        let k2 = AdvisorConfig::cache_key(AdvisorRole::Verification, "task B");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_cache_key_same_for_same_inputs() {
+        let k1 = AdvisorConfig::cache_key(AdvisorRole::Verification, "task");
+        let k2 = AdvisorConfig::cache_key(AdvisorRole::Verification, "task");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn test_cache_starts_empty() {
+        let config = AdvisorConfig::default();
+        assert!(config.cache.is_empty());
+    }
+
+    #[test]
+    fn test_cache_returns_hit_without_http() {
+        // api_endpoint設定済 + 事前にキャッシュへ手動挿入
+        let mut config = AdvisorConfig {
+            api_endpoint: Some("http://127.0.0.1:1/never-reached".to_string()),
+            timeout_secs: 1,
+            ..Default::default()
+        };
+        let key = AdvisorConfig::cache_key(AdvisorRole::Verification, "task");
+        config.cache.insert(key, "cached advice".to_string());
+        // HTTPに行かずキャッシュから返却（無効endpointだがエラーにならない＝キャッシュヒット）
+        let result = config
+            .try_remote_advice(AdvisorRole::Verification, "task")
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("cached advice"));
+    }
+
+    #[test]
+    fn test_cache_clone_independence() {
+        // クローン後の変更が元に影響しないこと（セッション境界の独立性）
+        let mut original = AdvisorConfig::default();
+        original
+            .cache
+            .insert(0, "shared at clone time".to_string());
+        let mut cloned = original.clone();
+        cloned.cache.insert(1, "only in clone".to_string());
+        assert!(!original.cache.contains_key(&1));
+        assert!(cloned.cache.contains_key(&1));
     }
 }
