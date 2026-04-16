@@ -103,6 +103,34 @@ pub enum StepOutcome {
 }
 
 
+/// エージェントループのミュータブル状態を集約
+///
+/// run_agent_loop_with_session の局所変数が多すぎるため構造体に抽出。
+/// 将来のミドルウェアチェーン化の基盤。
+pub struct LoopState {
+    pub circuit_breaker: CircuitBreaker,
+    pub loop_detector: LoopDetector,
+    pub stall_detector: StallDetector,
+    pub advisor: AdvisorConfig,
+    pub all_tools: Vec<String>,
+    pub consecutive_failures: usize,
+    pub iteration: usize,
+}
+
+impl LoopState {
+    pub fn new(advisor: AdvisorConfig) -> Self {
+        Self {
+            circuit_breaker: CircuitBreaker::default(),
+            loop_detector: LoopDetector::default(),
+            stall_detector: StallDetector::default(),
+            advisor,
+            all_tools: Vec::new(),
+            consecutive_failures: 0,
+            iteration: 0,
+        }
+    }
+}
+
 /// 停滞検出器: 進捗のないステップが続いた場合に再計画を促す
 pub struct StallDetector {
     no_progress_count: usize,
@@ -403,11 +431,7 @@ pub fn run_agent_loop_with_session(
         let _ = create_task_start_checkpoint(session, &task_context, store);
     }
 
-    let mut circuit_breaker = CircuitBreaker::default();
-    let mut loop_detector = LoopDetector::default();
-    let mut stall_detector = StallDetector::default();
-    // セッションごとのアドバイザー使用回数（max_usesで上限を制御）
-    let mut advisor = config.advisor.clone();
+    let mut state = LoopState::new(config.advisor.clone());
 
     let ctx = StepContext {
         backend,
@@ -419,17 +443,16 @@ pub fn run_agent_loop_with_session(
         store,
     };
 
-    let mut all_tools: Vec<String> = Vec::new();
     let mut final_iteration = 0;
-    let mut consecutive_failures: usize = 0;
     for iteration in 0..config.max_iterations {
+        state.iteration = iteration;
         final_iteration = iteration + 1;
         let step_start = std::time::Instant::now();
         let outcome = execute_step(
             session,
             &ctx,
-            &mut circuit_breaker,
-            &mut loop_detector,
+            &mut state.circuit_breaker,
+            &mut state.loop_detector,
             iteration,
         )?;
 
@@ -441,38 +464,38 @@ pub fn run_agent_loop_with_session(
                 log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
                 // Advisor パターン: 複雑タスクの初回回答は検証ステップを挿入
                 // max_uses (デフォルト3) で過剰な検証を抑制
-                if inject_verification_step(session, &mut advisor, &task_context, &answer, iteration, config.max_iterations, store) {
+                if inject_verification_step(session, &mut state.advisor, &task_context, &answer, iteration, config.max_iterations, store) {
                     continue;
                 }
                 record_success(store, session, &task_context, &answer);
                 return Ok(AgentLoopResult {
                     answer,
                     iterations_used: final_iteration,
-                    tools_called: all_tools,
+                    tools_called: state.all_tools,
                 });
             }
             StepOutcome::Aborted(reason) => {
-                consecutive_failures += 1;
-                log_step_outcome(store, session, iteration, "aborted", duration_ms, &[], consecutive_failures);
+                state.consecutive_failures += 1;
+                log_step_outcome(store, session, iteration, "aborted", duration_ms, &[], state.consecutive_failures);
                 record_abort(store, session, &task_context, &reason);
                 return Ok(AgentLoopResult {
                     answer: format!("[中断] {reason}"),
                     iterations_used: final_iteration,
-                    tools_called: all_tools,
+                    tools_called: state.all_tools,
                 });
             }
             StepOutcome::Continue(step_tools) => {
                 let tools_succeeded = !step_tools.is_empty();
                 if !tools_succeeded {
-                    consecutive_failures += 1;
+                    state.consecutive_failures += 1;
                 } else {
-                    consecutive_failures = 0;
+                    state.consecutive_failures = 0;
                 }
-                log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, consecutive_failures);
-                all_tools.extend(step_tools);
+                log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, state.consecutive_failures);
+                state.all_tools.extend(step_tools);
                 // 停滞検出→Advisor再計画
                 let output_hash = compute_output_hash(session);
-                inject_replan_on_stall(session, &mut stall_detector, &mut advisor, &task_context, tools_succeeded, output_hash, store);
+                inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, &task_context, tools_succeeded, output_hash, store);
                 let (lv, _offloaded) = compact_if_needed(
                     &mut session.messages,
                     &CompactionConfig::default(),
@@ -492,7 +515,7 @@ pub fn run_agent_loop_with_session(
     Ok(AgentLoopResult {
         answer: format!("[中断] {timeout_msg}"),
         iterations_used: final_iteration,
-        tools_called: all_tools,
+        tools_called: state.all_tools,
     })
 }
 
@@ -1601,6 +1624,16 @@ mod tests {
         assert_eq!(advisor_entries.len(), 1);
         assert!(advisor_entries[0].action_data.contains("\"role\":\"verification\""));
         assert!(advisor_entries[0].action_data.contains("\"source\":\"remote\""));
+    }
+
+    // テスト: LoopState 初期状態
+    #[test]
+    fn test_loop_state_new() {
+        let state = LoopState::new(AdvisorConfig::default());
+        assert!(state.all_tools.is_empty());
+        assert_eq!(state.consecutive_failures, 0);
+        assert_eq!(state.iteration, 0);
+        assert!(state.advisor.can_advise());
     }
 
     // テスト: AgentConfig に auto_checkpoint デフォルト値 true
