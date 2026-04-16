@@ -39,6 +39,8 @@ pub struct AdvisorSettings {
     pub timeout_secs: u64,
     /// 検証プロンプト（カスタマイズ用、空文字なら組込みデフォルト）
     pub verification_prompt: String,
+    /// 停滞時再計画プロンプト（カスタマイズ用、空文字なら組込みデフォルト）
+    pub replan_prompt: String,
 }
 
 impl Default for AdvisorSettings {
@@ -51,6 +53,7 @@ impl Default for AdvisorSettings {
             api_model: None,
             timeout_secs: 10,
             verification_prompt: String::new(), // 空 = ランタイムでDEFAULTを使用
+            replan_prompt: String::new(),
         }
     }
 }
@@ -63,12 +66,22 @@ impl AdvisorSettings {
     /// 2. endpoint URL に基づく環境変数（openai → OPENAI_API_KEY、anthropic → ANTHROPIC_API_KEY）
     /// 3. OPENAI_API_KEY → ANTHROPIC_API_KEY（汎用フォールバック）
     pub fn to_runtime(&self) -> crate::runtime::model_router::AdvisorConfig {
-        use crate::runtime::model_router::{AdvisorConfig, DEFAULT_VERIFICATION_PROMPT};
-        let api_key = self.api_key.clone().or_else(|| Self::detect_api_key(self.api_endpoint.as_deref()));
-        let prompt = if self.verification_prompt.is_empty() {
+        use crate::runtime::model_router::{
+            AdvisorConfig, DEFAULT_REPLAN_PROMPT, DEFAULT_VERIFICATION_PROMPT,
+        };
+        let api_key = self
+            .api_key
+            .clone()
+            .or_else(|| Self::detect_api_key(self.api_endpoint.as_deref()));
+        let verification_prompt = if self.verification_prompt.is_empty() {
             DEFAULT_VERIFICATION_PROMPT.to_string()
         } else {
             self.verification_prompt.clone()
+        };
+        let replan_prompt = if self.replan_prompt.is_empty() {
+            DEFAULT_REPLAN_PROMPT.to_string()
+        } else {
+            self.replan_prompt.clone()
         };
         AdvisorConfig {
             max_uses: self.max_uses,
@@ -78,7 +91,8 @@ impl AdvisorSettings {
             api_key,
             api_model: self.api_model.clone(),
             timeout_secs: self.timeout_secs,
-            verification_prompt: prompt,
+            verification_prompt,
+            replan_prompt,
         }
     }
 

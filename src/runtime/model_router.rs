@@ -49,11 +49,46 @@ pub struct AdvisorConfig {
     pub timeout_secs: u64,
     /// 検証プロンプト（api_endpoint未設定時に使用するローカルプロンプト）
     pub verification_prompt: String,
+    /// 停滞時再計画プロンプト（api_endpoint未設定時に使用）
+    pub replan_prompt: String,
 }
 
 /// デフォルトの完了前自己検証プロンプト
 pub const DEFAULT_VERIFICATION_PROMPT: &str =
     "回答前に検証: 目標を達成できていますか？不足があれば補完してください。問題なければ回答に[検証済]を含めてください。";
+
+/// デフォルトの停滞時再計画プロンプト
+pub const DEFAULT_REPLAN_PROMPT: &str =
+    "停滞検出: これまでのアプローチでは進捗していません。\n<think>内で別アプローチを再計画:\n1. 失敗の根本原因\n2. 別ツール/別手順\n3. 簡潔に再開";
+
+/// アドバイザー呼び出しの目的
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisorRole {
+    /// 完了前自己検証
+    Verification,
+    /// 停滞時の再計画
+    Replan,
+}
+
+impl AdvisorRole {
+    fn system_prompt(self) -> &'static str {
+        match self {
+            Self::Verification => {
+                "あなたは1bitローカルLLMの戦略アドバイザーです。                 実行者が回答を出す前に、不足や検証ポイントを100語以内・列挙形式で提示してください。"
+            }
+            Self::Replan => {
+                "あなたは1bitローカルLLMの戦略アドバイザーです。                 実行者が停滞しています。別アプローチを100語以内・列挙形式で:                 1. 失敗の根本原因 2. 別ツール/別手順 3. 次の具体的アクション。"
+            }
+        }
+    }
+
+    fn user_prompt(self, task_context: &str) -> String {
+        match self {
+            Self::Verification => format!("タスク: {task_context}\n\n上記の検証指示を簡潔に。"),
+            Self::Replan => format!("タスク: {task_context}\n\nこれまでが停滞中。別の手段を提案してください。"),
+        }
+    }
+}
 
 impl Default for AdvisorConfig {
     fn default() -> Self {
@@ -66,6 +101,7 @@ impl Default for AdvisorConfig {
             api_model: None,
             timeout_secs: 10,
             verification_prompt: DEFAULT_VERIFICATION_PROMPT.to_string(),
+            replan_prompt: DEFAULT_REPLAN_PROMPT.to_string(),
         }
     }
 }
@@ -92,13 +128,30 @@ impl AdvisorConfig {
         self.verification_prompt.clone()
     }
 
-    /// 外部アドバイザーAPIから検証指示を取得（OpenAI互換 /chat/completions）
+    /// 停滞時再計画プロンプトを構築（ローカル、純粋関数）
+    pub fn build_replan_prompt(&self, _task_context: &str) -> String {
+        self.replan_prompt.clone()
+    }
+
+    /// ロールに応じたローカルプロンプトを取得
+    pub fn local_prompt_for(&self, role: AdvisorRole, task_context: &str) -> String {
+        match role {
+            AdvisorRole::Verification => self.build_verification_prompt(task_context),
+            AdvisorRole::Replan => self.build_replan_prompt(task_context),
+        }
+    }
+
+    /// 外部アドバイザーAPIから指示を取得（OpenAI互換 /chat/completions）
     ///
-    /// 戻り値:
+    /// `role` で検証/再計画を切り替え。戻り値:
     /// - `Ok(None)`: api_endpoint未設定（フォールバック必要）
     /// - `Ok(Some(advice))`: 外部APIから取得成功
     /// - `Err(_)`: ネットワーク/JSON エラー（呼び出し側でフォールバック推奨）
-    pub fn try_remote_advice(&self, task_context: &str) -> anyhow::Result<Option<String>> {
+    pub fn try_remote_advice(
+        &self,
+        role: AdvisorRole,
+        task_context: &str,
+    ) -> anyhow::Result<Option<String>> {
         let Some(endpoint) = self.api_endpoint.as_deref() else {
             return Ok(None);
         };
@@ -106,14 +159,8 @@ impl AdvisorConfig {
         let body = serde_json::json!({
             "model": model,
             "messages": [
-                {
-                    "role": "system",
-                    "content": "あなたは1bitローカルLLMの戦略アドバイザーです。実行者が回答を出す前に、不足や検証ポイントを100語以内・列挙形式で提示してください。"
-                },
-                {
-                    "role": "user",
-                    "content": format!("タスク: {task_context}\n\n上記タスクの検証指示を簡潔に。")
-                }
+                { "role": "system", "content": role.system_prompt() },
+                { "role": "user", "content": role.user_prompt(task_context) }
             ],
             "max_tokens": self.max_advisor_tokens,
             "temperature": 0.3,
@@ -412,7 +459,9 @@ mod tests {
     #[test]
     fn test_try_remote_advice_no_endpoint_returns_none() {
         let config = AdvisorConfig::default();
-        let result = config.try_remote_advice("テスト").unwrap();
+        let result = config
+            .try_remote_advice(AdvisorRole::Verification, "テスト")
+            .unwrap();
         assert!(result.is_none(), "endpoint未設定時はOk(None)");
     }
 
@@ -423,9 +472,40 @@ mod tests {
             timeout_secs: 1,
             ..Default::default()
         };
-        // 接続不可ポートに対するエラー（フォールバックされる想定）
-        let result = config.try_remote_advice("テスト");
+        let result = config.try_remote_advice(AdvisorRole::Verification, "テスト");
         assert!(result.is_err(), "無効endpointはErr");
+    }
+
+    #[test]
+    fn test_advisor_role_system_prompts_differ() {
+        assert_ne!(
+            AdvisorRole::Verification.system_prompt(),
+            AdvisorRole::Replan.system_prompt()
+        );
+    }
+
+    #[test]
+    fn test_advisor_role_user_prompts_include_context() {
+        let v = AdvisorRole::Verification.user_prompt("ファイルを修正");
+        let r = AdvisorRole::Replan.user_prompt("ファイルを修正");
+        assert!(v.contains("ファイルを修正"));
+        assert!(r.contains("ファイルを修正"));
+    }
+
+    #[test]
+    fn test_local_prompt_for_routes_by_role() {
+        let config = AdvisorConfig::default();
+        let v = config.local_prompt_for(AdvisorRole::Verification, "");
+        let r = config.local_prompt_for(AdvisorRole::Replan, "");
+        assert!(v.contains("検証"));
+        assert!(r.contains("停滞"));
+    }
+
+    #[test]
+    fn test_advisor_config_default_replan_prompt() {
+        let config = AdvisorConfig::default();
+        assert!(config.replan_prompt.contains("停滞"));
+        assert_eq!(config.replan_prompt, DEFAULT_REPLAN_PROMPT);
     }
 
     #[test]

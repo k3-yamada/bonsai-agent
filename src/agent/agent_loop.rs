@@ -15,7 +15,7 @@ use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::embedder::create_embedder;
 use crate::runtime::inference::LlmBackend;
-use crate::runtime::model_router::AdvisorConfig;
+use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::ToolRegistry;
 
@@ -391,6 +391,7 @@ pub fn run_agent_loop_with_session(
 
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
+    let mut stall_detector = StallDetector::default();
     // セッションごとのアドバイザー使用回数（max_usesで上限を制御）
     let mut advisor = config.advisor.clone();
 
@@ -447,13 +448,17 @@ pub fn run_agent_loop_with_session(
                 });
             }
             StepOutcome::Continue(step_tools) => {
-                if step_tools.is_empty() {
+                let tools_succeeded = !step_tools.is_empty();
+                if !tools_succeeded {
                     consecutive_failures += 1;
                 } else {
                     consecutive_failures = 0;
                 }
                 log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, consecutive_failures);
                 all_tools.extend(step_tools);
+                // 停滞検出→Advisor再計画
+                let output_hash = compute_output_hash(session);
+                inject_replan_on_stall(session, &mut stall_detector, &mut advisor, &task_context, tools_succeeded, output_hash);
                 let (lv, _offloaded) = compact_if_needed(
                     &mut session.messages,
                     &CompactionConfig::default(),
@@ -518,6 +523,67 @@ fn detect_task_complexity(input: &str) -> bool {
     signal_count >= 2 || input.len() > 200
 }
 
+/// アドバイザー応答を解決（remote優先→ローカルフォールバック、共通ヘルパー）
+fn resolve_advisor_prompt(
+    advisor: &AdvisorConfig,
+    role: AdvisorRole,
+    task_context: &str,
+) -> String {
+    match advisor.try_remote_advice(role, task_context) {
+        Ok(Some(remote)) => {
+            eprintln!("[advisor] 外部アドバイザー応答取得 role={:?} ({}文字)", role, remote.len());
+            remote
+        }
+        Ok(None) => advisor.local_prompt_for(role, task_context),
+        Err(e) => {
+            eprintln!("[advisor] 外部API失敗 role={role:?}、ローカルにフォールバック: {e}");
+            advisor.local_prompt_for(role, task_context)
+        }
+    }
+}
+
+/// 停滞検出時に再計画ステップを注入
+///
+/// 戻り値: true なら再計画ステップ挿入済（StallDetectorをreset）
+fn inject_replan_on_stall(
+    session: &mut Session,
+    stall_detector: &mut StallDetector,
+    advisor: &mut AdvisorConfig,
+    task_context: &str,
+    tools_succeeded: bool,
+    output_hash: u64,
+) -> bool {
+    if !stall_detector.record_step(tools_succeeded, output_hash) {
+        return false;
+    }
+    if !advisor.can_advise() {
+        eprintln!("[stall] 停滞検出だが advisor max_uses 到達");
+        stall_detector.reset();
+        return false;
+    }
+    let prompt = resolve_advisor_prompt(advisor, AdvisorRole::Replan, task_context);
+    session.add_message(Message::system(prompt));
+    advisor.record_call();
+    stall_detector.reset();
+    eprintln!(
+        "[stall] 検出→再計画ステップ注入 (advisor残{}/{}回)",
+        advisor.remaining(),
+        advisor.max_uses
+    );
+    true
+}
+
+/// 出力ハッシュを計算（StallDetector用）
+fn compute_output_hash(session: &Session) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    if let Some(last) = session.messages.last() {
+        last.content.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// 完了前自己検証ステップを注入
 ///
 /// 戻り値: true なら検証ステップ挿入済（ループcontinue）、false なら検証不要（通常のFinalAnswer処理へ）
@@ -544,18 +610,7 @@ fn inject_verification_step(
     {
         return false;
     }
-    // リモートアドバイザーが設定されていれば優先、失敗時はローカルにフォールバック
-    let prompt = match advisor.try_remote_advice(task_context) {
-        Ok(Some(remote)) => {
-            eprintln!("[advisor] 外部アドバイザー応答取得 ({}文字)", remote.len());
-            remote
-        }
-        Ok(None) => advisor.build_verification_prompt(task_context),
-        Err(e) => {
-            eprintln!("[advisor] 外部API失敗、ローカルにフォールバック: {e}");
-            advisor.build_verification_prompt(task_context)
-        }
-    };
+    let prompt = resolve_advisor_prompt(advisor, AdvisorRole::Verification, task_context);
     session.add_message(Message::system(prompt));
     advisor.record_call();
     eprintln!(
@@ -1347,5 +1402,72 @@ mod tests {
             10,
         );
         assert!(!injected);
+    }
+
+    // テスト: inject_replan_on_stall — 閾値到達で再計画注入
+    #[test]
+    fn test_inject_replan_on_stall_triggers_after_threshold() {
+        let mut session = Session::new();
+        let mut stall = StallDetector::new(3);
+        let mut advisor = AdvisorConfig::default();
+        // 1〜2回目: 検出されない
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
+        // 3回目: 停滞検出→再計画注入
+        assert!(inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
+        assert_eq!(advisor.calls_used, 1);
+        assert!(session.messages.iter().any(|m| m.content.contains("停滞")));
+    }
+
+    // テスト: inject_replan_on_stall — advisor max_uses超過時はreset+スキップ
+    #[test]
+    fn test_inject_replan_on_stall_respects_advisor_max_uses() {
+        let mut session = Session::new();
+        let mut stall = StallDetector::new(2);
+        let mut advisor = AdvisorConfig {
+            max_uses: 1,
+            calls_used: 1, // 既に上限
+            ..Default::default()
+        };
+        // 閾値到達するが advisor は呼ばれない
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0));
+        let injected = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0);
+        assert!(!injected, "max_uses超過時は注入しない");
+        assert_eq!(advisor.calls_used, 1, "calls_usedは増えない");
+    }
+
+    // テスト: inject_replan_on_stall — 進捗ありでスキップ
+    #[test]
+    fn test_inject_replan_on_stall_skips_on_progress() {
+        let mut session = Session::new();
+        let mut stall = StallDetector::new(2);
+        let mut advisor = AdvisorConfig::default();
+        // 進捗あり→停滞カウンタリセット
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 1));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 2));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 3));
+        assert_eq!(advisor.calls_used, 0);
+    }
+
+    // テスト: compute_output_hash は変化を検出
+    #[test]
+    fn test_compute_output_hash_differs_for_different_content() {
+        let mut s1 = Session::new();
+        s1.add_message(Message::user("A"));
+        let h1 = compute_output_hash(&s1);
+        let mut s2 = Session::new();
+        s2.add_message(Message::user("B"));
+        let h2 = compute_output_hash(&s2);
+        assert_ne!(h1, h2);
+    }
+
+    // テスト: resolve_advisor_prompt はリモート未設定時にローカルを返す
+    #[test]
+    fn test_resolve_advisor_prompt_local_when_no_endpoint() {
+        let advisor = AdvisorConfig::default();
+        let v = resolve_advisor_prompt(&advisor, AdvisorRole::Verification, "task");
+        let r = resolve_advisor_prompt(&advisor, AdvisorRole::Replan, "task");
+        assert!(v.contains("検証"));
+        assert!(r.contains("停滞"));
     }
 }
