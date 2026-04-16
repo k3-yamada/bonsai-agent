@@ -85,6 +85,14 @@ struct Cli {
     #[arg(long, default_value = "10")]
     lab_experiments: usize,
 
+    /// ダッシュボード（advisor/checkpoint/実験統計）
+    #[arg(long)]
+    dashboard: bool,
+
+    /// ダッシュボード（advisor/checkpoint/実験統計）
+    #[arg(long)]
+    dashboard: bool,
+
     /// チェックポイント一覧
     #[arg(long)]
     checkpoints: bool,
@@ -165,6 +173,12 @@ fn main() -> Result<()> {
     }
     if cli.audit {
         return handle_audit_mode(&store);
+    }
+    if cli.dashboard {
+        return handle_dashboard_mode(&store);
+    }
+    if cli.dashboard {
+        return handle_dashboard_mode(&store);
     }
     if cli.checkpoints {
         return handle_checkpoints_mode(&store);
@@ -352,6 +366,126 @@ fn handle_tasks_mode(store: &MemoryStore) -> Result<()> {
             println!("  ID: {}", &t.id[..8]);
         }
     }
+    Ok(())
+}
+
+fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
+    use bonsai_agent::observability::audit::AuditLog;
+    use bonsai_agent::agent::experiment_log::ExperimentLog;
+
+    println!("╔══════════════════════════════════════════╗");
+    println!("║         bonsai-agent ダッシュボード        ║");
+    println!("╚══════════════════════════════════════════╝");
+
+    // --- Advisor 統計 ---
+    let audit = AuditLog::new(store.conn());
+    let advisor = audit.advisor_stats(None)?;
+    println!("\n📊 Advisor 統計:");
+    if advisor.total_calls == 0 {
+        println!("  (呼出なし)");
+    } else {
+        println!("  総呼出: {}  検証: {}  再計画: {}", advisor.total_calls, advisor.verification_calls, advisor.replan_calls);
+        println!("  remote: {}  local: {}", advisor.remote_calls, advisor.local_calls);
+        println!("  平均プロンプト長: {} 文字  平均remote所要: {} ms", advisor.avg_prompt_len, advisor.avg_remote_duration_ms);
+    }
+
+    // --- Checkpoint 統計 ---
+    let cp_stats = CheckpointManager::stats(store.conn(), None)?;
+    println!("\n💾 Checkpoint 統計:");
+    if cp_stats.total == 0 {
+        println!("  (チェックポイントなし)");
+    } else {
+        println!("  総CP: {}  ロールバック済: {} ({:.0}%)  git保存: {} ({:.0}%)",
+            cp_stats.total,
+            cp_stats.rolled_back, cp_stats.rollback_rate() * 100.0,
+            cp_stats.with_git_ref, cp_stats.git_capture_rate() * 100.0,
+        );
+    }
+
+    // --- 実験（Lab）統計 ---
+    let experiments = ExperimentLog::recent_experiments(store.conn(), 20)?;
+    println!("\n🧪 Lab 実験 (直近{}件):", experiments.len());
+    if experiments.is_empty() {
+        println!("  (実験なし)");
+    } else {
+        let accepted = experiments.iter().filter(|e| e.accepted).count();
+        let rejected = experiments.len() - accepted;
+        let best_delta = experiments.iter().map(|e| e.delta).fold(f64::NEG_INFINITY, f64::max);
+        let worst_delta = experiments.iter().map(|e| e.delta).fold(f64::INFINITY, f64::min);
+        println!("  承認: {} / 却下: {} (承認率 {:.0}%)", accepted, rejected, accepted as f64 / experiments.len() as f64 * 100.0);
+        println!("  最良delta: {:+.4}  最悪delta: {:+.4}", best_delta, worst_delta);
+        // 直近3件を表示
+        println!("  ─── 直近3件 ───");
+        for exp in experiments.iter().take(3) {
+            let status = if exp.accepted { "✓" } else { "✗" };
+            println!("  {} {:+.4} | {} | {}", status, exp.delta, exp.mutation_detail.chars().take(40).collect::<String>(), exp.experiment_id.chars().take(8).collect::<String>());
+        }
+    }
+
+    // --- 監査ログ概要 ---
+    let audit_count = audit.count()?;
+    println!("\n📋 監査ログ: {} 件", audit_count);
+
+    Ok(())
+}
+
+fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
+    use bonsai_agent::observability::audit::AuditLog;
+    use bonsai_agent::agent::experiment_log::ExperimentLog;
+
+    println!("╔══════════════════════════════════════════╗");
+    println!("║         bonsai-agent ダッシュボード        ║");
+    println!("╚══════════════════════════════════════════╝");
+
+    // --- Advisor 統計 ---
+    let audit = AuditLog::new(store.conn());
+    let advisor = audit.advisor_stats(None)?;
+    println!("\n📊 Advisor 統計:");
+    if advisor.total_calls == 0 {
+        println!("  (呼出なし)");
+    } else {
+        println!("  総呼出: {}  検証: {}  再計画: {}", advisor.total_calls, advisor.verification_calls, advisor.replan_calls);
+        println!("  remote: {}  local: {}", advisor.remote_calls, advisor.local_calls);
+        println!("  平均プロンプト長: {} 文字  平均remote所要: {} ms", advisor.avg_prompt_len, advisor.avg_remote_duration_ms);
+    }
+
+    // --- Checkpoint 統計 ---
+    let cp_stats = CheckpointManager::stats(store.conn(), None)?;
+    println!("\n💾 Checkpoint 統計:");
+    if cp_stats.total == 0 {
+        println!("  (チェックポイントなし)");
+    } else {
+        println!("  総CP: {}  ロールバック済: {} ({:.0}%)  git保存: {} ({:.0}%)",
+            cp_stats.total,
+            cp_stats.rolled_back, cp_stats.rollback_rate() * 100.0,
+            cp_stats.with_git_ref, cp_stats.git_capture_rate() * 100.0,
+        );
+    }
+
+    // --- 実験（Lab）統計 ---
+    let experiments = ExperimentLog::recent_experiments(store.conn(), 20)?;
+    println!("\n🧪 Lab 実験 (直近{}件):", experiments.len());
+    if experiments.is_empty() {
+        println!("  (実験なし)");
+    } else {
+        let accepted = experiments.iter().filter(|e| e.accepted).count();
+        let rejected = experiments.len() - accepted;
+        let best_delta = experiments.iter().map(|e| e.delta).fold(f64::NEG_INFINITY, f64::max);
+        let worst_delta = experiments.iter().map(|e| e.delta).fold(f64::INFINITY, f64::min);
+        println!("  承認: {} / 却下: {} (承認率 {:.0}%)", accepted, rejected, accepted as f64 / experiments.len() as f64 * 100.0);
+        println!("  最良delta: {:+.4}  最悪delta: {:+.4}", best_delta, worst_delta);
+        // 直近3件を表示
+        println!("  ─── 直近3件 ───");
+        for exp in experiments.iter().take(3) {
+            let status = if exp.accepted { "✓" } else { "✗" };
+            println!("  {} {:+.4} | {} | {}", status, exp.delta, exp.mutation_detail.chars().take(40).collect::<String>(), exp.experiment_id.chars().take(8).collect::<String>());
+        }
+    }
+
+    // --- 監査ログ概要 ---
+    let audit_count = audit.count()?;
+    println!("\n📋 監査ログ: {} 件", audit_count);
+
     Ok(())
 }
 
