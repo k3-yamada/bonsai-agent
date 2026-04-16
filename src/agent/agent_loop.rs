@@ -544,7 +544,18 @@ fn inject_verification_step(
     {
         return false;
     }
-    let prompt = advisor.build_verification_prompt(task_context);
+    // リモートアドバイザーが設定されていれば優先、失敗時はローカルにフォールバック
+    let prompt = match advisor.try_remote_advice(task_context) {
+        Ok(Some(remote)) => {
+            eprintln!("[advisor] 外部アドバイザー応答取得 ({}文字)", remote.len());
+            remote
+        }
+        Ok(None) => advisor.build_verification_prompt(task_context),
+        Err(e) => {
+            eprintln!("[advisor] 外部API失敗、ローカルにフォールバック: {e}");
+            advisor.build_verification_prompt(task_context)
+        }
+    };
     session.add_message(Message::system(prompt));
     advisor.record_call();
     eprintln!(

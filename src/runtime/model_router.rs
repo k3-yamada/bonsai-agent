@@ -38,8 +38,16 @@ pub struct AdvisorConfig {
     /// アドバイザー応答の最大トークン数（推奨: 400-700）
     pub max_advisor_tokens: usize,
     /// 外部APIエンドポイント（None = ローカルモデルで代替）
+    /// 例: "https://api.openai.com/v1/chat/completions"
+    /// 例: "http://127.0.0.1:8081/v1/chat/completions"（別llama-server）
     pub api_endpoint: Option<String>,
-    /// 検証プロンプト（将来: api_endpoint設定時に外部アドバイザーへ差し替え可能）
+    /// API認証キー（None = 認証なし、ローカルllama-server等）
+    pub api_key: Option<String>,
+    /// 使用モデル名（デフォルト: "gpt-4o-mini"）
+    pub api_model: Option<String>,
+    /// HTTPリクエストタイムアウト秒
+    pub timeout_secs: u64,
+    /// 検証プロンプト（api_endpoint未設定時に使用するローカルプロンプト）
     pub verification_prompt: String,
 }
 
@@ -54,6 +62,9 @@ impl Default for AdvisorConfig {
             calls_used: 0,
             max_advisor_tokens: 700,
             api_endpoint: None,
+            api_key: None,
+            api_model: None,
+            timeout_secs: 10,
             verification_prompt: DEFAULT_VERIFICATION_PROMPT.to_string(),
         }
     }
@@ -75,11 +86,56 @@ impl AdvisorConfig {
         self.max_uses.saturating_sub(self.calls_used)
     }
 
-    /// 検証プロンプトを構築
-    /// 将来: api_endpoint が設定されている場合は外部アドバイザーへの問い合わせ結果を返す想定
+    /// 検証プロンプトを構築（ローカル、純粋関数）
+    /// 外部API呼び出しが必要な場合は try_remote_advice() を使用
     pub fn build_verification_prompt(&self, _task_context: &str) -> String {
-        // TODO: api_endpoint が Some の場合は HTTP POST で外部アドバイザーに問い合わせ
         self.verification_prompt.clone()
+    }
+
+    /// 外部アドバイザーAPIから検証指示を取得（OpenAI互換 /chat/completions）
+    ///
+    /// 戻り値:
+    /// - `Ok(None)`: api_endpoint未設定（フォールバック必要）
+    /// - `Ok(Some(advice))`: 外部APIから取得成功
+    /// - `Err(_)`: ネットワーク/JSON エラー（呼び出し側でフォールバック推奨）
+    pub fn try_remote_advice(&self, task_context: &str) -> anyhow::Result<Option<String>> {
+        let Some(endpoint) = self.api_endpoint.as_deref() else {
+            return Ok(None);
+        };
+        let model = self.api_model.as_deref().unwrap_or("gpt-4o-mini");
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "あなたは1bitローカルLLMの戦略アドバイザーです。実行者が回答を出す前に、不足や検証ポイントを100語以内・列挙形式で提示してください。"
+                },
+                {
+                    "role": "user",
+                    "content": format!("タスク: {task_context}\n\n上記タスクの検証指示を簡潔に。")
+                }
+            ],
+            "max_tokens": self.max_advisor_tokens,
+            "temperature": 0.3,
+        });
+
+        let mut req = ureq::post(endpoint)
+            .header("Content-Type", "application/json")
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(self.timeout_secs)))
+            .build();
+        if let Some(key) = self.api_key.as_deref() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        let resp: serde_json::Value = req.send_json(&body)?.body_mut().read_json()?;
+        let content = resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if content.is_empty() {
+            anyhow::bail!("外部アドバイザー応答が空");
+        }
+        Ok(Some(content))
     }
 }
 
@@ -351,5 +407,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.build_verification_prompt(""), "カスタム検証メッセージ");
+    }
+
+    #[test]
+    fn test_try_remote_advice_no_endpoint_returns_none() {
+        let config = AdvisorConfig::default();
+        let result = config.try_remote_advice("テスト").unwrap();
+        assert!(result.is_none(), "endpoint未設定時はOk(None)");
+    }
+
+    #[test]
+    fn test_try_remote_advice_invalid_endpoint_returns_err() {
+        let config = AdvisorConfig {
+            api_endpoint: Some("http://127.0.0.1:1/invalid".to_string()),
+            timeout_secs: 1,
+            ..Default::default()
+        };
+        // 接続不可ポートに対するエラー（フォールバックされる想定）
+        let result = config.try_remote_advice("テスト");
+        assert!(result.is_err(), "無効endpointはErr");
+    }
+
+    #[test]
+    fn test_advisor_config_default_includes_new_fields() {
+        let config = AdvisorConfig::default();
+        assert!(config.api_key.is_none());
+        assert!(config.api_model.is_none());
+        assert_eq!(config.timeout_secs, 10);
     }
 }
