@@ -17,6 +17,86 @@ pub struct AppConfig {
     pub mcp: McpConfig,
     #[serde(default)]
     pub hooks: crate::tools::hooks::HooksConfig,
+    #[serde(default)]
+    pub advisor: AdvisorSettings,
+}
+
+/// アドバイザー設定（config.toml向け、AdvisorConfig::default()ベース）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdvisorSettings {
+    /// 完了前自己検証の最大呼出回数
+    pub max_uses: usize,
+    /// アドバイザー応答の最大トークン数
+    pub max_advisor_tokens: usize,
+    /// 外部APIエンドポイント（None = ローカル検証プロンプトのみ）
+    pub api_endpoint: Option<String>,
+    /// API認証キー（指定なし時は env から自動検出）
+    pub api_key: Option<String>,
+    /// 使用モデル名
+    pub api_model: Option<String>,
+    /// HTTPタイムアウト秒
+    pub timeout_secs: u64,
+    /// 検証プロンプト（カスタマイズ用、空文字なら組込みデフォルト）
+    pub verification_prompt: String,
+}
+
+impl Default for AdvisorSettings {
+    fn default() -> Self {
+        Self {
+            max_uses: 3,
+            max_advisor_tokens: 700,
+            api_endpoint: None,
+            api_key: None,
+            api_model: None,
+            timeout_secs: 10,
+            verification_prompt: String::new(), // 空 = ランタイムでDEFAULTを使用
+        }
+    }
+}
+
+impl AdvisorSettings {
+    /// 実行時用 AdvisorConfig に変換（環境変数からAPIキー自動検出）
+    ///
+    /// API キー解決順序:
+    /// 1. config.toml の api_key
+    /// 2. endpoint URL に基づく環境変数（openai → OPENAI_API_KEY、anthropic → ANTHROPIC_API_KEY）
+    /// 3. OPENAI_API_KEY → ANTHROPIC_API_KEY（汎用フォールバック）
+    pub fn to_runtime(&self) -> crate::runtime::model_router::AdvisorConfig {
+        use crate::runtime::model_router::{AdvisorConfig, DEFAULT_VERIFICATION_PROMPT};
+        let api_key = self.api_key.clone().or_else(|| Self::detect_api_key(self.api_endpoint.as_deref()));
+        let prompt = if self.verification_prompt.is_empty() {
+            DEFAULT_VERIFICATION_PROMPT.to_string()
+        } else {
+            self.verification_prompt.clone()
+        };
+        AdvisorConfig {
+            max_uses: self.max_uses,
+            calls_used: 0,
+            max_advisor_tokens: self.max_advisor_tokens,
+            api_endpoint: self.api_endpoint.clone(),
+            api_key,
+            api_model: self.api_model.clone(),
+            timeout_secs: self.timeout_secs,
+            verification_prompt: prompt,
+        }
+    }
+
+    /// エンドポイントURLから環境変数を推定して取得
+    fn detect_api_key(endpoint: Option<&str>) -> Option<String> {
+        let endpoint_lower = endpoint.map(|e| e.to_lowercase()).unwrap_or_default();
+        // ベンダー固有の優先順位
+        if endpoint_lower.contains("openai") {
+            return std::env::var("OPENAI_API_KEY").ok();
+        }
+        if endpoint_lower.contains("anthropic") {
+            return std::env::var("ANTHROPIC_API_KEY").ok();
+        }
+        // 汎用フォールバック: OPENAI 優先
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,5 +317,69 @@ soul_path = "/tmp/SOUL.md"
             config.agent.soul_path.as_ref().unwrap().to_str().unwrap(),
             "/tmp/SOUL.md"
         );
+    }
+
+    #[test]
+    fn test_advisor_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.advisor.max_uses, 3);
+        assert!(config.advisor.api_endpoint.is_none());
+        assert_eq!(config.advisor.timeout_secs, 10);
+    }
+
+    #[test]
+    fn test_advisor_from_toml() {
+        let toml_str = r#"
+[advisor]
+api_endpoint = "https://api.openai.com/v1/chat/completions"
+api_model = "gpt-4o-mini"
+max_uses = 5
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.advisor.api_endpoint.as_deref().unwrap(),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(config.advisor.api_model.as_deref().unwrap(), "gpt-4o-mini");
+        assert_eq!(config.advisor.max_uses, 5);
+    }
+
+    #[test]
+    fn test_advisor_to_runtime_uses_default_prompt_when_empty() {
+        let settings = AdvisorSettings {
+            verification_prompt: String::new(),
+            ..Default::default()
+        };
+        let runtime = settings.to_runtime();
+        assert!(runtime.verification_prompt.contains("検証"));
+    }
+
+    #[test]
+    fn test_advisor_to_runtime_preserves_custom_prompt() {
+        let settings = AdvisorSettings {
+            verification_prompt: "カスタム".to_string(),
+            ..Default::default()
+        };
+        let runtime = settings.to_runtime();
+        assert_eq!(runtime.verification_prompt, "カスタム");
+    }
+
+    #[test]
+    fn test_advisor_to_runtime_explicit_api_key_takes_precedence() {
+        let settings = AdvisorSettings {
+            api_endpoint: Some("https://api.openai.com/v1/chat/completions".to_string()),
+            api_key: Some("sk-explicit-key".to_string()),
+            ..Default::default()
+        };
+        let runtime = settings.to_runtime();
+        assert_eq!(runtime.api_key.as_deref(), Some("sk-explicit-key"));
+    }
+
+    #[test]
+    fn test_detect_api_key_no_endpoint_no_env() {
+        // 環境変数を一時的にクリアしないため、戻り値は環境依存
+        // 単に呼び出しが panic しないことを確認
+        let _ = AdvisorSettings::detect_api_key(None);
+        let _ = AdvisorSettings::detect_api_key(Some("https://example.com/v1/chat/completions"));
     }
 }
