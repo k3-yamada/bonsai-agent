@@ -153,7 +153,12 @@ pub struct LlamaServerProcess {
 
 impl LlamaServerProcess {
     /// llama-serverを子プロセスとして起動
-    pub fn spawn(server_binary: &str, model_path: &Path, context_length: u32) -> Result<Self> {
+    pub fn spawn(
+        server_binary: &str,
+        model_path: &Path,
+        context_length: u32,
+        kv_cache_type: &str,
+    ) -> Result<Self> {
         let port = find_free_port()?;
 
         let child = Command::new(server_binary)
@@ -168,10 +173,11 @@ impl LlamaServerProcess {
             .arg("-ngl")
             .arg("99")
             .arg("--cache-type-k")
-            .arg("q8_0")
+            .arg(kv_cache_type)
             .arg("--cache-type-v")
-            .arg("q8_0")
+            .arg(kv_cache_type)
             .arg("--flash-attn")
+            .arg("on")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;

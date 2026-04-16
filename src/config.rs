@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub hooks: crate::tools::hooks::HooksConfig,
     #[serde(default)]
     pub advisor: AdvisorSettings,
+    #[serde(default)]
+    pub experiment: ExperimentConfig,
 }
 
 /// アドバイザー設定（config.toml向け、AdvisorConfig::default()ベース）
@@ -388,6 +390,25 @@ max_uses = 5
         };
         let runtime = settings.to_runtime();
         assert_eq!(runtime.api_key.as_deref(), Some("sk-explicit-key"));
+    }
+
+    #[test]
+    fn test_experiment_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.experiment.max_experiments, 10);
+        assert_eq!(config.experiment.dreamer_interval, 10);
+    }
+
+    #[test]
+    fn test_experiment_config_from_toml() {
+        let toml_str = r#"
+[experiment]
+max_experiments = 20
+dreamer_interval = 5
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.experiment.max_experiments, 20);
+        assert_eq!(config.experiment.dreamer_interval, 5);
     }
 
     #[test]
