@@ -334,6 +334,7 @@ impl BenchmarkSuite {
                     max_retries: config.max_retries,
                     max_tools_selected: config.max_tools_selected,
                     system_prompt,
+                    advisor: config.advisor.clone(),
                 };
 
                 let store = MemoryStore::in_memory()?;
@@ -389,6 +390,7 @@ impl BenchmarkSuite {
                 max_retries: config.max_retries,
                 max_tools_selected: config.max_tools_selected,
                 system_prompt: config.system_prompt.clone(),
+                advisor: config.advisor.clone(),
             };
 
             let store = MemoryStore::in_memory()?;

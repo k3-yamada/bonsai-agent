@@ -15,6 +15,7 @@ use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::embedder::create_embedder;
 use crate::runtime::inference::LlmBackend;
+use crate::runtime::model_router::AdvisorConfig;
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::ToolRegistry;
 
@@ -24,6 +25,8 @@ pub struct AgentConfig {
     pub max_retries: usize,
     pub max_tools_selected: usize,
     pub system_prompt: String,
+    /// アドバイザー設定（完了前自己検証の呼び出し回数を制御）
+    pub advisor: AdvisorConfig,
 }
 
 impl Default for AgentConfig {
@@ -33,6 +36,7 @@ impl Default for AgentConfig {
             max_retries: 3,
             max_tools_selected: 5,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+            advisor: AdvisorConfig::default(),
         }
     }
 }
@@ -387,6 +391,8 @@ pub fn run_agent_loop_with_session(
 
     let mut circuit_breaker = CircuitBreaker::default();
     let mut loop_detector = LoopDetector::default();
+    // セッションごとのアドバイザー使用回数（max_usesで上限を制御）
+    let mut advisor = config.advisor.clone();
 
     let ctx = StepContext {
         backend,
@@ -419,7 +425,9 @@ pub fn run_agent_loop_with_session(
             StepOutcome::FinalAnswer(answer) => {
                 log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
                 // Advisor パターン: 複雑タスクの初回回答は検証ステップを挿入
+                // max_uses (デフォルト3) で過剰な検証を抑制
                 if iteration > 0
+                    && advisor.can_advise()
                     && detect_task_complexity(&task_context)
                     && !answer.contains("[検証済]")
                     && iteration < config.max_iterations - 1
@@ -427,7 +435,12 @@ pub fn run_agent_loop_with_session(
                     session.add_message(Message::system(
                         "回答前に検証: 目標を達成できていますか？不足があれば補完してください。問題なければ回答に[検証済]を含めてください。".to_string(),
                     ));
-                    eprintln!("[advisor] 完了前自己検証ステップ挿入 (iter {iteration})");
+                    advisor.record_call();
+                    eprintln!(
+                        "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
+                        advisor.remaining(),
+                        advisor.max_uses
+                    );
                     all_tools.extend(Vec::<String>::new());
                     continue;
                 }
@@ -1194,4 +1207,25 @@ mod tests {
         assert_eq!(msg_count, 0, "単純タスクには計画プレステップ不要");
     }
 
+    // テスト: AdvisorConfig が AgentConfig に統合されている
+    #[test]
+    fn test_agent_config_includes_advisor() {
+        let config = AgentConfig::default();
+        assert_eq!(config.advisor.max_uses, 3);
+        assert_eq!(config.advisor.calls_used, 0);
+        assert!(config.advisor.can_advise());
+    }
+
+    // テスト: AdvisorConfig をカスタマイズ可能
+    #[test]
+    fn test_agent_config_custom_advisor() {
+        let config = AgentConfig {
+            advisor: AdvisorConfig {
+                max_uses: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(config.advisor.max_uses, 1);
+    }
 }
