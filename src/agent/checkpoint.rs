@@ -80,6 +80,44 @@ impl<'a> CheckpointManager<'a> {
         Ok(rows)
     }
 
+    /// DB からチェックポイント統計を集計
+    ///
+    /// `session_id` を指定すると該当セッションのみ、None で全体集計。
+    pub fn stats(conn: &Connection, session_id: Option<&str>) -> Result<CheckpointStats> {
+        let (total_sql, rolled_sql, git_sql) = match session_id {
+            Some(_) => (
+                "SELECT COUNT(*) FROM checkpoints WHERE session_id = ?1",
+                "SELECT COUNT(*) FROM checkpoints WHERE session_id = ?1 AND rolled_back_at IS NOT NULL",
+                "SELECT COUNT(*) FROM checkpoints WHERE session_id = ?1 AND git_ref IS NOT NULL",
+            ),
+            None => (
+                "SELECT COUNT(*) FROM checkpoints",
+                "SELECT COUNT(*) FROM checkpoints WHERE rolled_back_at IS NOT NULL",
+                "SELECT COUNT(*) FROM checkpoints WHERE git_ref IS NOT NULL",
+            ),
+        };
+        let total = Self::count_with_optional_session(conn, total_sql, session_id)?;
+        let rolled_back = Self::count_with_optional_session(conn, rolled_sql, session_id)?;
+        let with_git_ref = Self::count_with_optional_session(conn, git_sql, session_id)?;
+        Ok(CheckpointStats {
+            total,
+            rolled_back,
+            with_git_ref,
+        })
+    }
+
+    fn count_with_optional_session(
+        conn: &Connection,
+        sql: &str,
+        session_id: Option<&str>,
+    ) -> Result<usize> {
+        let count: i64 = match session_id {
+            Some(sid) => conn.query_row(sql, params![sid], |row| row.get(0))?,
+            None => conn.query_row(sql, [], |row| row.get(0))?,
+        };
+        Ok(count as usize)
+    }
+
     /// チェックポイントを作成し、git stash と DB（設定時）に記録
     pub fn create(&mut self, desc: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -176,6 +214,37 @@ impl<'a> CheckpointManager<'a> {
 impl Default for CheckpointManager<'_> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// チェックポイント統計（観測性・ダッシュボード用）
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckpointStats {
+    /// 総CP数
+    pub total: usize,
+    /// ロールバック済みのCP数（rolled_back_at IS NOT NULL）
+    pub rolled_back: usize,
+    /// git stash 保存に成功したCP数（git_ref IS NOT NULL、実ファイル状態をキャプチャ）
+    pub with_git_ref: usize,
+}
+
+impl CheckpointStats {
+    /// ロールバック率（0.0〜1.0）
+    pub fn rollback_rate(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.rolled_back as f64 / self.total as f64
+        }
+    }
+
+    /// git ref 取得率（0.0〜1.0、変更があるセッション率の目安）
+    pub fn git_capture_rate(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.with_git_ref as f64 / self.total as f64
+        }
     }
 }
 
@@ -276,5 +345,68 @@ mod tests {
         let loaded = CheckpointManager::load_persisted(store.conn(), None).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].description, "no-session");
+    }
+
+    #[test]
+    fn t_stats_empty() {
+        let store = MemoryStore::in_memory().unwrap();
+        let stats = CheckpointManager::stats(store.conn(), None).unwrap();
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.rolled_back, 0);
+        assert_eq!(stats.with_git_ref, 0);
+        assert_eq!(stats.rollback_rate(), 0.0);
+        assert_eq!(stats.git_capture_rate(), 0.0);
+    }
+
+    #[test]
+    fn t_stats_counts_total() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut m = CheckpointManager::with_persistence(store.conn(), Some("s".to_string()));
+        m.create("a").unwrap();
+        m.create("b").unwrap();
+        m.create("c").unwrap();
+        let stats = CheckpointManager::stats(store.conn(), None).unwrap();
+        assert_eq!(stats.total, 3);
+    }
+
+    #[test]
+    fn t_stats_counts_rolled_back() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut m = CheckpointManager::with_persistence(store.conn(), Some("s".to_string()));
+        let id1 = m.create("a").unwrap();
+        m.create("b").unwrap();
+        let _ = m.rollback(id1);
+        let stats = CheckpointManager::stats(store.conn(), None).unwrap();
+        assert_eq!(stats.total, 2);
+        assert_eq!(stats.rolled_back, 1);
+        assert!((stats.rollback_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_stats_filters_by_session() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut m_a = CheckpointManager::with_persistence(store.conn(), Some("s-A".to_string()));
+        m_a.create("a1").unwrap();
+        m_a.create("a2").unwrap();
+        let mut m_b = CheckpointManager::with_persistence(store.conn(), Some("s-B".to_string()));
+        m_b.create("b1").unwrap();
+
+        let stats_a = CheckpointManager::stats(store.conn(), Some("s-A")).unwrap();
+        let stats_b = CheckpointManager::stats(store.conn(), Some("s-B")).unwrap();
+        let stats_all = CheckpointManager::stats(store.conn(), None).unwrap();
+        assert_eq!(stats_a.total, 2);
+        assert_eq!(stats_b.total, 1);
+        assert_eq!(stats_all.total, 3);
+    }
+
+    #[test]
+    fn t_checkpoint_stats_rates() {
+        let stats = CheckpointStats {
+            total: 10,
+            rolled_back: 3,
+            with_git_ref: 7,
+        };
+        assert!((stats.rollback_rate() - 0.3).abs() < 1e-9);
+        assert!((stats.git_capture_rate() - 0.7).abs() < 1e-9);
     }
 }
