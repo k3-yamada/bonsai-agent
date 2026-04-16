@@ -131,6 +131,14 @@ impl LoopState {
     }
 }
 
+/// Outcome ハンドラの結果
+pub enum OutcomeAction {
+    /// ループ終了（最終結果）
+    Return(AgentLoopResult),
+    /// 次のイテレーションへ継続
+    Continue,
+}
+
 /// 停滞検出器: 進捗のないステップが続いた場合に再計画を促す
 pub struct StallDetector {
     no_progress_count: usize,
@@ -459,52 +467,9 @@ pub fn run_agent_loop_with_session(
 
         let duration_ms = step_start.elapsed().as_millis() as u64;
 
-        match outcome {
-            StepOutcome::FinalAnswer(answer) => {
-                log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
-                // Advisor パターン: 複雑タスクの初回回答は検証ステップを挿入
-                // max_uses (デフォルト3) で過剰な検証を抑制
-                if inject_verification_step(session, &mut state.advisor, &task_context, &answer, iteration, config.max_iterations, store) {
-                    continue;
-                }
-                record_success(store, session, &task_context, &answer);
-                return Ok(AgentLoopResult {
-                    answer,
-                    iterations_used: final_iteration,
-                    tools_called: state.all_tools,
-                });
-            }
-            StepOutcome::Aborted(reason) => {
-                state.consecutive_failures += 1;
-                log_step_outcome(store, session, iteration, "aborted", duration_ms, &[], state.consecutive_failures);
-                record_abort(store, session, &task_context, &reason);
-                return Ok(AgentLoopResult {
-                    answer: format!("[中断] {reason}"),
-                    iterations_used: final_iteration,
-                    tools_called: state.all_tools,
-                });
-            }
-            StepOutcome::Continue(step_tools) => {
-                let tools_succeeded = !step_tools.is_empty();
-                if !tools_succeeded {
-                    state.consecutive_failures += 1;
-                } else {
-                    state.consecutive_failures = 0;
-                }
-                log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, state.consecutive_failures);
-                state.all_tools.extend(step_tools);
-                // 停滞検出→Advisor再計画
-                let output_hash = compute_output_hash(session);
-                inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, &task_context, tools_succeeded, output_hash, store);
-                let (lv, _offloaded) = compact_if_needed(
-                    &mut session.messages,
-                    &CompactionConfig::default(),
-                );
-                if lv > 0 {
-                    eprintln!("[compact] level {lv} applied (iter {iteration})");
-                }
-                continue;
-            }
+        match handle_outcome(outcome, session, &mut state, &task_context, store, config.max_iterations, final_iteration, iteration, duration_ms) {
+            OutcomeAction::Return(result) => return Ok(result),
+            OutcomeAction::Continue => continue,
         }
     }
 
@@ -543,6 +508,69 @@ fn create_task_start_checkpoint(
         Err(e) => {
             eprintln!("[checkpoint] CP作成失敗（無視）: {e}");
             None
+        }
+    }
+}
+
+/// ステップ結果のディスパッチ（LoopState + セッションを操作）
+///
+/// FinalAnswer → 検証ステップ挿入可能（Continue に変換）
+/// Aborted → 即座にReturn
+/// Continue → 停滞検出+再計画+コンパクション
+#[allow(clippy::too_many_arguments)]
+fn handle_outcome(
+    outcome: StepOutcome,
+    session: &mut Session,
+    state: &mut LoopState,
+    task_context: &str,
+    store: Option<&MemoryStore>,
+    max_iterations: usize,
+    final_iteration: usize,
+    iteration: usize,
+    duration_ms: u64,
+) -> OutcomeAction {
+    match outcome {
+        StepOutcome::FinalAnswer(answer) => {
+            log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
+            if inject_verification_step(session, &mut state.advisor, task_context, &answer, iteration, max_iterations, store) {
+                return OutcomeAction::Continue;
+            }
+            record_success(store, session, task_context, &answer);
+            OutcomeAction::Return(AgentLoopResult {
+                answer,
+                iterations_used: final_iteration,
+                tools_called: state.all_tools.clone(),
+            })
+        }
+        StepOutcome::Aborted(reason) => {
+            state.consecutive_failures += 1;
+            log_step_outcome(store, session, iteration, "aborted", duration_ms, &[], state.consecutive_failures);
+            record_abort(store, session, task_context, &reason);
+            OutcomeAction::Return(AgentLoopResult {
+                answer: format!("[中断] {reason}"),
+                iterations_used: final_iteration,
+                tools_called: state.all_tools.clone(),
+            })
+        }
+        StepOutcome::Continue(step_tools) => {
+            let tools_succeeded = !step_tools.is_empty();
+            if !tools_succeeded {
+                state.consecutive_failures += 1;
+            } else {
+                state.consecutive_failures = 0;
+            }
+            log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, state.consecutive_failures);
+            state.all_tools.extend(step_tools);
+            let output_hash = compute_output_hash(session);
+            inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, task_context, tools_succeeded, output_hash, store);
+            let (lv, _offloaded) = compact_if_needed(
+                &mut session.messages,
+                &CompactionConfig::default(),
+            );
+            if lv > 0 {
+                eprintln!("[compact] level {lv} applied (iter {iteration})");
+            }
+            OutcomeAction::Continue
         }
     }
 }
@@ -1624,6 +1652,38 @@ mod tests {
         assert_eq!(advisor_entries.len(), 1);
         assert!(advisor_entries[0].action_data.contains("\"role\":\"verification\""));
         assert!(advisor_entries[0].action_data.contains("\"source\":\"remote\""));
+    }
+
+    // テスト: handle_outcome — FinalAnswer で Return
+    #[test]
+    fn test_handle_outcome_final_answer_returns() {
+        let mut session = Session::new();
+        let mut state = LoopState::new(AdvisorConfig::default());
+        let outcome = StepOutcome::FinalAnswer("回答".to_string());
+        let action = handle_outcome(outcome, &mut session, &mut state, "simple", None, 10, 1, 0, 100);
+        assert!(matches!(action, OutcomeAction::Return(_)));
+    }
+
+    // テスト: handle_outcome — Continue で Continue
+    #[test]
+    fn test_handle_outcome_continue_returns_continue() {
+        let mut session = Session::new();
+        let mut state = LoopState::new(AdvisorConfig::default());
+        let outcome = StepOutcome::Continue(vec!["shell".to_string()]);
+        let action = handle_outcome(outcome, &mut session, &mut state, "task", None, 10, 1, 0, 100);
+        assert!(matches!(action, OutcomeAction::Continue));
+        assert_eq!(state.all_tools.len(), 1);
+    }
+
+    // テスト: handle_outcome — Aborted で Return
+    #[test]
+    fn test_handle_outcome_aborted_returns() {
+        let mut session = Session::new();
+        let mut state = LoopState::new(AdvisorConfig::default());
+        let outcome = StepOutcome::Aborted("cancelled".to_string());
+        let action = handle_outcome(outcome, &mut session, &mut state, "task", None, 10, 1, 0, 100);
+        assert!(matches!(action, OutcomeAction::Return(_)));
+        assert_eq!(state.consecutive_failures, 1);
     }
 
     // テスト: LoopState 初期状態
