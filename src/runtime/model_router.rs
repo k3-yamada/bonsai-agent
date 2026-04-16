@@ -39,7 +39,13 @@ pub struct AdvisorConfig {
     pub max_advisor_tokens: usize,
     /// 外部APIエンドポイント（None = ローカルモデルで代替）
     pub api_endpoint: Option<String>,
+    /// 検証プロンプト（将来: api_endpoint設定時に外部アドバイザーへ差し替え可能）
+    pub verification_prompt: String,
 }
+
+/// デフォルトの完了前自己検証プロンプト
+pub const DEFAULT_VERIFICATION_PROMPT: &str =
+    "回答前に検証: 目標を達成できていますか？不足があれば補完してください。問題なければ回答に[検証済]を含めてください。";
 
 impl Default for AdvisorConfig {
     fn default() -> Self {
@@ -48,6 +54,7 @@ impl Default for AdvisorConfig {
             calls_used: 0,
             max_advisor_tokens: 700,
             api_endpoint: None,
+            verification_prompt: DEFAULT_VERIFICATION_PROMPT.to_string(),
         }
     }
 }
@@ -66,6 +73,13 @@ impl AdvisorConfig {
     /// 残り呼び出し回数
     pub fn remaining(&self) -> usize {
         self.max_uses.saturating_sub(self.calls_used)
+    }
+
+    /// 検証プロンプトを構築
+    /// 将来: api_endpoint が設定されている場合は外部アドバイザーへの問い合わせ結果を返す想定
+    pub fn build_verification_prompt(&self, _task_context: &str) -> String {
+        // TODO: api_endpoint が Some の場合は HTTP POST で外部アドバイザーに問い合わせ
+        self.verification_prompt.clone()
     }
 }
 
@@ -314,5 +328,28 @@ mod tests {
             ..Default::default()
         };
         assert!(config.api_endpoint.is_some());
+    }
+
+    #[test]
+    fn test_advisor_config_default_verification_prompt() {
+        let config = AdvisorConfig::default();
+        assert!(config.verification_prompt.contains("検証"));
+        assert_eq!(config.verification_prompt, DEFAULT_VERIFICATION_PROMPT);
+    }
+
+    #[test]
+    fn test_advisor_config_build_verification_prompt() {
+        let config = AdvisorConfig::default();
+        let prompt = config.build_verification_prompt("テストタスク");
+        assert!(prompt.contains("回答前に検証"));
+    }
+
+    #[test]
+    fn test_advisor_config_custom_verification_prompt() {
+        let config = AdvisorConfig {
+            verification_prompt: "カスタム検証メッセージ".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.build_verification_prompt(""), "カスタム検証メッセージ");
     }
 }

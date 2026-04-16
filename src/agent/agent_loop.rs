@@ -426,22 +426,7 @@ pub fn run_agent_loop_with_session(
                 log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
                 // Advisor パターン: 複雑タスクの初回回答は検証ステップを挿入
                 // max_uses (デフォルト3) で過剰な検証を抑制
-                if iteration > 0
-                    && advisor.can_advise()
-                    && detect_task_complexity(&task_context)
-                    && !answer.contains("[検証済]")
-                    && iteration < config.max_iterations - 1
-                {
-                    session.add_message(Message::system(
-                        "回答前に検証: 目標を達成できていますか？不足があれば補完してください。問題なければ回答に[検証済]を含めてください。".to_string(),
-                    ));
-                    advisor.record_call();
-                    eprintln!(
-                        "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
-                        advisor.remaining(),
-                        advisor.max_uses
-                    );
-                    all_tools.extend(Vec::<String>::new());
+                if inject_verification_step(session, &mut advisor, &task_context, &answer, iteration, config.max_iterations) {
                     continue;
                 }
                 record_success(store, session, &task_context, &answer);
@@ -531,6 +516,43 @@ fn detect_task_complexity(input: &str) -> bool {
         .count();
     // 2つ以上のシグナル or 長い入力（複雑なタスクの兆候）
     signal_count >= 2 || input.len() > 200
+}
+
+/// 完了前自己検証ステップを注入
+///
+/// 戻り値: true なら検証ステップ挿入済（ループcontinue）、false なら検証不要（通常のFinalAnswer処理へ）
+///
+/// 条件:
+/// - iteration > 0（初回回答ではない）
+/// - advisor.can_advise()（max_uses未達）
+/// - 複雑タスクである
+/// - 回答に [検証済] マーカー未含有
+/// - 残りイテレーションあり
+fn inject_verification_step(
+    session: &mut Session,
+    advisor: &mut AdvisorConfig,
+    task_context: &str,
+    answer: &str,
+    iteration: usize,
+    max_iterations: usize,
+) -> bool {
+    if iteration == 0
+        || !advisor.can_advise()
+        || !detect_task_complexity(task_context)
+        || answer.contains("[検証済]")
+        || iteration >= max_iterations - 1
+    {
+        return false;
+    }
+    let prompt = advisor.build_verification_prompt(task_context);
+    session.add_message(Message::system(prompt));
+    advisor.record_call();
+    eprintln!(
+        "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
+        advisor.remaining(),
+        advisor.max_uses
+    );
+    true
 }
 
 /// 複雑タスクに計画プレステップを注入
@@ -1227,5 +1249,92 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.advisor.max_uses, 1);
+    }
+
+    // テスト: inject_verification_step — 複雑タスク＋初回以降で検証挿入
+    #[test]
+    fn test_inject_verification_step_injects() {
+        let mut session = Session::new();
+        let mut advisor = AdvisorConfig::default();
+        let injected = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "テストを書いて、実装して、リファクタしてください",
+            "部分的な回答",
+            1, // iteration > 0
+            10,
+        );
+        assert!(injected, "複雑タスクは検証ステップを挿入");
+        assert_eq!(advisor.calls_used, 1);
+        assert!(session.messages.iter().any(|m| m.content.contains("検証")));
+    }
+
+    // テスト: 初回イテレーションでは検証スキップ
+    #[test]
+    fn test_inject_verification_step_skips_first_iteration() {
+        let mut session = Session::new();
+        let mut advisor = AdvisorConfig::default();
+        let injected = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "テストを書いて、実装して、リファクタしてください",
+            "回答",
+            0, // 初回
+            10,
+        );
+        assert!(!injected);
+        assert_eq!(advisor.calls_used, 0);
+    }
+
+    // テスト: [検証済] マーカーがある場合はスキップ
+    #[test]
+    fn test_inject_verification_step_skips_verified() {
+        let mut session = Session::new();
+        let mut advisor = AdvisorConfig::default();
+        let injected = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "テストを書いて、実装して、リファクタしてください",
+            "[検証済] 完了しました",
+            1,
+            10,
+        );
+        assert!(!injected);
+    }
+
+    // テスト: max_uses 超過時はスキップ
+    #[test]
+    fn test_inject_verification_step_respects_max_uses() {
+        let mut session = Session::new();
+        let mut advisor = AdvisorConfig {
+            max_uses: 1,
+            calls_used: 1, // 既に上限
+            ..Default::default()
+        };
+        let injected = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "テストを書いて、実装して、リファクタしてください",
+            "回答",
+            1,
+            10,
+        );
+        assert!(!injected);
+    }
+
+    // テスト: 単純タスクはスキップ
+    #[test]
+    fn test_inject_verification_step_skips_simple_task() {
+        let mut session = Session::new();
+        let mut advisor = AdvisorConfig::default();
+        let injected = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "天気は？",
+            "晴れです",
+            1,
+            10,
+        );
+        assert!(!injected);
     }
 }
