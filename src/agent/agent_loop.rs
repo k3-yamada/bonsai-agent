@@ -393,6 +393,11 @@ pub fn run_agent_loop_with_session(
     inject_contextual_memories(session, &task_context, store);
     inject_planning_step(session, &task_context);
 
+    // Advisor設定ログ（初回のみ、セッション最初のメッセージが2件=system+userの場合）
+    if session.messages.len() <= 2 {
+        config.advisor.log_startup();
+    }
+
     // タスク開始時の自動チェックポイント（auto_checkpoint=true 時、git+DB）
     if config.auto_checkpoint {
         let _ = create_task_start_checkpoint(session, &task_context, store);

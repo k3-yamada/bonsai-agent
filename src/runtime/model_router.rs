@@ -149,6 +149,20 @@ impl AdvisorConfig {
         }
     }
 
+    /// 起動時に設定サマリーをログ表示
+    pub fn log_startup(&self) {
+        if let Some(endpoint) = &self.api_endpoint {
+            let model = self.api_model.as_deref().unwrap_or("gpt-4o-mini");
+            let key_status = if self.api_key.is_some() { "設定済" } else { "未設定(env検出)" };
+            eprintln!(
+                "[advisor] リモートモード: endpoint={}, model={}, key={}, max_uses={}, timeout={}s",
+                endpoint, model, key_status, self.max_uses, self.timeout_secs
+            );
+        } else {
+            eprintln!("[advisor] ローカルモード (max_uses={}, 検証+再計画)", self.max_uses);
+        }
+    }
+
     /// キャッシュキーを計算（role + task_context のハッシュ）
     fn cache_key(role: AdvisorRole, task_context: &str) -> u64 {
         use std::hash::{DefaultHasher, Hash, Hasher};
@@ -567,6 +581,24 @@ mod tests {
     fn test_cache_starts_empty() {
         let config = AdvisorConfig::default();
         assert!(config.cache.is_empty());
+    }
+
+    #[test]
+    fn test_log_startup_local_mode() {
+        // パニックしないことを確認（eprintlnの出力内容はテスト対象外）
+        let config = AdvisorConfig::default();
+        config.log_startup();
+    }
+
+    #[test]
+    fn test_log_startup_remote_mode() {
+        let config = AdvisorConfig {
+            api_endpoint: Some("https://api.openai.com/v1/chat/completions".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_model: Some("gpt-4o".to_string()),
+            ..Default::default()
+        };
+        config.log_startup();
     }
 
     #[test]
