@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -17,6 +17,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 3,
         description: "Event Sourcing: 統一イベントストリーム + audit_logインデックス強化",
         sql: SCHEMA_V3,
+    },
+    Migration {
+        version: 4,
+        description: "チェックポイント永続化: checkpoints テーブル",
+        sql: SCHEMA_V4,
     },
 ];
 
@@ -144,6 +149,19 @@ CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_audit_action_type ON audit_log(action_type);
 "#;
 
+const SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    description TEXT NOT NULL,
+    git_ref TEXT,
+    timestamp TEXT NOT NULL,
+    rolled_back_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_timestamp ON checkpoints(timestamp);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +243,11 @@ mod tests {
         assert!(SCHEMA_V1.contains("memories_ai"));
         assert!(SCHEMA_V1.contains("memories_ad"));
         assert!(SCHEMA_V1.contains("memories_au"));
+    }
+
+    #[test]
+    fn test_schema_v4_contains_checkpoints_table() {
+        assert!(SCHEMA_V4.contains("checkpoints"), "V4にcheckpointsテーブルが必要");
+        assert!(SCHEMA_V4.contains("idx_checkpoints_session"), "V4にセッションインデックスが必要");
     }
 }
