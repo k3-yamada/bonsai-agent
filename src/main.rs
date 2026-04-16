@@ -187,9 +187,6 @@ fn main() -> Result<()> {
     if cli.dashboard {
         return handle_dashboard_mode(&store);
     }
-    if cli.dashboard {
-        return handle_dashboard_mode(&store);
-    }
     if cli.checkpoints {
         return handle_checkpoints_mode(&store);
     }
@@ -317,7 +314,7 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
     let loop_config = ExperimentLoopConfig {
         tsv_path: Some(tsv_path),
         max_experiments: Some(max_experiments),
-        dreamer_interval: 10,
+        dreamer_interval: ctx.app_config.experiment.dreamer_interval,
     };
     let backend = CachedBackend::new(backend, 200);
     let experiments = run_experiment_loop(
