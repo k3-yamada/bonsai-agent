@@ -25,10 +25,17 @@ impl LlamaServerBackend {
         }
     }
 
-    /// ヘルスチェック
+    /// ヘルスチェック（/health → /v1/models フォールバック）
+    ///
+    /// llama-serverは/health、mlx-lm serverは/v1/modelsで応答する。
     pub fn is_healthy(&self) -> bool {
-        let url = format!("{}/health", self.base_url);
-        ureq::get(&url).call().is_ok()
+        let health_url = format!("{}/health", self.base_url);
+        if ureq::get(&health_url).call().is_ok() {
+            return true;
+        }
+        // mlx-lm server は /health 未対応 → /v1/models で代替
+        let models_url = format!("{}/v1/models", self.base_url);
+        ureq::get(&models_url).call().is_ok()
     }
 
     /// ヘルスチェック+待機リトライ（macOS26/Agent知見: 死活監視パターン）
