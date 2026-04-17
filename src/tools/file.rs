@@ -208,76 +208,226 @@ fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// fuzzyマッチで置換を試みる。完全一致失敗時のフォールバック。
-/// 成功時は (置換後テキスト, 警告メッセージ) を返す。
+/// 7段階fuzzyマッチで置換を試みる（hermes-agentパターン準拠）。
+/// 完全一致失敗時のフォールバック。成功時は (置換後テキスト, 警告メッセージ) を返す。
+///
+/// 戦略:
+/// 1. 空白正規化（連続空白→単一スペース）
+/// 2. Trim一致（先頭/末尾空白除去）
+/// 3. インデント柔軟（各行の先頭空白を無視して比較）
+/// 4. Unicode正規化（スマートクォート→ASCII、全角→半角）
+/// 5. エスケープ正規化（\\n→改行、\\t→タブ）
+/// 6. Blockアンカー（先頭行+末尾行アンカー、中間行は類似度50%で一致）
+/// 7. 境界Trim（old_textの最初/最後の空行を除去して再検索）
 fn fuzzy_find_replace(content: &str, old_text: &str, new_text: &str) -> Option<(String, String)> {
-    let norm_content = normalize_whitespace(content);
-    let norm_old = normalize_whitespace(old_text);
-
-    if norm_old.is_empty() {
+    if old_text.trim().is_empty() {
         return None;
     }
 
-    // 空白正規化一致で検索
-    if norm_content.contains(&norm_old) {
-        // 元テキスト内で対応する範囲を探す
-        // 行単位で比較して一致範囲を特定
+    // 戦略1: 空白正規化
+    if let Some(r) = try_whitespace_normalized(content, old_text, new_text) {
+        return Some((r, "模糊一致（空白正規化）".into()));
+    }
+    // 戦略2: Trim一致
+    if let Some(r) = try_trimmed(content, old_text, new_text) {
+        return Some((r, "模糊一致（先頭/末尾Trim）".into()));
+    }
+    // 戦略3: インデント柔軟
+    if let Some(r) = try_indent_flexible(content, old_text, new_text) {
+        return Some((r, "模糊一致（インデント差異）".into()));
+    }
+    // 戦略4: Unicode正規化
+    if let Some(r) = try_unicode_normalized(content, old_text, new_text) {
+        return Some((r, "模糊一致（Unicode正規化）".into()));
+    }
+    // 戦略5: エスケープ正規化
+    if let Some(r) = try_escape_normalized(content, old_text, new_text) {
+        return Some((r, "模糊一致（エスケープ正規化）".into()));
+    }
+    // 戦略6: Blockアンカー
+    if let Some(r) = try_block_anchor(content, old_text, new_text) {
+        return Some((r, "模糊一致（Blockアンカー）".into()));
+    }
+    // 戦略7: 境界Trim
+    if let Some(r) = try_boundary_trim(content, old_text, new_text) {
+        return Some((r, "模糊一致（境界Trim）".into()));
+    }
+    None
+}
+
+/// 戦略1: 空白正規化（既存ロジック）
+fn try_whitespace_normalized(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    if old_lines.is_empty() {
+        return None;
+    }
+    let norm_first = normalize_whitespace(old_lines[0]);
+    for (i, cl) in content_lines.iter().enumerate() {
+        if normalize_whitespace(cl) == norm_first
+            && i + old_lines.len() <= content_lines.len()
+            && old_lines.iter().enumerate().all(|(j, ol)| {
+                normalize_whitespace(content_lines[i + j]) == normalize_whitespace(ol)
+            })
+        {
+            return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
+        }
+    }
+    None
+}
+
+/// 戦略2: Trim一致
+fn try_trimmed(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let trimmed = old_text.trim();
+    if trimmed != old_text && content.contains(trimmed) && content.matches(trimmed).count() == 1 {
+        Some(content.replacen(trimmed, new_text.trim(), 1))
+    } else {
+        None
+    }
+}
+
+/// 戦略3: インデント柔軟（各行の先頭空白を無視）
+fn try_indent_flexible(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    if old_lines.is_empty() {
+        return None;
+    }
+    let stripped_first = old_lines[0].trim_start();
+    for (i, cl) in content_lines.iter().enumerate() {
+        if cl.trim_start() == stripped_first
+            && i + old_lines.len() <= content_lines.len()
+            && old_lines.iter().enumerate().all(|(j, ol)| {
+                content_lines[i + j].trim_start() == ol.trim_start()
+            })
+        {
+            return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
+        }
+    }
+    None
+}
+
+/// 戦略4: Unicode正規化（スマートクォート→ASCII、全角英数→半角）
+fn try_unicode_normalized(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let norm_old = normalize_unicode(old_text);
+    let norm_content = normalize_unicode(content);
+    if norm_old == normalize_unicode(new_text) {
+        return None; // old == new なら意味なし
+    }
+    if norm_content.contains(&norm_old) && norm_content.matches(&norm_old).count() == 1 {
+        // 元テキストで対応位置を行単位で検索
         let content_lines: Vec<&str> = content.lines().collect();
         let old_lines: Vec<&str> = old_text.lines().collect();
-
         if old_lines.is_empty() {
             return None;
         }
-
-        // 先頭行の空白正規化版で位置を特定
-        let norm_first = normalize_whitespace(old_lines[0]);
+        let norm_first = normalize_unicode(old_lines[0]);
         for (i, cl) in content_lines.iter().enumerate() {
-            if normalize_whitespace(cl) == norm_first
+            if normalize_unicode(cl) == norm_first
                 && i + old_lines.len() <= content_lines.len()
+                && old_lines.iter().enumerate().all(|(j, ol)| {
+                    normalize_unicode(content_lines[i + j]) == normalize_unicode(ol)
+                })
             {
-                // 全行が空白正規化で一致するか確認
-                let all_match = old_lines.iter().enumerate().all(|(j, ol)| {
-                    normalize_whitespace(content_lines[i + j]) == normalize_whitespace(ol)
-                });
-                if all_match {
-                    // 元の行を置換
-                    let mut result_lines = Vec::new();
-                    result_lines.extend_from_slice(&content_lines[..i]);
-                    for new_line in new_text.lines() {
-                        result_lines.push(new_line);
-                    }
-                    result_lines.extend_from_slice(&content_lines[i + old_lines.len()..]);
-                    let result = result_lines.join("
-");
-                    // 元のファイルが末尾改行ありならそれも保持
-                    let result = if content.ends_with('\n') && !result.ends_with('\n') {
-                        result + "\n"
-                    } else {
-                        result
-                    };
-                    return Some((
-                        result,
-                        "模糊一致で置換しました（空白の差異）".to_string(),
-                    ));
-                }
+                return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
             }
         }
     }
+    None
+}
 
-    // trim一致: old_textの前後空白をtrimして再試行
-    let trimmed_old = old_text.trim();
-    if trimmed_old != old_text && content.contains(trimmed_old) {
-        // 曖昧さチェック: 1箇所のみ
-        if content.matches(trimmed_old).count() == 1 {
-            let updated = content.replacen(trimmed_old, new_text.trim(), 1);
-            return Some((
-                updated,
-                "模糊一致で置換しました（先頭/末尾の空白差異）".to_string(),
-            ));
+/// 戦略5: エスケープ正規化（\n→改行、\t→タブ）
+fn try_escape_normalized(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let unescaped = old_text.replace("\\n", "\n").replace("\\t", "\t");
+    if unescaped != old_text && content.contains(&unescaped) && content.matches(&unescaped).count() == 1 {
+        Some(content.replacen(&unescaped, new_text, 1))
+    } else {
+        None
+    }
+}
+
+/// 戦略6: Blockアンカー（先頭行+末尾行が一致、中間行は50%以上の行が一致）
+fn try_block_anchor(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    if old_lines.len() < 3 {
+        return None; // 3行未満はアンカー意味なし
+    }
+    let first = normalize_whitespace(old_lines[0]);
+    let last = normalize_whitespace(old_lines[old_lines.len() - 1]);
+    let middle_count = old_lines.len() - 2;
+    let threshold = (middle_count as f64 * 0.5).ceil() as usize;
+
+    for (i, cl) in content_lines.iter().enumerate() {
+        if normalize_whitespace(cl) != first {
+            continue;
+        }
+        let end = i + old_lines.len();
+        if end > content_lines.len() {
+            continue;
+        }
+        if normalize_whitespace(content_lines[end - 1]) != last {
+            continue;
+        }
+        // 中間行の類似度チェック
+        let matched = (1..old_lines.len() - 1)
+            .filter(|&j| {
+                normalize_whitespace(content_lines[i + j]) == normalize_whitespace(old_lines[j])
+            })
+            .count();
+        if matched >= threshold {
+            return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
         }
     }
-
     None
+}
+
+/// 戦略7: 境界Trim（old_textの先頭/末尾の空行を除去して再検索）
+fn try_boundary_trim(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let start = old_lines.iter().position(|l| !l.trim().is_empty())?;
+    let end = old_lines.iter().rposition(|l| !l.trim().is_empty())?;
+    if start == 0 && end == old_lines.len() - 1 {
+        return None; // 境界空行なし
+    }
+    let trimmed: String = old_lines[start..=end].join("\n");
+    if content.contains(&trimmed) && content.matches(&trimmed).count() == 1 {
+        Some(content.replacen(&trimmed, new_text.trim(), 1))
+    } else {
+        None
+    }
+}
+
+/// Unicode正規化: スマートクォート→ASCII、全角英数→半角
+fn normalize_unicode(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{201C}' | '\u{201D}' => '"',
+            '\u{2014}' => '-',
+            '\u{2013}' => '-',
+            '\u{2026}' => '.',
+            // 全角英数→半角
+            '\u{FF01}'..='\u{FF5E}' => ((c as u32 - 0xFF01 + 0x21) as u8) as char,
+            _ => c,
+        })
+        .collect()
+}
+
+/// 行置換ヘルパー（末尾改行を保持）
+fn replace_lines(content: &str, content_lines: &[&str], start: usize, count: usize, new_text: &str) -> String {
+    let mut result_lines = Vec::new();
+    result_lines.extend_from_slice(&content_lines[..start]);
+    for new_line in new_text.lines() {
+        result_lines.push(new_line);
+    }
+    result_lines.extend_from_slice(&content_lines[start + count..]);
+    let result = result_lines.join("\n");
+    if content.ends_with('\n') && !result.ends_with('\n') {
+        result + "\n"
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]
