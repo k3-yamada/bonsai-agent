@@ -1,3 +1,4 @@
+use crate::observability::logger::{log_event, LogLevel};
 use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;

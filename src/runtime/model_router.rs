@@ -1,3 +1,4 @@
+use crate::observability::logger::{log_event, LogLevel};
 use std::collections::HashMap;
 
 use crate::agent::conversation::Message;
