@@ -267,7 +267,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(m.len() <= 5);
+        assert!(m.len() <= 6, "system+handoff+keep4=最大6");
     }
     #[test]
     fn t_noop() {

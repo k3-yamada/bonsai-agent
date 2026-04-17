@@ -3,13 +3,79 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
-/// 失敗モードの大分類
+/// 失敗モードの大分類（hermes-agent知見で12種に拡張）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailureMode {
     ParseError(ParseErrorDetail),
     ToolExecError(ToolErrorDetail),
     ReasoningError,
     LoopDetected,
+    /// コンテキストオーバーフロー（トークン上限超過）
+    ContextOverflow,
+    /// レート制限（API制限到達）
+    RateLimited,
+    /// ネットワークエラー（接続断、DNS失敗等）
+    NetworkError,
+    /// サーバー切断（llama-server停止/クラッシュ）
+    ServerDisconnect,
+}
+
+/// エラー分類の回復ヒント（hermes-agent ClassifiedError パターン）
+#[derive(Debug, Clone)]
+pub struct RecoveryHint {
+    /// リトライ可能か
+    pub retryable: bool,
+    /// コンテキスト圧縮すべきか
+    pub should_compress: bool,
+    /// 待機時間（秒、0ならすぐリトライ）
+    pub backoff_secs: u64,
+}
+
+impl RecoveryHint {
+    pub fn for_failure(mode: &FailureMode) -> Self {
+        match mode {
+            FailureMode::ParseError(_) => Self {
+                retryable: true,
+                should_compress: false,
+                backoff_secs: 0,
+            },
+            FailureMode::ToolExecError(_) => Self {
+                retryable: true,
+                should_compress: false,
+                backoff_secs: 0,
+            },
+            FailureMode::ReasoningError => Self {
+                retryable: true,
+                should_compress: false,
+                backoff_secs: 0,
+            },
+            FailureMode::LoopDetected => Self {
+                retryable: false,
+                should_compress: false,
+                backoff_secs: 0,
+            },
+            FailureMode::ContextOverflow => Self {
+                retryable: true,
+                should_compress: true,
+                backoff_secs: 0,
+            },
+            FailureMode::RateLimited => Self {
+                retryable: true,
+                should_compress: false,
+                backoff_secs: 15,
+            },
+            FailureMode::NetworkError => Self {
+                retryable: true,
+                should_compress: false,
+                backoff_secs: 5,
+            },
+            FailureMode::ServerDisconnect => Self {
+                retryable: true,
+                should_compress: true,
+                backoff_secs: 10,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +224,18 @@ pub fn decide_recovery(mode: &FailureMode, attempt: usize, max_retries: usize) -
         FailureMode::ReasoningError => RecoveryAction::RetryWithTemperatureDelta,
         FailureMode::LoopDetected => RecoveryAction::Abort(
             "同じ操作の繰り返しを検出しました。ループを回避するため中断します。".to_string(),
+        ),
+        FailureMode::ContextOverflow => RecoveryAction::Replan(
+            "コンテキストが長すぎます。不要な情報を省いて要点のみで再試行してください。".to_string(),
+        ),
+        FailureMode::RateLimited => RecoveryAction::RetryWithFix(
+            "レート制限に達しました。少し待ってから再試行します。".to_string(),
+        ),
+        FailureMode::NetworkError => RecoveryAction::RetryWithFix(
+            "ネットワークエラーが発生しました。接続を確認して再試行します。".to_string(),
+        ),
+        FailureMode::ServerDisconnect => RecoveryAction::Replan(
+            "推論サーバーとの接続が切れました。コンテキストを圧縮して再接続を試みます。".to_string(),
         ),
     }
 }
@@ -725,5 +803,48 @@ mod tests {
         assert!(guard.check_stuck("a.rs").is_some());
         assert!(guard.check_stuck("b.rs").is_none());
         assert_eq!(guard.tracked_files(), 2);
+    }
+
+    // --- 構造化エラー分類テスト ---
+
+    #[test]
+    fn test_recovery_hint_context_overflow() {
+        let hint = RecoveryHint::for_failure(&FailureMode::ContextOverflow);
+        assert!(hint.retryable);
+        assert!(hint.should_compress);
+    }
+
+    #[test]
+    fn test_recovery_hint_server_disconnect() {
+        let hint = RecoveryHint::for_failure(&FailureMode::ServerDisconnect);
+        assert!(hint.retryable);
+        assert!(hint.should_compress);
+        assert_eq!(hint.backoff_secs, 10);
+    }
+
+    #[test]
+    fn test_recovery_hint_rate_limited() {
+        let hint = RecoveryHint::for_failure(&FailureMode::RateLimited);
+        assert!(hint.retryable);
+        assert!(!hint.should_compress);
+        assert_eq!(hint.backoff_secs, 15);
+    }
+
+    #[test]
+    fn test_recovery_hint_loop_not_retryable() {
+        let hint = RecoveryHint::for_failure(&FailureMode::LoopDetected);
+        assert!(!hint.retryable);
+    }
+
+    #[test]
+    fn test_decide_recovery_context_overflow() {
+        let action = decide_recovery(&FailureMode::ContextOverflow, 0, 3);
+        assert!(matches!(action, RecoveryAction::Replan(_)));
+    }
+
+    #[test]
+    fn test_decide_recovery_server_disconnect() {
+        let action = decide_recovery(&FailureMode::ServerDisconnect, 0, 3);
+        assert!(matches!(action, RecoveryAction::Replan(_)));
     }
 }

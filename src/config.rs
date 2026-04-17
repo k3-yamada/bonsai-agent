@@ -150,9 +150,12 @@ pub struct McpConfig {
 #[serde(default)]
 pub struct ModelConfig {
     pub server_url: String,
+    /// モデルID（例: "bonsai-8b", "ternary-bonsai-8b", "ternary-bonsai-4b"）
     pub model_id: String,
     pub context_length: u32,
     pub kv_cache_type: String,
+    /// GGUFファイルパス（llama-server起動時に使用、Noneならconnect専用）
+    pub gguf_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +190,7 @@ impl Default for ModelConfig {
             model_id: "bonsai-8b".to_string(),
             context_length: 16384,
             kv_cache_type: "q8_0".to_string(),
+            gguf_path: None,
         }
     }
 }
@@ -390,6 +394,20 @@ max_uses = 5
         };
         let runtime = settings.to_runtime();
         assert_eq!(runtime.api_key.as_deref(), Some("sk-explicit-key"));
+    }
+
+    #[test]
+    fn test_model_config_ternary() {
+        let toml_str = r#"
+[model]
+model_id = "ternary-bonsai-8b"
+context_length = 65536
+gguf_path = "/path/to/Ternary-Bonsai-8B.gguf"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.model_id, "ternary-bonsai-8b");
+        assert_eq!(config.model.context_length, 65536);
+        assert_eq!(config.model.gguf_path.as_deref(), Some("/path/to/Ternary-Bonsai-8B.gguf"));
     }
 
     #[test]
