@@ -733,31 +733,6 @@ fn handle_outcome(
     }
 }
 
-/// ステップ結果を監査ログに記録
-fn log_step_outcome(
-    store: Option<&MemoryStore>,
-    session: &Session,
-    step_index: usize,
-    outcome: &str,
-    duration_ms: u64,
-    tools_used: &[String],
-    consecutive_failures: usize,
-) {
-    if let Some(s) = store {
-        let audit = AuditLog::new(s.conn());
-        let _ = audit.log(
-            Some(&session.id),
-            &AuditAction::StepOutcome {
-                step_index,
-                outcome: outcome.to_string(),
-                duration_ms,
-                tools_used: tools_used.to_vec(),
-                consecutive_failures,
-            },
-        );
-    }
-}
-
 /// タスクの複雑さを判定（複数ステップが必要か）
 fn detect_task_complexity(input: &str) -> bool {
     let complex_signals = [
