@@ -252,6 +252,120 @@ impl Default for StallDetector {
     }
 }
 
+/// バリデーション済みのツール呼び出し
+struct ValidatedCall<'a> {
+    name: String,
+    args_json: String,
+    coerced_args: serde_json::Value,
+    tool: &'a dyn crate::tools::Tool,
+    is_read_only: bool,
+}
+
+/// ツール実行結果（並列実行からの収集用）
+struct ToolExecResult {
+    name: String,
+    args_json: String,
+    output: String,
+    success: bool,
+    is_error: bool,
+}
+
+/// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
+fn execute_validated_calls(
+    calls: &[ValidatedCall<'_>],
+    session: &mut Session,
+    circuit_breaker: &mut CircuitBreaker,
+    secrets_filter: &SecretsFilter,
+    store: Option<&MemoryStore>,
+) -> Vec<String> {
+    let mut step_tools: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < calls.len() {
+        let batch_start = i;
+        while i < calls.len() && calls[i].is_read_only {
+            i += 1;
+        }
+        let read_batch = &calls[batch_start..i];
+        if read_batch.len() >= 2 {
+            let results = execute_read_batch_parallel(read_batch);
+            for r in results {
+                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
+                if !r.is_error {
+                    step_tools.push(r.name);
+                }
+            }
+        } else {
+            for call in read_batch {
+                let r = execute_single_call(call);
+                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
+                if !r.is_error {
+                    step_tools.push(r.name);
+                }
+            }
+        }
+        if i < calls.len() && !calls[i].is_read_only {
+            let r = execute_single_call(&calls[i]);
+            apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
+            if !r.is_error {
+                step_tools.push(r.name);
+            }
+            i += 1;
+        }
+    }
+    step_tools
+}
+
+/// 読取専用ツールをstd::thread::scopeで並列実行
+fn execute_read_batch_parallel(batch: &[ValidatedCall<'_>]) -> Vec<ToolExecResult> {
+    log_event(LogLevel::Debug, "parallel", &format!("読取ツール{}件を並列実行", batch.len()));
+    std::thread::scope(|s| {
+        let handles: Vec<_> = batch.iter().map(|call| s.spawn(move || execute_single_call(call))).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// 単一ツール呼び出しを実行
+fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
+    match call.tool.call(call.coerced_args.clone()) {
+        Ok(tool_result) => ToolExecResult {
+            name: call.name.clone(), args_json: call.args_json.clone(),
+            output: tool_result.output, success: tool_result.success, is_error: false,
+        },
+        Err(e) => ToolExecResult {
+            name: call.name.clone(), args_json: call.args_json.clone(),
+            output: format!("ツール実行エラー: {e}"), success: false, is_error: true,
+        },
+    }
+}
+
+/// ツール実行結果をセッション・サーキットブレーカー・監査ログに反映
+fn apply_tool_result(
+    r: &ToolExecResult, session: &mut Session, circuit_breaker: &mut CircuitBreaker,
+    secrets_filter: &SecretsFilter, store: Option<&MemoryStore>,
+) {
+    if r.is_error {
+        circuit_breaker.record_failure(&r.name);
+        if let Some(s) = store {
+            let audit = AuditLog::new(s.conn());
+            let _ = audit.log(Some(&session.id), &AuditAction::ToolCall {
+                tool_name: r.name.clone(), args: r.args_json.clone(), success: false, output_preview: r.output.clone(),
+            });
+        }
+        session.add_message(Message::tool(&r.output, &r.name));
+    } else {
+        circuit_breaker.record_success(&r.name);
+        let redacted = secrets_filter.redact(&r.output);
+        if let Some(s) = store {
+            let audit = AuditLog::new(s.conn());
+            let _ = audit.log(Some(&session.id), &AuditAction::ToolCall {
+                tool_name: r.name.clone(), args: r.args_json.clone(), success: r.success,
+                output_preview: redacted.chars().take(200).collect(),
+            });
+        }
+        session.add_message(Message::tool(&redacted, &r.name));
+    }
+}
+
 /// ステップ実行に必要なコンテキスト
 pub struct StepContext<'a> {
     pub backend: &'a dyn LlmBackend,

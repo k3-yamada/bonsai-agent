@@ -82,13 +82,10 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
 /// 例: `{"count": "42"}` → `{"count": 42}`
 /// 例: `{"flag": "true"}` → `{"flag": true}`
 pub fn coerce_tool_arguments(args: &mut serde_json::Value) {
-    match args {
-        serde_json::Value::Object(map) => {
-            for (_key, val) in map.iter_mut() {
-                coerce_value(val);
-            }
+    if let serde_json::Value::Object(map) = args {
+        for (_key, val) in map.iter_mut() {
+            coerce_value(val);
         }
-        _ => {}
     }
 }
 
@@ -109,10 +106,10 @@ fn coerce_value(val: &mut serde_json::Value) {
             return;
         }
         // 浮動小数点変換
-        if let Ok(n) = s.parse::<f64>() {
-            if s.contains('.') {
-                *val = serde_json::json!(n);
-            }
+        if let Ok(n) = s.parse::<f64>()
+            && s.contains('.')
+        {
+            *val = serde_json::json!(n);
         }
     }
 }

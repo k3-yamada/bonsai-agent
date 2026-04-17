@@ -11,3 +11,4 @@ pub mod task;
 pub mod validate;
 
 pub mod event_store;
+pub mod middleware;

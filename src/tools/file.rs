@@ -33,6 +33,10 @@ impl Tool for FileReadTool {
         Permission::Auto
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
         let path = args
             .get("path")

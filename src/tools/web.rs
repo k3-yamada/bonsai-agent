@@ -29,6 +29,10 @@ impl Tool for WebSearchTool {
         Permission::Auto
     }
 
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
     fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
         let query = args
             .get("query")
@@ -81,6 +85,10 @@ impl Tool for WebFetchTool {
 
     fn permission(&self) -> Permission {
         Permission::Auto
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
     }
 
     fn call(&self, args: serde_json::Value) -> Result<ToolResult> {

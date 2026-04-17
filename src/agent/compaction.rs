@@ -132,12 +132,11 @@ fn build_handoff_summary(messages: &[Message], config: &CompactionConfig) -> Opt
             let preview: String = msg.content.chars().take(80).collect();
             resolved.push(preview);
         }
-        if matches!(msg.role, Role::Tool) {
-            if let Some(id) = &msg.tool_call_id {
-                if !tools_used.contains(id) {
-                    tools_used.push(id.clone());
-                }
-            }
+        if matches!(msg.role, Role::Tool)
+            && let Some(id) = &msg.tool_call_id
+            && !tools_used.contains(id)
+        {
+            tools_used.push(id.clone());
         }
     }
     if resolved.is_empty() {

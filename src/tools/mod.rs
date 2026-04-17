@@ -41,6 +41,11 @@ pub trait Tool: Send + Sync {
     /// ツールを実行する（同期）
     fn call(&self, args: serde_json::Value) -> Result<ToolResult>;
 
+    /// 読取専用ツールか（並列実行の対象判定用）
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
     /// スキーマ情報を生成
     fn schema(&self) -> ToolSchema {
         ToolSchema {
