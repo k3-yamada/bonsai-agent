@@ -505,6 +505,59 @@ context_length = 65536
     }
 
 
+
+    #[test]
+    fn test_server_backend_serialize_llama() {
+        let backend = ServerBackend::LlamaServer;
+        let json = serde_json::to_string(&backend).unwrap();
+        assert_eq!(json, r#""llama-server""#);
+    }
+
+    #[test]
+    fn test_server_backend_serialize_mlx() {
+        let backend = ServerBackend::MlxLm;
+        let json = serde_json::to_string(&backend).unwrap();
+        assert_eq!(json, r#""mlx-lm""#);
+    }
+
+    #[test]
+    fn test_server_backend_deserialize_llama() {
+        let backend: ServerBackend = serde_json::from_str(r#""llama-server""#).unwrap();
+        assert_eq!(backend, ServerBackend::LlamaServer);
+    }
+
+    #[test]
+    fn test_server_backend_deserialize_mlx() {
+        let backend: ServerBackend = serde_json::from_str(r#""mlx-lm""#).unwrap();
+        assert_eq!(backend, ServerBackend::MlxLm);
+    }
+
+    #[test]
+    fn test_server_backend_toml_roundtrip() {
+        let toml_str = r#"
+[model]
+backend = "llama-server"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.backend, ServerBackend::LlamaServer);
+        let re_toml = toml::to_string_pretty(&config).unwrap();
+        let re_config: AppConfig = toml::from_str(&re_toml).unwrap();
+        assert_eq!(re_config.model.backend, ServerBackend::LlamaServer);
+    }
+
+    #[test]
+    fn test_server_backend_toml_roundtrip_mlx() {
+        let toml_str = r#"
+[model]
+backend = "mlx-lm"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.backend, ServerBackend::MlxLm);
+        let re_toml = toml::to_string_pretty(&config).unwrap();
+        let re_config: AppConfig = toml::from_str(&re_toml).unwrap();
+        assert_eq!(re_config.model.backend, ServerBackend::MlxLm);
+    }
+
     #[test]
     fn test_inference_params_default() {
         let params = InferenceParams::default();

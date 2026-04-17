@@ -367,6 +367,36 @@ mod tests {
         assert!(names.contains(&"git"));
     }
 
+
+    #[test]
+    fn test_is_read_only_default_false() {
+        // Tool トレイトの is_read_only() デフォルト値は false
+        let tool = DummyTool::new("test", "test tool");
+        assert!(!tool.is_read_only(), "デフォルトのis_read_onlyはfalseであるべき");
+    }
+
+    /// is_read_only を true にオーバーライドするテスト用ツール
+    struct ReadOnlyTool;
+
+    impl Tool for ReadOnlyTool {
+        fn name(&self) -> &str { "read_only_tool" }
+        fn description(&self) -> &str { "読取専用テストツール" }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn permission(&self) -> Permission { Permission::Auto }
+        fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
+            Ok(ToolResult { output: "ok".to_string(), success: true })
+        }
+        fn is_read_only(&self) -> bool { true }
+    }
+
+    #[test]
+    fn test_is_read_only_override_true() {
+        // is_read_only() をオーバーライドして true にできる
+        let tool = ReadOnlyTool;
+        assert!(tool.is_read_only(), "オーバーライドでtrueになるべき");
+    }
     #[test]
     fn test_task_boost_no_boost() {
         let reg = build_registry();

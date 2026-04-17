@@ -398,6 +398,49 @@ mod tests {
         assert_eq!(chain.names(), vec!["audit", "tool_tracking", "compaction", "token_budget"]);
     }
 
+
+    #[test]
+    fn test_stall_default_threshold_is_3() {
+        // StallMiddleware::default() の閾値が3であることを検証
+        let mut mw = StallMiddleware::default();
+        let mut session = Session::new();
+        let r = StepResult {
+            outcome_type: "continue",
+            iteration: 0,
+            duration_ms: 100,
+            tools_used: vec![],
+            tools_succeeded: false,
+            output_hash: 42,
+            consecutive_failures: 1,
+        };
+        // 1回目・2回目はOk
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        // 3回目でInject（閾値3）
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+    }
+
+    #[test]
+    fn test_stall_resets_after_detection() {
+        // 停滞検出後にリセットされ、再度閾値まで蓄積可能
+        let mut mw = StallMiddleware::new(2);
+        let mut session = Session::new();
+        let r = StepResult {
+            outcome_type: "continue",
+            iteration: 0,
+            duration_ms: 100,
+            tools_used: vec![],
+            tools_succeeded: false,
+            output_hash: 42,
+            consecutive_failures: 1,
+        };
+        // 2回で検出
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+        // リセット後、再度2回必要
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+    }
     #[test]
     fn test_chain_integration_run() {
         let mut chain = MiddlewareChain::new();

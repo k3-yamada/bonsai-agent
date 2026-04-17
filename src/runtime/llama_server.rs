@@ -69,20 +69,32 @@ impl LlamaServerBackend {
         if self.is_healthy() {
             return Ok(());
         }
-        eprintln!("[llama-server] ヘルスチェック失敗、復帰待機中...");
+        let backend_label = if self.mlx_compatible {
+            "mlx-lm server"
+        } else {
+            "llama-server"
+        };
+        eprintln!("[{backend_label}] ヘルスチェック失敗、復帰待機中...");
         let start = std::time::Instant::now();
         while start.elapsed() < max_wait {
             std::thread::sleep(std::time::Duration::from_secs(2));
             if self.is_healthy() {
-                eprintln!("[llama-server] 復帰確認 ({}秒)", start.elapsed().as_secs());
+                eprintln!("[{backend_label}] 復帰確認 ({}秒)", start.elapsed().as_secs());
                 return Ok(());
             }
         }
-        anyhow::bail!(
-            "llama-server が{}秒以内に復帰しませんでした ({})",
-            max_wait.as_secs(),
-            self.base_url
-        )
+        let hint = if self.mlx_compatible {
+            format!(
+                "{backend_label} ({}) に接続できません。                 `mlx_lm.server --model <model>` で起動してください。",
+                self.base_url,
+            )
+        } else {
+            format!(
+                "{backend_label} ({}) に接続できません。                 `llama-server -m <model.gguf> --port <port>` で起動してください。",
+                self.base_url,
+            )
+        };
+        anyhow::bail!("{hint} ({}秒待機後タイムアウト)", max_wait.as_secs())
     }
 
     /// メッセージをOpenAI互換のJSON形式に変換
@@ -290,8 +302,17 @@ impl LlmBackend for LlamaServerBackend {
             .send_json(&body)
         {
             Ok(resp) => resp,
-            Err(_e) => {
+            Err(e) => {
                 // ストリーミングリクエスト失敗時は非ストリーミングでフォールバック
+                let backend_label = if self.mlx_compatible {
+                    "mlx-lm server"
+                } else {
+                    "llama-server"
+                };
+                eprintln!(
+                    "[{backend_label}] ストリーミングリクエスト失敗 ({}): {e}。非ストリーミングにフォールバック",
+                    self.base_url,
+                );
                 return self.generate_non_streaming(messages, tools, on_token, start);
             }
         };
@@ -310,7 +331,12 @@ impl LlmBackend for LlamaServerBackend {
             }),
             Err(e) => {
                 // SSEパース失敗時は非ストリーミングでフォールバック
-                eprintln!("[llama-server] SSEパース失敗、非ストリーミングにフォールバック: {e}");
+                let backend_label = if self.mlx_compatible {
+                    "mlx-lm server"
+                } else {
+                    "llama-server"
+                };
+                eprintln!("[{backend_label}] SSEパース失敗、非ストリーミングにフォールバック: {e}");
                 self.generate_non_streaming(messages, tools, on_token, start)
             }
         }
