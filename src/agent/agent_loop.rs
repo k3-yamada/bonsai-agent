@@ -1861,4 +1861,37 @@ mod tests {
             assert!(loaded[0].description.contains("auto-start"));
         }
     }
+
+    // テスト: 読取専用ツール並列化 — ValidatedCall構造体
+    #[test]
+    fn test_validated_call_read_only_flag() {
+        let tool = EchoTool;
+        assert!(!tool.is_read_only(), "EchoToolはis_read_only=false");
+    }
+
+    // テスト: FileReadToolはis_read_only=true
+    #[test]
+    fn test_file_read_is_read_only() {
+        let tool = crate::tools::file::FileReadTool;
+        assert!(tool.is_read_only());
+    }
+
+    // テスト: RepoMapToolはis_read_only=true
+    #[test]
+    fn test_repo_map_is_read_only() {
+        let tool = crate::tools::repomap::RepoMapTool;
+        assert!(tool.is_read_only());
+    }
+
+    // テスト: execute_validated_calls — 空リストでパニックしない
+    #[test]
+    fn test_execute_validated_calls_empty() {
+        use crate::safety::secrets::SecretsFilter;
+        let mut session = Session::new();
+        let mut cb = CircuitBreaker::default();
+        let sf = SecretsFilter::default();
+        let result = execute_validated_calls(&[], &mut session, &mut cb, &sf, None);
+        assert!(result.is_empty());
+    }
+
 }
