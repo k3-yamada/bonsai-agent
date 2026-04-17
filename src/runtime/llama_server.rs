@@ -235,17 +235,19 @@ impl LlamaServerProcess {
     }
 
     fn wait_until_healthy(&self, timeout: Duration) -> Result<()> {
-        let url = format!("http://127.0.0.1:{}/health", self.port);
+        let health_url = format!("http://127.0.0.1:{}/health", self.port);
+        let models_url = format!("http://127.0.0.1:{}/v1/models", self.port);
         let start = Instant::now();
 
         loop {
             if start.elapsed() > timeout {
                 anyhow::bail!(
-                    "llama-serverの起動がタイムアウト（{}秒）",
+                    "サーバーの起動がタイムアウト（{}秒）",
                     timeout.as_secs()
                 );
             }
-            if ureq::get(&url).call().is_ok() {
+            // /health → /v1/models フォールバック（MLX対応）
+            if ureq::get(&health_url).call().is_ok() || ureq::get(&models_url).call().is_ok() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(500));
