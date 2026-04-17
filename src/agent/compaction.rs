@@ -96,6 +96,8 @@ pub fn compact_level3(messages: &mut Vec<Message>, config: &CompactionConfig) {
         .filter(|m| matches!(m.role, Role::System))
         .cloned()
         .collect();
+    // Handoff framing: 圧縮前の要約を「引継ぎ」として挿入（hermes-agent知見）
+    let handoff = build_handoff_summary(messages, config);
     let rec: Vec<Message> = messages
         .iter()
         .rev()
@@ -107,7 +109,54 @@ pub fn compact_level3(messages: &mut Vec<Message>, config: &CompactionConfig) {
         .collect();
     messages.clear();
     messages.extend(sys);
+    if let Some(h) = handoff {
+        messages.push(h);
+    }
     messages.extend(rec);
+}
+
+/// Handoff framing: 圧縮対象から要約を構築（hermes-agent/macOS26パターン）
+///
+/// 「別のアシスタントが引き継ぎ」として、解決済み/未解決を整理。
+/// 1bitモデルが指示と混同しないよう「Remaining Work」命名を使用。
+fn build_handoff_summary(messages: &[Message], config: &CompactionConfig) -> Option<Message> {
+    let boundary = messages.len().saturating_sub(config.emergency_keep);
+    if boundary < 2 {
+        return None;
+    }
+    // 圧縮対象のAssistantメッセージから要約を構築
+    let mut resolved = Vec::new();
+    let mut tools_used = Vec::new();
+    for msg in &messages[..boundary] {
+        if matches!(msg.role, Role::Assistant) && msg.content.len() > 20 {
+            let preview: String = msg.content.chars().take(80).collect();
+            resolved.push(preview);
+        }
+        if matches!(msg.role, Role::Tool) {
+            if let Some(id) = &msg.tool_call_id {
+                if !tools_used.contains(id) {
+                    tools_used.push(id.clone());
+                }
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return None;
+    }
+    let resolved_text = resolved
+        .iter()
+        .take(3)
+        .map(|r| format!("- {r}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let tools_text = if tools_used.is_empty() {
+        String::new()
+    } else {
+        format!("\nUsed tools: {}", tools_used.iter().take(5).cloned().collect::<Vec<_>>().join(", "))
+    };
+    Some(Message::system(format!(
+        "[Context handoff] 前のアシスタントの作業を引き継ぎます。\n         Resolved:\n{resolved_text}{tools_text}\n         Remaining Work: 直近のメッセージに基づいて作業を続行してください。"
+    )))
 }
 
 /// コンパクション前のメモリフラッシュ: 削除対象のAssistant発言を要約してMemoryStoreに退避
@@ -285,5 +334,32 @@ mod tests {
         let msgs = vec![Message::assistant("x".repeat(200))];
         flush_before_compaction(&msgs, None);
         // パニックしないことを確認
+    }
+
+    #[test]
+    fn t_handoff_summary() {
+        let mut msgs = mk(5, 200);
+        let config = CompactionConfig {
+            max_context_tokens: 100,
+            emergency_keep: 4,
+            ..Default::default()
+        };
+        compact_level3(&mut msgs, &config);
+        // systemメッセージ + handoff + 直近4件
+        let has_handoff = msgs.iter().any(|m| m.content.contains("handoff"));
+        assert!(has_handoff, "Handoff summary が挿入されるべき");
+    }
+
+    #[test]
+    fn t_handoff_short_session_skipped() {
+        let mut msgs = vec![Message::system("s"), Message::user("q"), Message::assistant("a")];
+        let config = CompactionConfig {
+            emergency_keep: 4,
+            ..Default::default()
+        };
+        compact_level3(&mut msgs, &config);
+        // 短すぎてhandoff不要
+        let has_handoff = msgs.iter().any(|m| m.content.contains("handoff"));
+        assert!(!has_handoff);
     }
 }
