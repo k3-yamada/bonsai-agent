@@ -147,20 +147,17 @@ pub struct McpConfig {
 }
 
 /// 推論サーバーの種別
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerBackend {
     /// llama-server (llama.cpp, GGUF)
+    #[default]
     LlamaServer,
     /// mlx-lm server (MLX, Apple Silicon最適化)
     MlxLm,
 }
 
-impl Default for ServerBackend {
-    fn default() -> Self {
-        Self::LlamaServer
-    }
-}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
