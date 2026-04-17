@@ -458,13 +458,14 @@ pub fn execute_step(
         return Ok(StepOutcome::FinalAnswer(answer));
     }
 
-    // 5. 各ツール呼び出しを実行
+    // 5. ツール呼び出し実行（並列対応）
     let assistant_text = result.text.clone();
     session.add_message(Message::assistant(&assistant_text));
 
-    let mut step_tools: Vec<String> = Vec::new();
+    let known = ctx.tools.known_names();
+    let mut validated: Vec<ValidatedCall<'_>> = Vec::new();
+
     for tool_call in &parsed.tool_calls {
-        // ループ検出
         let action_key = format!("{}:{}", tool_call.name, tool_call.arguments);
         if loop_detector.record_and_check(&action_key) {
             let mode = FailureMode::LoopDetected;
@@ -473,94 +474,39 @@ pub fn execute_step(
                 return Ok(StepOutcome::Aborted(msg));
             }
         }
-
-        // サーキットブレーカーチェック
         if !circuit_breaker.is_available(&tool_call.name) {
             session.add_message(Message::tool(
-                format!(
-                    "ツール '{}' は連続失敗のため一時停止中です。別の方法を試してください。",
-                    tool_call.name
-                ),
+                format!("ツール '{}' は連続失敗のため一時停止中です。別の方法を試してください。", tool_call.name),
                 &tool_call.name,
             ));
             continue;
         }
-
-        // バリデーション
-        let known = ctx.tools.known_names();
         let validation = validate_tool_call(tool_call, &known, ctx.path_guard, None);
-
         if !validation.is_valid {
-            let block_issues: Vec<_> = validation
-                .issues
-                .iter()
-                .filter(|i| i.severity == Severity::Block)
-                .map(|i| i.message.as_str())
-                .collect();
+            let block_issues: Vec<_> = validation.issues.iter()
+                .filter(|i| i.severity == Severity::Block).map(|i| i.message.as_str()).collect();
             let alt = match tool_call.name.as_str() {
-                    "shell" => "代替: file_readやgitツールを使用してください。",
-                    "file_write" => "代替: 許可されたディレクトリ内のパスを指定してください。",
-                    _ => "別のツールまたはパラメータで再試行してください。",
-                };
-                session.add_message(Message::tool(
-                    format!("拒否: {}。{}", block_issues.join(", "), alt),
-                    &tool_call.name,
-                ));
+                "shell" => "代替: file_readやgitツールを使用してください。",
+                "file_write" => "代替: 許可されたディレクトリ内のパスを指定してください。",
+                _ => "別のツールまたはパラメータで再試行してください。",
+            };
+            session.add_message(Message::tool(format!("拒否: {}。{}", block_issues.join(", "), alt), &tool_call.name));
             continue;
         }
-
-        // ツール実行
         let tool = match ctx.tools.get(&tool_call.name) {
             Some(t) => t,
             None => continue,
         };
-
-        // 型強制: LLMが数値を文字列で返す問題を自動修正（hermes-agent知見）
         let mut coerced_args = tool_call.arguments.clone();
         coerce_tool_arguments(&mut coerced_args);
-
-        match tool.call(coerced_args) {
-            Ok(tool_result) => {
-                circuit_breaker.record_success(&tool_call.name);
-                step_tools.push(tool_call.name.clone());
-                // 秘密情報をマスク
-                let redacted_output = ctx.secrets_filter.redact(&tool_result.output);
-                // 監査ログ記録
-                if let Some(s) = ctx.store {
-                    let audit = AuditLog::new(s.conn());
-                    let _ = audit.log(
-                        Some(&session.id),
-                        &AuditAction::ToolCall {
-                            tool_name: tool_call.name.clone(),
-                            args: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
-                            success: tool_result.success,
-                            output_preview: redacted_output.chars().take(200).collect(),
-                        },
-                    );
-                }
-                session.add_message(Message::tool(&redacted_output, &tool_call.name));
-            }
-            Err(e) => {
-                circuit_breaker.record_failure(&tool_call.name);
-                let error_msg = format!("ツール実行エラー: {e}");
-                // 失敗も監査ログに記録
-                if let Some(s) = ctx.store {
-                    let audit = AuditLog::new(s.conn());
-                    let _ = audit.log(
-                        Some(&session.id),
-                        &AuditAction::ToolCall {
-                            tool_name: tool_call.name.clone(),
-                            args: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
-                            success: false,
-                            output_preview: error_msg.clone(),
-                        },
-                    );
-                }
-                session.add_message(Message::tool(&error_msg, &tool_call.name));
-            }
-        }
+        validated.push(ValidatedCall {
+            name: tool_call.name.clone(),
+            args_json: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
+            coerced_args, tool, is_read_only: tool.is_read_only(),
+        });
     }
 
+    let step_tools = execute_validated_calls(&validated, session, circuit_breaker, ctx.secrets_filter, ctx.store);
     Ok(StepOutcome::Continue(step_tools))
 }
 
