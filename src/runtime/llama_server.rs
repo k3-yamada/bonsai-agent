@@ -19,6 +19,8 @@ pub struct LlamaServerBackend {
     inference: InferenceParams,
     /// MLX互換モード（未サポートパラメータを除外）
     mlx_compatible: bool,
+    /// リクエストごとのseed（0=ランダム、非0=固定）
+    seed: u64,
 }
 
 impl LlamaServerBackend {
@@ -29,6 +31,7 @@ impl LlamaServerBackend {
             model_id: model_id.to_string(),
             inference: InferenceParams::default(),
             mlx_compatible: false,
+            seed: 0,
         }
     }
 
@@ -39,12 +42,19 @@ impl LlamaServerBackend {
             model_id: model_id.to_string(),
             inference,
             mlx_compatible: false,
+            seed: 0,
         }
     }
 
     /// MLX互換モードを設定
     pub fn with_mlx_compatible(mut self, mlx: bool) -> Self {
         self.mlx_compatible = mlx;
+        self
+    }
+
+    /// seed を設定（0=サーバーデフォルト、非0=固定）
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
         self
     }
 
@@ -149,16 +159,20 @@ impl LlamaServerBackend {
 
         // MLX互換: top_k/min_p/repeat_penaltyはMLXサーバーでサイレント無視されるため除外
         if self.mlx_compatible {
-            serde_json::json!({
+            let mut body = serde_json::json!({
                 "messages": msgs,
                 "temperature": self.inference.temperature,
                 "top_p": self.inference.top_p,
                 "max_tokens": self.inference.max_tokens,
                 "repetition_penalty": self.inference.repeat_penalty,
                 "stream": true,
-            })
+            });
+            if self.seed != 0 {
+                body["seed"] = serde_json::json!(self.seed);
+            }
+            body
         } else {
-            serde_json::json!({
+            let mut body = serde_json::json!({
                 "messages": msgs,
                 "temperature": self.inference.temperature,
                 "top_k": self.inference.top_k,
@@ -167,7 +181,11 @@ impl LlamaServerBackend {
                 "max_tokens": self.inference.max_tokens,
                 "repeat_penalty": self.inference.repeat_penalty,
                 "stream": true,
-            })
+            });
+            if self.seed != 0 {
+                body["seed"] = serde_json::json!(self.seed);
+            }
+            body
         }
     }
 
