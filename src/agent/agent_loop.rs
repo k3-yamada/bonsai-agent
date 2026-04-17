@@ -7,7 +7,7 @@ use crate::agent::conversation::{Message, ParsedOutput, Session};
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
 };
-use crate::agent::parse::parse_assistant_output;
+use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::validate::{PathGuard, Severity, validate_tool_call};
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
@@ -398,7 +398,11 @@ pub fn execute_step(
             None => continue,
         };
 
-        match tool.call(tool_call.arguments.clone()) {
+        // 型強制: LLMが数値を文字列で返す問題を自動修正（hermes-agent知見）
+        let mut coerced_args = tool_call.arguments.clone();
+        coerce_tool_arguments(&mut coerced_args);
+
+        match tool.call(coerced_args) {
             Ok(tool_result) => {
                 circuit_breaker.record_success(&tool_call.name);
                 step_tools.push(tool_call.name.clone());

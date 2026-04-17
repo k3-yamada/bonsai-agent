@@ -75,6 +75,48 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
     })
 }
 
+
+/// ツール引数の型強制（hermes-agent知見: LLMが数値を文字列で返す問題）
+///
+/// JSON値を走査し、数値文字列を数値に、bool文字列をboolに変換。
+/// 例: `{"count": "42"}` → `{"count": 42}`
+/// 例: `{"flag": "true"}` → `{"flag": true}`
+pub fn coerce_tool_arguments(args: &mut serde_json::Value) {
+    match args {
+        serde_json::Value::Object(map) => {
+            for (_key, val) in map.iter_mut() {
+                coerce_value(val);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn coerce_value(val: &mut serde_json::Value) {
+    if let serde_json::Value::String(s) = val {
+        // bool変換
+        if s == "true" {
+            *val = serde_json::Value::Bool(true);
+            return;
+        }
+        if s == "false" {
+            *val = serde_json::Value::Bool(false);
+            return;
+        }
+        // 整数変換
+        if let Ok(n) = s.parse::<i64>() {
+            *val = serde_json::json!(n);
+            return;
+        }
+        // 浮動小数点変換
+        if let Ok(n) = s.parse::<f64>() {
+            if s.contains('.') {
+                *val = serde_json::json!(n);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +209,35 @@ mod tests {
         let input = "<tool_call></tool_call>";
         let result = parse_assistant_output(input);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_coerce_string_to_int() {
+        let mut v = serde_json::json!({"count": "42", "name": "test"});
+        coerce_tool_arguments(&mut v);
+        assert_eq!(v["count"], 42);
+        assert_eq!(v["name"], "test"); // 文字列のまま
+    }
+
+    #[test]
+    fn test_coerce_string_to_bool() {
+        let mut v = serde_json::json!({"flag": "true", "other": "false"});
+        coerce_tool_arguments(&mut v);
+        assert_eq!(v["flag"], true);
+        assert_eq!(v["other"], false);
+    }
+
+    #[test]
+    fn test_coerce_string_to_float() {
+        let mut v = serde_json::json!({"ratio": "3.14"});
+        coerce_tool_arguments(&mut v);
+        assert!((v["ratio"].as_f64().unwrap() - 3.14).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_coerce_non_numeric_string_unchanged() {
+        let mut v = serde_json::json!({"path": "/tmp/file.txt"});
+        coerce_tool_arguments(&mut v);
+        assert_eq!(v["path"], "/tmp/file.txt");
     }
 }
