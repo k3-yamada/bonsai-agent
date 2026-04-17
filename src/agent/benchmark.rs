@@ -17,6 +17,8 @@ pub enum TaskCategory {
     MultiStep,
     ErrorRecovery,
     ToolSelection,
+    CodeGeneration,
+    Summarization,
 }
 
 /// 単一のベンチマークタスク定義
@@ -217,7 +219,7 @@ pub struct BenchmarkSuite {
 }
 
 impl BenchmarkSuite {
-    /// デフォルトのベンチマークタスクセット（8タスク）
+    /// デフォルトのベンチマークタスクセット（12タスク）
     pub fn default_tasks() -> Self {
         Self {
             tasks: vec![
@@ -292,6 +294,42 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["Ferris".into()],
                     max_iterations: 2,
                     category: TaskCategory::Reasoning,
+                },
+                BenchmarkTask {
+                    id: "code_gen_fizzbuzz".into(),
+                    name: "コード生成".into(),
+                    input: "FizzBuzzをRustで書いて。1から15までの出力例も示して".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
+                    max_iterations: 3,
+                    category: TaskCategory::CodeGeneration,
+                },
+                BenchmarkTask {
+                    id: "multi_step_field_count".into(),
+                    name: "マルチステップ推論".into(),
+                    input: "src/config.rsのModelConfig構造体のフィールド数を数えて".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![],
+                    max_iterations: 5,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "error_handling_nonexistent".into(),
+                    name: "エラーハンドリング".into(),
+                    input: "/tmp/bonsai_absolutely_missing_file_xyz.rs を読んで内容を教えて".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![],
+                    max_iterations: 3,
+                    category: TaskCategory::ErrorRecovery,
+                },
+                BenchmarkTask {
+                    id: "summarize_agent_loop".into(),
+                    name: "要約".into(),
+                    input: "src/agent/agent_loop.rsの最初の50行を要約して".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![],
+                    max_iterations: 4,
+                    category: TaskCategory::Summarization,
                 },
             ],
         }
@@ -432,15 +470,42 @@ impl BenchmarkSuite {
 /// タスクのレスポンスを評価してスコアを生成
 fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> TaskScore {
     let response = &result.answer;
-    let keyword_hits = if task.expected_keywords.is_empty() {
-        1.0
-    } else {
-        let hits = task
-            .expected_keywords
-            .iter()
-            .filter(|kw| response.contains(kw.as_str()))
-            .count();
-        hits as f64 / task.expected_keywords.len() as f64
+    // タスク固有の検証ロジック
+    let keyword_hits = match task.id.as_str() {
+        // マルチステップ推論: 回答に数値が含まれていれば成功
+        "multi_step_field_count" => {
+            let has_number = response.chars().any(|c| c.is_ascii_digit());
+            if has_number { 1.0 } else { 0.0 }
+        }
+        // エラーハンドリング: エラー関連キーワードの検証
+        "error_handling_nonexistent" => {
+            let error_keywords = ["エラー", "存在しない", "見つかり", "not found", "error", "Error", "失敗"];
+            let has_error_report = error_keywords.iter().any(|kw| response.contains(kw));
+            if has_error_report { 1.0 } else { 0.0 }
+        }
+        // 要約: 50文字以上の回答で成功
+        "summarize_agent_loop" => {
+            // 回答の文字数で検証（空白除外）
+            let char_count = response.chars().filter(|c| !c.is_whitespace()).count();
+            if char_count >= 50 { 1.0 } else { char_count as f64 / 50.0 }
+        }
+        // デフォルト: キーワードマッチ
+        _ => {
+            if task.expected_keywords.is_empty() {
+                1.0
+            } else {
+                let hits = task
+                    .expected_keywords
+                    .iter()
+                    .filter(|kw| {
+                        let lower_response = response.to_lowercase();
+                        let lower_kw = kw.to_lowercase();
+                        lower_response.contains(&lower_kw)
+                    })
+                    .count();
+                hits as f64 / task.expected_keywords.len() as f64
+            }
+        }
     };
 
     // ツール正確性: 実際に呼ばれたツールと期待ツールを照合
@@ -573,7 +638,7 @@ mod tests {
     #[test]
     fn test_default_tasks_count() {
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 8);
+        assert_eq!(suite.tasks.len(), 12);
     }
 
     #[test]
@@ -763,5 +828,184 @@ mod tests {
         let mrt = MultiRunTaskScore::from_scores("empty".into(), vec![], 0.5);
         assert!((mrt.pass_at_k).abs() < f64::EPSILON);
         assert!((mrt.mean_score).abs() < f64::EPSILON);
+    }
+
+    // --- 新タスク（コード生成/マルチステップ/エラー処理/要約）テスト ---
+
+    #[test]
+    fn test_new_tasks_exist_in_suite() {
+        let suite = BenchmarkSuite::default_tasks();
+        let new_ids = ["code_gen_fizzbuzz", "multi_step_field_count",
+                       "error_handling_nonexistent", "summarize_agent_loop"];
+        for id in &new_ids {
+            assert!(
+                suite.tasks.iter().any(|t| t.id == *id),
+                "タスク '{id}' がスイートに存在しない"
+            );
+        }
+    }
+
+    #[test]
+    fn test_code_gen_fizzbuzz_keywords() {
+        let task = BenchmarkTask {
+            id: "code_gen_fizzbuzz".into(),
+            name: "コード生成".into(),
+            input: "test".into(),
+            expected_tools: vec![],
+            expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
+            max_iterations: 3,
+            category: TaskCategory::CodeGeneration,
+        };
+        // FizzBuzz出力を含む回答 → 全キーワードヒット
+        let result = mock_result("fn fizzbuzz(n: u32) { for i in 1..=n { match (i%3, i%5) { (0,0) => fizzbuzz, (0,_) => fizz, (_,0) => buzz, _ => num } } }", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "全キーワード一致すべき");
+    }
+
+    #[test]
+    fn test_code_gen_fizzbuzz_partial() {
+        let task = BenchmarkTask {
+            id: "code_gen_fizzbuzz".into(),
+            name: "コード生成".into(),
+            input: "test".into(),
+            expected_tools: vec![],
+            expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
+            max_iterations: 3,
+            category: TaskCategory::CodeGeneration,
+        };
+        // fizzのみ含む回答 → 部分ヒット
+        let result = mock_result("fizz only", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits - 1.0 / 3.0).abs() < 0.001, "1/3キーワードヒット");
+    }
+
+    #[test]
+    fn test_multi_step_field_count_with_number() {
+        let task = BenchmarkTask {
+            id: "multi_step_field_count".into(),
+            name: "マルチステップ推論".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_read".into()],
+            expected_keywords: vec![],
+            max_iterations: 5,
+            category: TaskCategory::MultiStep,
+        };
+        // 数値を含む回答 → 成功
+        let result = mock_result("ModelConfigには7つのフィールドがあります", vec!["file_read"], 2);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "数値を含む回答は成功");
+    }
+
+    #[test]
+    fn test_multi_step_field_count_no_number() {
+        let task = BenchmarkTask {
+            id: "multi_step_field_count".into(),
+            name: "マルチステップ推論".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_read".into()],
+            expected_keywords: vec![],
+            max_iterations: 5,
+            category: TaskCategory::MultiStep,
+        };
+        // 数値なし回答 → 失敗
+        let result = mock_result("フィールドがいくつかあります", vec!["file_read"], 2);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits).abs() < f64::EPSILON, "数値なし回答は失敗");
+    }
+
+    #[test]
+    fn test_error_handling_with_error_keyword() {
+        let task = BenchmarkTask {
+            id: "error_handling_nonexistent".into(),
+            name: "エラーハンドリング".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_read".into()],
+            expected_keywords: vec![],
+            max_iterations: 3,
+            category: TaskCategory::ErrorRecovery,
+        };
+        // エラー報告を含む回答 → 成功
+        let result = mock_result("ファイルが存在しないためエラーが発生しました", vec!["file_read"], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "エラーキーワードで成功");
+    }
+
+    #[test]
+    fn test_error_handling_no_error_keyword() {
+        let task = BenchmarkTask {
+            id: "error_handling_nonexistent".into(),
+            name: "エラーハンドリング".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_read".into()],
+            expected_keywords: vec![],
+            max_iterations: 3,
+            category: TaskCategory::ErrorRecovery,
+        };
+        // エラー報告なし → 失敗
+        let result = mock_result("ファイルの内容は以下の通りです", vec!["file_read"], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits).abs() < f64::EPSILON, "エラーキーワードなしで失敗");
+    }
+
+    #[test]
+    fn test_summarize_long_enough() {
+        let task = BenchmarkTask {
+            id: "summarize_agent_loop".into(),
+            name: "要約".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_read".into()],
+            expected_keywords: vec![],
+            max_iterations: 4,
+            category: TaskCategory::Summarization,
+        };
+        // 50文字以上の回答 → 成功
+        let long_answer = "このファイルはエージェントループの主要な実装を含んでおり、Reflexionパターンを使用して自律的な推論と行動のサイクルを管理しています。";
+        let result = mock_result(long_answer, vec!["file_read"], 2);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "50文字以上で成功");
+    }
+
+    #[test]
+    fn test_summarize_too_short() {
+        let task = BenchmarkTask {
+            id: "summarize_agent_loop".into(),
+            name: "要約".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_read".into()],
+            expected_keywords: vec![],
+            max_iterations: 4,
+            category: TaskCategory::Summarization,
+        };
+        // 短すぎる回答 → 部分スコア
+        let result = mock_result("ループ処理です", vec!["file_read"], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!(score.keyword_hits < 1.0, "短すぎる回答は満点にならない");
+        assert!(score.keyword_hits > 0.0, "空でない回答は0点にならない");
+    }
+
+    #[test]
+    fn test_new_task_categories() {
+        let suite = BenchmarkSuite::default_tasks();
+        let code_gen = suite.tasks.iter().find(|t| t.id == "code_gen_fizzbuzz").unwrap();
+        assert_eq!(code_gen.category, TaskCategory::CodeGeneration);
+        let summary = suite.tasks.iter().find(|t| t.id == "summarize_agent_loop").unwrap();
+        assert_eq!(summary.category, TaskCategory::Summarization);
+    }
+
+    #[test]
+    fn test_fizzbuzz_case_insensitive() {
+        // FizzBuzzのキーワードは大文字小文字を区別しないことを検証
+        let task = BenchmarkTask {
+            id: "code_gen_fizzbuzz".into(),
+            name: "コード生成".into(),
+            input: "test".into(),
+            expected_tools: vec![],
+            expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
+            max_iterations: 3,
+            category: TaskCategory::CodeGeneration,
+        };
+        let result = mock_result("FizzBuzz: Fizz, Buzz, FizzBuzz", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "大文字小文字を区別しない");
     }
 }
