@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
+use crate::runtime::model_router::AdvisorConfig;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;

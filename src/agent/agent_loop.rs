@@ -875,7 +875,7 @@ fn inject_contextual_memories(
             .map(|r| format!("- {}", r.memory.content))
             .collect::<Vec<_>>()
             .join("\n");
-        session.add_message(Message::system(format!("関連する過去の記憶:\n{ctx}")));
+        session.add_message(Message::system(format!("<memory-context>\n関連する過去の記憶:\n{ctx}\n</memory-context>")));
     }
 
     // 類似経験
@@ -900,7 +900,7 @@ fn inject_contextual_memories(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        session.add_message(Message::system(format!("過去の経験:\n{ctx}")));
+        session.add_message(Message::system(format!("<memory-context>\n過去の経験:\n{ctx}\n</memory-context>")));
     }
 
     // 関連スキル
