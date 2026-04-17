@@ -1,3 +1,5 @@
 /target
 .serena/project.local.yml
 .claude/settings.local.json
+.DS_Store
+logs/
