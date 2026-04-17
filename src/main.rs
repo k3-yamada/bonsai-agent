@@ -9,7 +9,7 @@ use bonsai_agent::agent::conversation::Message;
 use bonsai_agent::agent::experiment::{ExperimentLoopConfig, run_experiment_loop};
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
-use bonsai_agent::config::AppConfig;
+use bonsai_agent::config::{AppConfig, ServerBackend};
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::cache::CachedBackend;
 use bonsai_agent::runtime::inference::{LlmBackend, MockLlmBackend};
@@ -118,6 +118,10 @@ fn main() -> Result<()> {
     let app_config = AppConfig::load()?;
     let server_url = if cli.server_url != "http://localhost:8080" {
         cli.server_url.clone()
+    } else if app_config.model.backend == ServerBackend::MlxLm
+        && app_config.model.server_url == "http://localhost:8080"
+    {
+        "http://localhost:8000".to_string()
     } else {
         app_config.model.server_url.clone()
     };
