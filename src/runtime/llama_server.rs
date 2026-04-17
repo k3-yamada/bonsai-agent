@@ -320,15 +320,28 @@ impl LlmBackend for LlamaServerBackend {
         // SSEストリームをパース
         let reader = response.into_body().into_reader();
         match self.parse_sse_stream(reader, on_token, cancel) {
-            Ok((text, prompt_tokens, completion_tokens)) => Ok(GenerateResult {
-                text,
-                usage: TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    duration: start.elapsed(),
-                },
-                model_id: self.model_id.clone(),
-            }),
+            Ok((text, prompt_tokens, completion_tokens)) => {
+                // SSEでusageが返らないサーバー（MLX等）向けの概算フォールバック
+                let final_prompt = if prompt_tokens == 0 {
+                    estimate_tokens_from_messages(messages)
+                } else {
+                    prompt_tokens
+                };
+                let final_completion = if completion_tokens == 0 {
+                    estimate_tokens_from_text(&text)
+                } else {
+                    completion_tokens
+                };
+                Ok(GenerateResult {
+                    text,
+                    usage: TokenUsage {
+                        prompt_tokens: final_prompt,
+                        completion_tokens: final_completion,
+                        duration: start.elapsed(),
+                    },
+                    model_id: self.model_id.clone(),
+                })
+            }
             Err(e) => {
                 // SSEパース失敗時は非ストリーミングでフォールバック
                 let backend_label = if self.mlx_compatible {
@@ -426,6 +439,26 @@ impl Drop for LlamaServerProcess {
 fn find_free_port() -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     Ok(listener.local_addr()?.port())
+}
+
+/// メッセージ列からプロンプトトークン数を概算（文字数ベース）
+///
+/// 日本語混在を考慮し、UTF-8バイト数×0.4で概算。OpenAI tiktoken等より粗いが
+/// SSEでusageが返らないサーバー向けの近似値として十分。
+fn estimate_tokens_from_messages(messages: &[Message]) -> usize {
+    let total_chars: usize = messages.iter().map(|m| m.content.len()).sum();
+    // UTF-8バイト数ベース: 英語≈1byte/char≈0.25tok, 日本語≈3byte/char≈0.5tok
+    // 混在テキストでは0.4が実用的な係数
+    (total_chars as f64 * 0.4).ceil() as usize
+}
+
+/// テキストからcompletionトークン数を概算
+fn estimate_tokens_from_text(text: &str) -> usize {
+    let len = text.len();
+    if len == 0 {
+        return 0;
+    }
+    (len as f64 * 0.4).ceil() as usize
 }
 
 /// ツールスキーマをプロンプト用テキストにフォーマット
@@ -663,6 +696,52 @@ mod tests {
         // 存在しないサーバーでは /health も /v1/models も失敗 → false
         let b = LlamaServerBackend::connect("http://127.0.0.1:19998", "test");
         assert!(!b.is_healthy());
+    }
+
+    #[test]
+    fn test_parse_sse_stream_no_usage_returns_zero() {
+        // SSEにusageフィールドがない場合、0が返る（呼び出し元でフォールバック）
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n\
+                        data: [DONE]\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+        let mut tokens: Vec<String> = Vec::new();
+
+        let (text, prompt, completion) = backend
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .unwrap();
+
+        assert_eq!(text, "Hello world");
+        // usageフィールドがないので0
+        assert_eq!(prompt, 0);
+        assert_eq!(completion, 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_from_messages() {
+        let messages = vec![
+            Message::system("You are an AI"),   // 14 bytes
+            Message::user("Hello"),             // 5 bytes
+        ];
+        let estimate = estimate_tokens_from_messages(&messages);
+        // (14 + 5) * 0.4 = 7.6 → ceil → 8
+        assert_eq!(estimate, 8);
+    }
+
+    #[test]
+    fn test_estimate_tokens_from_text() {
+        assert_eq!(estimate_tokens_from_text(""), 0);
+        // "Hello world" = 11 bytes → 11 * 0.4 = 4.4 → ceil → 5
+        assert_eq!(estimate_tokens_from_text("Hello world"), 5);
+    }
+
+    #[test]
+    fn test_estimate_tokens_japanese() {
+        // 日本語: "こんにちは" = 15 UTF-8 bytes → 15 * 0.4 = 6.0 → 6
+        let estimate = estimate_tokens_from_text("こんにちは");
+        assert_eq!(estimate, 6);
     }
 
 }
