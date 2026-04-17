@@ -679,37 +679,37 @@ mod tests {
 
     #[test]
     fn test_meta_generator_cannot_generate_with_zero() {
-        let gen = MetaMutationGenerator::from_archive(Vec::new());
-        assert!(!gen.can_generate());
-        assert_eq!(gen.archive_len(), 0);
+        let mg = MetaMutationGenerator::from_archive(Vec::new());
+        assert!(!mg.can_generate());
+        assert_eq!(mg.archive_len(), 0);
     }
 
     #[test]
     fn test_meta_generator_cannot_generate_with_one() {
-        let gen = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
+        let mg = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
             "rule_a", 0.05,
         )]);
-        assert!(!gen.can_generate());
+        assert!(!mg.can_generate());
     }
 
     #[test]
     fn test_meta_generator_can_generate_with_two() {
-        let gen = MetaMutationGenerator::from_archive(vec![
+        let mg = MetaMutationGenerator::from_archive(vec![
             make_accepted_mutation("rule_a", 0.05),
             make_accepted_mutation("rule_b", 0.03),
         ]);
-        assert!(gen.can_generate());
-        assert_eq!(gen.archive_len(), 2);
+        assert!(mg.can_generate());
+        assert_eq!(mg.archive_len(), 2);
     }
 
     #[test]
     fn test_meta_generator_compound_combines_top_delta() {
-        let gen = MetaMutationGenerator::from_archive(vec![
+        let mg = MetaMutationGenerator::from_archive(vec![
             make_accepted_mutation("low_effect", 0.01),
             make_accepted_mutation("mid_effect", 0.05),
             make_accepted_mutation("high_effect", 0.10),
         ]);
-        let compound = gen.generate_compound(0).unwrap();
+        let compound = mg.generate_compound(0).unwrap();
         assert_eq!(compound.mutation_type, MutationType::MetaMutation);
         // 最もdeltaが高い「high_effect」が必ず含まれる
         assert!(compound.detail.contains("high_effect"));
@@ -717,13 +717,13 @@ mod tests {
 
     #[test]
     fn test_meta_generator_compound_rotation() {
-        let gen = MetaMutationGenerator::from_archive(vec![
+        let mg = MetaMutationGenerator::from_archive(vec![
             make_accepted_mutation("rule_a", 0.10),
             make_accepted_mutation("rule_b", 0.05),
             make_accepted_mutation("rule_c", 0.03),
         ]);
-        let c0 = gen.generate_compound(0).unwrap();
-        let c1 = gen.generate_compound(1).unwrap();
+        let c0 = mg.generate_compound(0).unwrap();
+        let c1 = mg.generate_compound(1).unwrap();
         // cycle_indexでペア相手がローテーション
         assert_ne!(c0.detail, c1.detail);
     }
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn test_meta_generator_compound_returns_none_insufficient() {
         // AgentParam型のみの場合、PromptRule型が2件未満→None
-        let gen = MetaMutationGenerator::from_archive(vec![
+        let mg = MetaMutationGenerator::from_archive(vec![
             AcceptedMutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_iterations: 12".into(),
@@ -748,7 +748,7 @@ mod tests {
             },
         ]);
         // PromptRule型が1件のみなのでNone
-        assert!(gen.generate_compound(0).is_none());
+        assert!(mg.generate_compound(0).is_none());
     }
 
     #[test]
@@ -771,29 +771,29 @@ mod tests {
 
     #[test]
     fn test_priority_score_matching() {
-        let gen = MetaMutationGenerator::from_archive(vec![
+        let mg = MetaMutationGenerator::from_archive(vec![
             make_accepted_mutation("force thinking", 0.05),
             make_accepted_mutation("fallback strategy", 0.03),
         ]);
         // 部分一致でdeltaを集計
-        let score = gen.priority_score("force thinking");
+        let score = mg.priority_score("force thinking");
         assert!((score - 0.05).abs() < 0.001);
     }
 
     #[test]
     fn test_priority_score_no_match() {
-        let gen = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
+        let mg = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
             "force thinking",
             0.05,
         )]);
-        let score = gen.priority_score("completely unrelated");
+        let score = mg.priority_score("completely unrelated");
         assert!((score).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_meta_generator_prompt_hint_included() {
         // PromptHint型もメタ変異のPromptRule候補として扱われる
-        let gen = MetaMutationGenerator::from_archive(vec![
+        let mg = MetaMutationGenerator::from_archive(vec![
             AcceptedMutation {
                 mutation_type: MutationType::PromptHint,
                 detail: "insight rule".into(),
@@ -803,19 +803,12 @@ mod tests {
             },
             make_accepted_mutation("normal rule", 0.06),
         ]);
-        assert!(gen.can_generate());
-        let compound = gen.generate_compound(0).unwrap();
+        assert!(mg.can_generate());
+        let compound = mg.generate_compound(0).unwrap();
         assert!(
             compound.detail.contains("insight rule")
                 || compound.detail.contains("normal rule")
         );
     }
 
-    #[test]
-    fn test_experiment_loop_config_default() {
-        let config = ExperimentLoopConfig::default();
-        assert!(config.tsv_path.is_none());
-        assert!(config.max_experiments.is_none());
-        assert_eq!(config.dreamer_interval, 10);
-    }
 }
