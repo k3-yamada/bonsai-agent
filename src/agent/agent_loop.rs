@@ -2,7 +2,6 @@ use crate::observability::logger::{log_event, LogLevel};
 use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;
-use crate::agent::compaction::{CompactionConfig, compact_if_needed};
 use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
 use crate::agent::conversation::{Message, ParsedOutput, Session};
 use crate::agent::error_recovery::{
