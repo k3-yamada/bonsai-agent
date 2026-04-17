@@ -16,6 +16,8 @@ pub enum MutationType {
     AgentParam,
     /// Dreamer insightからのヒント追加
     PromptHint,
+    /// Hyperagentsメタ変異: 過去のACCEPT変異を組み合わせた複合変異
+    MetaMutation,
 }
 
 impl MutationType {
@@ -24,6 +26,7 @@ impl MutationType {
             Self::PromptRule => "prompt_rule",
             Self::AgentParam => "agent_param",
             Self::PromptHint => "prompt_hint",
+            Self::MetaMutation => "meta_mutation",
         }
     }
 
@@ -32,9 +35,59 @@ impl MutationType {
             "prompt_rule" => Some(Self::PromptRule),
             "agent_param" => Some(Self::AgentParam),
             "prompt_hint" => Some(Self::PromptHint),
+            "meta_mutation" => Some(Self::MetaMutation),
             _ => None,
         }
     }
+}
+
+/// 過去のACCEPT変異を構造化したアーカイブエントリ
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptedMutation {
+    /// 変異の種類
+    pub mutation_type: MutationType,
+    /// 変異の詳細説明
+    pub detail: String,
+    /// ベースラインからの改善幅
+    pub delta: f64,
+    /// 適用時のベースラインスコア
+    pub baseline_score: f64,
+    /// 記録時刻（Unix epoch秒）
+    pub timestamp: u64,
+}
+
+/// 過去のACCEPT変異アーカイブをDBから読み込み
+pub fn load_accepted_archive(conn: &Connection) -> Result<Vec<AcceptedMutation>> {
+    let mut stmt = conn.prepare(
+        "SELECT mutation_type, mutation_detail, delta, baseline_score, \
+         strftime('%s', created_at) as ts \
+         FROM experiments WHERE accepted = 1 ORDER BY id ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, f64>(2)?,
+            row.get::<_, f64>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut archive = Vec::new();
+    for row in rows {
+        let (mt_str, detail, delta, baseline_score, ts_str) = row?;
+        let mutation_type = MutationType::parse(&mt_str).unwrap_or(MutationType::PromptRule);
+        let timestamp = ts_str.parse::<u64>().unwrap_or(0);
+        archive.push(AcceptedMutation {
+            mutation_type,
+            detail,
+            delta,
+            baseline_score,
+            timestamp,
+        });
+    }
+    Ok(archive)
 }
 
 /// 単一の実験記録
@@ -413,5 +466,70 @@ mod tests {
         let exp = sample_experiment("dup_01", 0.1);
         ExperimentLog::save_to_db(&conn, &exp).unwrap();
         assert!(ExperimentLog::save_to_db(&conn, &exp).is_err());
+    }
+
+    #[test]
+    fn test_mutation_type_meta_mutation_roundtrip() {
+        let mt = MutationType::MetaMutation;
+        assert_eq!(mt.as_str(), "meta_mutation");
+        let parsed = MutationType::parse("meta_mutation").unwrap();
+        assert_eq!(parsed, MutationType::MetaMutation);
+    }
+
+    #[test]
+    fn test_load_accepted_archive_empty() {
+        let conn = setup_test_db();
+        let archive = load_accepted_archive(&conn).unwrap();
+        assert!(archive.is_empty());
+    }
+
+    #[test]
+    fn test_load_accepted_archive_filters_rejected() {
+        let conn = setup_test_db();
+        ExperimentLog::save_to_db(&conn, &sample_experiment("acc_01", 0.1)).unwrap();
+        ExperimentLog::save_to_db(&conn, &sample_experiment("rej_01", -0.05)).unwrap();
+        let archive = load_accepted_archive(&conn).unwrap();
+        assert_eq!(archive.len(), 1, "ACCEPTのみアーカイブされる");
+        assert!(archive[0].delta > 0.0);
+    }
+
+    #[test]
+    fn test_load_accepted_archive_preserves_order() {
+        let conn = setup_test_db();
+        ExperimentLog::save_to_db(&conn, &sample_experiment("a_first", 0.05)).unwrap();
+        ExperimentLog::save_to_db(&conn, &sample_experiment("b_second", 0.2)).unwrap();
+        let archive = load_accepted_archive(&conn).unwrap();
+        assert_eq!(archive.len(), 2);
+        assert!(archive[0].delta < archive[1].delta);
+    }
+
+    #[test]
+    fn test_load_accepted_archive_fields() {
+        let conn = setup_test_db();
+        let mut exp = sample_experiment("field_test", 0.15);
+        exp.mutation_type = MutationType::PromptRule;
+        exp.mutation_detail = "test mutation detail".into();
+        exp.baseline_score = 0.75;
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let archive = load_accepted_archive(&conn).unwrap();
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].mutation_type, MutationType::PromptRule);
+        assert_eq!(archive[0].detail, "test mutation detail");
+        assert!((archive[0].delta - 0.15).abs() < 0.001);
+        assert!((archive[0].baseline_score - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_accepted_mutation_struct_clone() {
+        let am = AcceptedMutation {
+            mutation_type: MutationType::MetaMutation,
+            detail: "compound test".into(),
+            delta: 0.05,
+            baseline_score: 0.8,
+            timestamp: 1000,
+        };
+        let cloned = am.clone();
+        assert_eq!(cloned.mutation_type, MutationType::MetaMutation);
+        assert_eq!(cloned.detail, "compound test");
     }
 }

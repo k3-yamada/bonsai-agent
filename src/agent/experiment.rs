@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use crate::agent::agent_loop::AgentConfig;
 use crate::agent::benchmark::{BenchmarkSuite, MultiRunConfig};
-use crate::agent::experiment_log::{Experiment, ExperimentLog, MutationType};
+use crate::agent::experiment_log::{
+    AcceptedMutation, Experiment, ExperimentLog, MutationType, load_accepted_archive,
+};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
@@ -32,6 +34,8 @@ pub enum MutationAction {
     SetMaxRetries(usize),
     /// 動的ツール選択数を変更
     SetMaxToolsSelected(usize),
+    /// 複数のプロンプトルールを同時適用（メタ変異用）
+    CompoundPromptRules(Vec<String>),
 }
 
 /// 仮説生成器: ルールベースで次の変異候補を選択
@@ -176,6 +180,12 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         MutationAction::SetMaxToolsSelected(n) => {
             config.max_tools_selected = *n;
         }
+        MutationAction::CompoundPromptRules(rules) => {
+            for rule in rules {
+                config.system_prompt.push('\n');
+                config.system_prompt.push_str(rule);
+            }
+        }
     }
 
     config
@@ -195,6 +205,153 @@ pub fn config_snapshot(config: &AgentConfig) -> HashMap<String, String> {
             config.system_prompt.len().to_string(),
         ),
     ])
+}
+
+/// Hyperagentsメタ変異生成器: 過去のACCEPT変異を組み合わせた複合変異を生成
+pub struct MetaMutationGenerator {
+    /// ACCEPTされた変異アーカイブ
+    archive: Vec<AcceptedMutation>,
+}
+
+impl MetaMutationGenerator {
+    /// DBからACCEPTアーカイブを読み込んで初期化
+    pub fn from_db(conn: &rusqlite::Connection) -> Result<Self> {
+        let archive = load_accepted_archive(conn)?;
+        Ok(Self { archive })
+    }
+
+    /// アーカイブを直接指定して初期化（テスト用）
+    pub fn from_archive(archive: Vec<AcceptedMutation>) -> Self {
+        Self { archive }
+    }
+
+    /// アーカイブ内のACCEPT変異数
+    pub fn archive_len(&self) -> usize {
+        self.archive.len()
+    }
+
+    /// メタ変異が生成可能か（PromptRule/PromptHint型が2件以上必要）
+    pub fn can_generate(&self) -> bool {
+        self.prompt_rule_mutations().len() >= 2
+    }
+
+    /// PromptRule型のACCEPT変異のみ抽出
+    fn prompt_rule_mutations(&self) -> Vec<&AcceptedMutation> {
+        self.archive
+            .iter()
+            .filter(|m| {
+                m.mutation_type == MutationType::PromptRule
+                    || m.mutation_type == MutationType::PromptHint
+            })
+            .collect()
+    }
+
+    /// 複合メタ変異を生成: delta上位のPromptRule変異を組み合わせる
+    /// cycle_indexでペア選択をローテーション
+    pub fn generate_compound(&self, cycle_index: usize) -> Option<Mutation> {
+        let mut candidates = self.prompt_rule_mutations();
+        if candidates.len() < 2 {
+            return None;
+        }
+
+        // delta降順ソート（効果の高い変異を優先）
+        candidates.sort_by(|a, b| {
+            b.delta
+                .partial_cmp(&a.delta)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // cycle_indexに基づきペア選択（最良+ローテーション）
+        let first = 0;
+        let second = 1 + (cycle_index % (candidates.len() - 1));
+
+        let rules: Vec<String> = [candidates[first], candidates[second]]
+            .iter()
+            .map(|m| m.detail.clone())
+            .collect();
+
+        let detail = format!(
+            "meta compound: [{}] + [{}] (delta: {:+.4}, {:+.4})",
+            candidates[first].detail,
+            candidates[second].detail,
+            candidates[first].delta,
+            candidates[second].delta,
+        );
+
+        Some(Mutation {
+            mutation_type: MutationType::MetaMutation,
+            detail,
+            apply: MutationAction::CompoundPromptRules(rules),
+        })
+    }
+
+    /// delta加重の変異優先度スコアを計算（変異選択の優先順位付けに使用）
+    pub fn priority_score(&self, mutation_detail: &str) -> f64 {
+        self.archive
+            .iter()
+            .filter(|m| {
+                mutation_detail.contains(&m.detail) || m.detail.contains(mutation_detail)
+            })
+            .map(|m| m.delta)
+            .sum::<f64>()
+    }
+}
+
+/// 少数タスクで変異の効果を事前推定する（フルベンチマークの代替）
+/// タスク数の半分（最大4タスク）で1回実行し、delta推定値を返す
+pub fn estimate_mutation_effect(
+    base_config: &AgentConfig,
+    mutation: &Mutation,
+    backend: &dyn LlmBackend,
+    tools: &ToolRegistry,
+    path_guard: &PathGuard,
+    cancel: &CancellationToken,
+) -> Result<f64> {
+    let suite = BenchmarkSuite::default_tasks();
+    // 推定用: タスク半分（最大4件）のみで1回実行
+    let sample_size = (suite.tasks.len() / 2).min(4);
+    let sample_tasks: Vec<_> = suite.tasks.into_iter().take(sample_size).collect();
+    let sample_suite = BenchmarkSuite { tasks: sample_tasks };
+
+    let quick_multi = MultiRunConfig {
+        k: 1,
+        jitter_seed: false,
+    };
+    let pass_threshold = 0.5;
+
+    // ベースライン（サンプルタスクのみ）
+    let baseline = sample_suite.run_k(
+        base_config,
+        backend,
+        tools,
+        path_guard,
+        cancel,
+        &quick_multi,
+        pass_threshold,
+    )?;
+
+    // 変異適用後（サンプルタスクのみ）
+    let modified_config = apply_mutation(base_config, mutation);
+    let experiment = sample_suite.run_k(
+        &modified_config,
+        backend,
+        tools,
+        path_guard,
+        cancel,
+        &quick_multi,
+        pass_threshold,
+    )?;
+
+    let delta = experiment.composite_score() - baseline.composite_score();
+    log_event(
+        LogLevel::Info,
+        "meta_mutation",
+        &format!(
+            "effect estimate: {} -> delta={:+.4} ({} tasks, k=1)",
+            mutation.detail, delta, sample_size,
+        ),
+    );
+    Ok(delta)
 }
 
 /// 実験ループ設定
@@ -244,8 +401,24 @@ pub fn run_experiment_loop(
         baseline.duration_secs
     );
 
+    // メタ変異生成器の初期化（過去のACCEPTアーカイブから）
+    let mut meta_gen = MetaMutationGenerator::from_db(store.conn()).unwrap_or_else(|_| {
+        MetaMutationGenerator::from_archive(Vec::new())
+    });
+    if meta_gen.archive_len() > 0 {
+        log_event(
+            LogLevel::Info,
+            "lab",
+            &format!(
+                "meta mutation generator: {} accepted mutations in archive",
+                meta_gen.archive_len()
+            ),
+        );
+    }
+
     // 2. 実験ループ
     let mut experiment_count = 0;
+    let mut meta_cycle = 0;
     loop {
         if cancel.is_cancelled() {
             log_event(LogLevel::Warn, "lab", "キャンセルされました");
@@ -259,8 +432,16 @@ pub fn run_experiment_loop(
             break;
         }
 
-        // a. 仮説生成
-        let mutation = generator.next_mutation(experiment_count);
+        // a. 仮説生成（5回に1回メタ変異を試行）
+        let mutation = if experiment_count % 5 == 4
+            && meta_gen.can_generate()
+            && let Some(meta_mutation) = meta_gen.generate_compound(meta_cycle)
+        {
+            meta_cycle += 1;
+            meta_mutation
+        } else {
+            generator.next_mutation(experiment_count)
+        };
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -298,9 +479,12 @@ pub fn run_experiment_loop(
             if exp.accepted { "ACCEPT" } else { "REJECT" }
         );
 
-        // e. accept/reject
+        // e. accept/reject + メタ変異アーカイブ更新
         if exp.accepted {
             baseline = result;
+            // 新しいACCEPTをメタ変異アーカイブに追加
+            meta_gen =
+                MetaMutationGenerator::from_db(store.conn()).unwrap_or(meta_gen);
         }
 
         // f. ログ記録
@@ -479,5 +663,159 @@ mod tests {
         let _ = apply_mutation(&config, &mutation);
         // 元のconfigは変更されていない
         assert_eq!(config.system_prompt, original_prompt);
+    }
+
+    // --- メタ変異テスト ---
+
+    fn make_accepted_mutation(detail: &str, delta: f64) -> AcceptedMutation {
+        AcceptedMutation {
+            mutation_type: MutationType::PromptRule,
+            detail: detail.into(),
+            delta,
+            baseline_score: 0.8,
+            timestamp: 1000,
+        }
+    }
+
+    #[test]
+    fn test_meta_generator_cannot_generate_with_zero() {
+        let gen = MetaMutationGenerator::from_archive(Vec::new());
+        assert!(!gen.can_generate());
+        assert_eq!(gen.archive_len(), 0);
+    }
+
+    #[test]
+    fn test_meta_generator_cannot_generate_with_one() {
+        let gen = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
+            "rule_a", 0.05,
+        )]);
+        assert!(!gen.can_generate());
+    }
+
+    #[test]
+    fn test_meta_generator_can_generate_with_two() {
+        let gen = MetaMutationGenerator::from_archive(vec![
+            make_accepted_mutation("rule_a", 0.05),
+            make_accepted_mutation("rule_b", 0.03),
+        ]);
+        assert!(gen.can_generate());
+        assert_eq!(gen.archive_len(), 2);
+    }
+
+    #[test]
+    fn test_meta_generator_compound_combines_top_delta() {
+        let gen = MetaMutationGenerator::from_archive(vec![
+            make_accepted_mutation("low_effect", 0.01),
+            make_accepted_mutation("mid_effect", 0.05),
+            make_accepted_mutation("high_effect", 0.10),
+        ]);
+        let compound = gen.generate_compound(0).unwrap();
+        assert_eq!(compound.mutation_type, MutationType::MetaMutation);
+        // 最もdeltaが高い「high_effect」が必ず含まれる
+        assert!(compound.detail.contains("high_effect"));
+    }
+
+    #[test]
+    fn test_meta_generator_compound_rotation() {
+        let gen = MetaMutationGenerator::from_archive(vec![
+            make_accepted_mutation("rule_a", 0.10),
+            make_accepted_mutation("rule_b", 0.05),
+            make_accepted_mutation("rule_c", 0.03),
+        ]);
+        let c0 = gen.generate_compound(0).unwrap();
+        let c1 = gen.generate_compound(1).unwrap();
+        // cycle_indexでペア相手がローテーション
+        assert_ne!(c0.detail, c1.detail);
+    }
+
+    #[test]
+    fn test_meta_generator_compound_returns_none_insufficient() {
+        // AgentParam型のみの場合、PromptRule型が2件未満→None
+        let gen = MetaMutationGenerator::from_archive(vec![
+            AcceptedMutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_iterations: 12".into(),
+                delta: 0.05,
+                baseline_score: 0.8,
+                timestamp: 1000,
+            },
+            AcceptedMutation {
+                mutation_type: MutationType::PromptRule,
+                detail: "single rule".into(),
+                delta: 0.03,
+                baseline_score: 0.8,
+                timestamp: 1001,
+            },
+        ]);
+        // PromptRule型が1件のみなのでNone
+        assert!(gen.generate_compound(0).is_none());
+    }
+
+    #[test]
+    fn test_apply_mutation_compound_rules() {
+        let config = make_config();
+        let mutation = Mutation {
+            mutation_type: MutationType::MetaMutation,
+            detail: "compound test".into(),
+            apply: MutationAction::CompoundPromptRules(vec![
+                "rule_x".into(),
+                "rule_y".into(),
+            ]),
+        };
+        let modified = apply_mutation(&config, &mutation);
+        assert!(modified.system_prompt.contains("rule_x"));
+        assert!(modified.system_prompt.contains("rule_y"));
+        // 元のプロンプトも保持
+        assert!(modified.system_prompt.contains("test prompt"));
+    }
+
+    #[test]
+    fn test_priority_score_matching() {
+        let gen = MetaMutationGenerator::from_archive(vec![
+            make_accepted_mutation("force thinking", 0.05),
+            make_accepted_mutation("fallback strategy", 0.03),
+        ]);
+        // 部分一致でdeltaを集計
+        let score = gen.priority_score("force thinking");
+        assert!((score - 0.05).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_priority_score_no_match() {
+        let gen = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
+            "force thinking",
+            0.05,
+        )]);
+        let score = gen.priority_score("completely unrelated");
+        assert!((score).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_meta_generator_prompt_hint_included() {
+        // PromptHint型もメタ変異のPromptRule候補として扱われる
+        let gen = MetaMutationGenerator::from_archive(vec![
+            AcceptedMutation {
+                mutation_type: MutationType::PromptHint,
+                detail: "insight rule".into(),
+                delta: 0.04,
+                baseline_score: 0.8,
+                timestamp: 1000,
+            },
+            make_accepted_mutation("normal rule", 0.06),
+        ]);
+        assert!(gen.can_generate());
+        let compound = gen.generate_compound(0).unwrap();
+        assert!(
+            compound.detail.contains("insight rule")
+                || compound.detail.contains("normal rule")
+        );
+    }
+
+    #[test]
+    fn test_experiment_loop_config_default() {
+        let config = ExperimentLoopConfig::default();
+        assert!(config.tsv_path.is_none());
+        assert!(config.max_experiments.is_none());
+        assert_eq!(config.dreamer_interval, 10);
     }
 }
