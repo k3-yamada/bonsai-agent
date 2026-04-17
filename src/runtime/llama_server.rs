@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -132,7 +133,110 @@ impl LlamaServerBackend {
             "min_p": self.inference.min_p,
             "max_tokens": self.inference.max_tokens,
             "repeat_penalty": self.inference.repeat_penalty,
-            "stream": false,
+            "stream": true,
+        })
+    }
+
+    /// SSEストリームをパースし、トークンごとにon_tokenを呼ぶ
+    ///
+    /// 各行は `data: {...}` 形式。`data: [DONE]` で終了。
+    /// usage情報は最後のチャンクから取得する。
+    fn parse_sse_stream(
+        &self,
+        reader: impl std::io::Read,
+        on_token: &mut dyn FnMut(&str),
+        cancel: &CancellationToken,
+    ) -> Result<(String, usize, usize)> {
+        let buf_reader = std::io::BufReader::new(reader);
+        let mut full_text = String::new();
+        let mut prompt_tokens: usize = 0;
+        let mut completion_tokens: usize = 0;
+
+        for line_result in buf_reader.lines() {
+            if cancel.is_cancelled() {
+                anyhow::bail!("ストリーミング中にキャンセルされました");
+            }
+
+            let line = line_result?;
+
+            // SSEでは空行がイベント区切り — スキップ
+            if line.is_empty() {
+                continue;
+            }
+
+            // "data: " プレフィックスを除去
+            let Some(data) = line.strip_prefix("data: ") else {
+                // コメント行やその他のSSEフィールドはスキップ
+                continue;
+            };
+
+            // 終了シグナル
+            if data == "[DONE]" {
+                break;
+            }
+
+            // JSONパース
+            let chunk: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue, // パース失敗は無視（不完全なチャンク等）
+            };
+
+            // delta.contentからトークンを抽出
+            if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str() {
+                if !content.is_empty() {
+                    on_token(content);
+                    full_text.push_str(content);
+                }
+            }
+
+            // usage情報（最後のチャンクに含まれる場合）
+            if let Some(usage) = chunk.get("usage") {
+                prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0) as usize;
+                completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0) as usize;
+            }
+        }
+
+        Ok((full_text, prompt_tokens, completion_tokens))
+    }
+
+    /// 非ストリーミングモードでフォールバック生成
+    fn generate_non_streaming(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        on_token: &mut dyn FnMut(&str),
+        start: Instant,
+    ) -> Result<GenerateResult> {
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let mut body = self.build_request_body(messages, tools);
+        // ストリーミングを無効化してフォールバック
+        body["stream"] = serde_json::json!(false);
+
+        let response: serde_json::Value = ureq::post(&url)
+            .header("Content-Type", "application/json")
+            .send_json(&body)?
+            .body_mut()
+            .read_json()?;
+
+        let text = response["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        let prompt_tokens = response["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as usize;
+        let completion_tokens =
+            response["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize;
+
+        on_token(&text);
+
+        Ok(GenerateResult {
+            text,
+            usage: TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                duration: start.elapsed(),
+            },
+            model_id: self.model_id.clone(),
         })
     }
 }
@@ -158,33 +262,36 @@ impl LlmBackend for LlamaServerBackend {
 
         let start = Instant::now();
 
-        let response: serde_json::Value = ureq::post(&url)
+        // ストリーミングリクエスト送信
+        let response = match ureq::post(&url)
             .header("Content-Type", "application/json")
-            .send_json(&body)?
-            .body_mut()
-            .read_json()?;
+            .send_json(&body)
+        {
+            Ok(resp) => resp,
+            Err(_e) => {
+                // ストリーミングリクエスト失敗時は非ストリーミングでフォールバック
+                return self.generate_non_streaming(messages, tools, on_token, start);
+            }
+        };
 
-        let text = response["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
-        let prompt_tokens = response["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as usize;
-        let completion_tokens =
-            response["usage"]["completion_tokens"].as_u64().unwrap_or(0) as usize;
-
-        // ストリーミングコールバック（非ストリームモードでは全文を一度に送信）
-        on_token(&text);
-
-        Ok(GenerateResult {
-            text,
-            usage: TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                duration: start.elapsed(),
-            },
-            model_id: self.model_id.clone(),
-        })
+        // SSEストリームをパース
+        let reader = response.into_body().into_reader();
+        match self.parse_sse_stream(reader, on_token, cancel) {
+            Ok((text, prompt_tokens, completion_tokens)) => Ok(GenerateResult {
+                text,
+                usage: TokenUsage {
+                    prompt_tokens,
+                    completion_tokens,
+                    duration: start.elapsed(),
+                },
+                model_id: self.model_id.clone(),
+            }),
+            Err(e) => {
+                // SSEパース失敗時は非ストリーミングでフォールバック
+                eprintln!("[llama-server] SSEパース失敗、非ストリーミングにフォールバック: {e}");
+                self.generate_non_streaming(messages, tools, on_token, start)
+            }
+        }
     }
 }
 
@@ -334,6 +441,87 @@ mod tests {
         let msgs = body["messages"].as_array().unwrap();
         // ツールスキーマがシステムメッセージとして追加される
         assert!(msgs.len() >= 2);
+    }
+
+    #[test]
+    fn test_build_request_body_stream_enabled() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let messages = vec![Message::user("test")];
+        let body = backend.build_request_body(&messages, &[]);
+        // ストリーミングが有効であること
+        assert_eq!(body["stream"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_parse_sse_stream_basic() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3}}\n\n\
+                        data: [DONE]\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+        let mut tokens: Vec<String> = Vec::new();
+
+        let (text, prompt, completion) = backend
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .unwrap();
+
+        assert_eq!(text, "Hello world!");
+        assert_eq!(tokens, vec!["Hello", " world", "!"]);
+        assert_eq!(prompt, 10);
+        assert_eq!(completion, 3);
+    }
+
+    #[test]
+    fn test_parse_sse_stream_cancel() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // 事前にキャンセル
+
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+                        data: [DONE]\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+
+        let result = backend.parse_sse_stream(reader, &mut |_| {}, &cancel);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_sse_stream_empty_content() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        // role deltaのみ（content無し）のチャンクをスキップ
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n\
+                        data: [DONE]\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+        let mut tokens: Vec<String> = Vec::new();
+
+        let (text, _, _) = backend
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .unwrap();
+
+        assert_eq!(text, "OK");
+        assert_eq!(tokens, vec!["OK"]);
+    }
+
+    #[test]
+    fn test_parse_sse_stream_malformed_json() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        // 不正JSONは無視される
+        let sse_data = "data: {invalid json}\n\n\
+                        data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\n\
+                        data: [DONE]\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+        let mut tokens: Vec<String> = Vec::new();
+
+        let (text, _, _) = backend
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .unwrap();
+
+        assert_eq!(text, "OK");
     }
 
     #[test]
