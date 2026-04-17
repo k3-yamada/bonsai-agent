@@ -146,9 +146,27 @@ pub struct McpConfig {
     pub servers: Vec<crate::tools::mcp_client::McpServerConfig>,
 }
 
+/// 推論サーバーの種別
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerBackend {
+    /// llama-server (llama.cpp, GGUF)
+    LlamaServer,
+    /// mlx-lm server (MLX, Apple Silicon最適化)
+    MlxLm,
+}
+
+impl Default for ServerBackend {
+    fn default() -> Self {
+        Self::LlamaServer
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    /// 推論バックエンド（llama-server or mlx-lm）
+    pub backend: ServerBackend,
     pub server_url: String,
     /// モデルID（例: "bonsai-8b", "ternary-bonsai-8b", "ternary-bonsai-4b"）
     pub model_id: String,
@@ -186,6 +204,7 @@ pub struct MemoryConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            backend: ServerBackend::default(),
             server_url: "http://localhost:8080".to_string(),
             model_id: "bonsai-8b".to_string(),
             context_length: 16384,
@@ -435,5 +454,25 @@ dreamer_interval = 5
         // 単に呼び出しが panic しないことを確認
         let _ = AdvisorSettings::detect_api_key(None);
         let _ = AdvisorSettings::detect_api_key(Some("https://example.com/v1/chat/completions"));
+    }
+
+    #[test]
+    fn test_model_config_mlx_backend() {
+        let toml_str = r#"
+[model]
+backend = "mlx-lm"
+server_url = "http://localhost:8000"
+model_id = "ternary-bonsai-8b"
+context_length = 65536
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.backend, ServerBackend::MlxLm);
+        assert_eq!(config.model.server_url, "http://localhost:8000");
+    }
+
+    #[test]
+    fn test_model_config_default_backend_is_llama() {
+        let config = AppConfig::default();
+        assert_eq!(config.model.backend, ServerBackend::LlamaServer);
     }
 }
