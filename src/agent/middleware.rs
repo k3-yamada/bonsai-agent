@@ -251,7 +251,7 @@ pub unsafe fn build_default_chain(
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(unsafe { AuditMiddleware::new(session_id.to_string(), store) }));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
-    chain.add(Box::new(StallMiddleware::default()));
+    // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
     chain.add(Box::new(CompactionMiddleware::default()));
     chain.add(Box::new(TokenBudgetMiddleware::default()));
     chain
@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn test_build_default_chain_has_5_middlewares() {
         let chain = unsafe { build_default_chain("test", None) };
-        assert_eq!(chain.len(), 5);
-        assert_eq!(chain.names(), vec!["audit", "tool_tracking", "stall", "compaction", "token_budget"]);
+        assert_eq!(chain.len(), 4);
+        assert_eq!(chain.names(), vec!["audit", "tool_tracking", "compaction", "token_budget"]);
     }
 
     #[test]

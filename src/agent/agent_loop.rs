@@ -675,7 +675,11 @@ fn handle_outcome(
 ) -> OutcomeAction {
     match outcome {
         StepOutcome::FinalAnswer(answer) => {
-            log_step_outcome(store, session, iteration, "final_answer", duration_ms, &[], 0);
+            let mw_result = MwStepResult {
+                outcome_type: "final_answer", iteration, duration_ms,
+                tools_used: vec![], tools_succeeded: true, output_hash: 0, consecutive_failures: 0,
+            };
+            state.middleware_chain.run_after_step(session, &mw_result);
             if inject_verification_step(session, &mut state.advisor, task_context, &answer, iteration, max_iterations, store) {
                 return OutcomeAction::Continue;
             }
@@ -688,7 +692,12 @@ fn handle_outcome(
         }
         StepOutcome::Aborted(reason) => {
             state.consecutive_failures += 1;
-            log_step_outcome(store, session, iteration, "aborted", duration_ms, &[], state.consecutive_failures);
+            let mw_result = MwStepResult {
+                outcome_type: "aborted", iteration, duration_ms,
+                tools_used: vec![], tools_succeeded: false, output_hash: 0,
+                consecutive_failures: state.consecutive_failures,
+            };
+            state.middleware_chain.run_after_step(session, &mw_result);
             record_abort(store, session, task_context, &reason);
             OutcomeAction::Return(AgentLoopResult {
                 answer: format!("[中断] {reason}"),

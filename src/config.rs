@@ -503,4 +503,33 @@ context_length = 65536
         let config = AppConfig::default();
         assert_eq!(config.model.backend, ServerBackend::LlamaServer);
     }
+
+
+    #[test]
+    fn test_inference_params_default() {
+        let params = InferenceParams::default();
+        assert!((params.temperature - 0.5).abs() < f64::EPSILON);
+        assert_eq!(params.top_k, 20);
+        assert_eq!(params.max_tokens, 1024);
+    }
+
+    #[test]
+    fn test_inference_params_from_toml() {
+        let toml_str = r#"
+[model]
+model_id = "ternary-bonsai-8b"
+
+[model.inference]
+temperature = 0.3
+top_k = 10
+max_tokens = 2048
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!((config.model.inference.temperature - 0.3).abs() < f64::EPSILON);
+        assert_eq!(config.model.inference.top_k, 10);
+        assert_eq!(config.model.inference.max_tokens, 2048);
+        // 未指定はデフォルト
+        assert!((config.model.inference.top_p - 0.85).abs() < f64::EPSILON);
+    }
+
 }
