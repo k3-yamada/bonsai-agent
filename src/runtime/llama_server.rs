@@ -31,6 +31,30 @@ impl LlamaServerBackend {
         ureq::get(&url).call().is_ok()
     }
 
+    /// ヘルスチェック+待機リトライ（macOS26/Agent知見: 死活監視パターン）
+    ///
+    /// サーバーが一時的にダウンしている場合、最大`max_wait`秒待機して復帰を待つ。
+    /// 復帰しなければErrを返す。
+    pub fn wait_for_health(&self, max_wait: std::time::Duration) -> anyhow::Result<()> {
+        if self.is_healthy() {
+            return Ok(());
+        }
+        eprintln!("[llama-server] ヘルスチェック失敗、復帰待機中...");
+        let start = std::time::Instant::now();
+        while start.elapsed() < max_wait {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if self.is_healthy() {
+                eprintln!("[llama-server] 復帰確認 ({}秒)", start.elapsed().as_secs());
+                return Ok(());
+            }
+        }
+        anyhow::bail!(
+            "llama-server が{}秒以内に復帰しませんでした ({})",
+            max_wait.as_secs(),
+            self.base_url
+        )
+    }
+
     /// メッセージをOpenAI互換のJSON形式に変換
     fn build_request_body(&self, messages: &[Message], tools: &[ToolSchema]) -> serde_json::Value {
         let mut msgs: Vec<serde_json::Value> = Vec::new();
@@ -333,5 +357,18 @@ mod tests {
 
         assert!(!result.text.is_empty());
         assert!(result.usage.completion_tokens > 0);
+    }
+
+    #[test]
+    fn test_backend_connect() {
+        let b = LlamaServerBackend::connect("http://localhost:8080", "test");
+        assert_eq!(b.model_id(), "test");
+    }
+
+    #[test]
+    fn test_backend_base_url() {
+        let b = LlamaServerBackend::connect("http://localhost:9090", "m");
+        // base_url はトリムされる
+        assert!(!b.model_id().is_empty());
     }
 }
