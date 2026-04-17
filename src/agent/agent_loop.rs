@@ -3,6 +3,7 @@ use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::compaction::{CompactionConfig, compact_if_needed};
+use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
 use crate::agent::conversation::{Message, ParsedOutput, Session};
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
@@ -123,6 +124,8 @@ pub struct LoopState {
     pub iteration: usize,
     /// トークン予算追跡（diminishing returns検出用、macOS26/Agent知見）
     pub token_budget: TokenBudgetTracker,
+    /// ミドルウェアチェーン（DeerFlow知見: 5段パイプライン）
+    pub middleware_chain: MiddlewareChain,
 }
 
 impl LoopState {
@@ -136,6 +139,7 @@ impl LoopState {
             consecutive_failures: 0,
             iteration: 0,
             token_budget: TokenBudgetTracker::default(),
+            middleware_chain: MiddlewareChain::default(),
         }
     }
 }
@@ -579,6 +583,8 @@ pub fn run_agent_loop_with_session(
     }
 
     let mut state = LoopState::new(config.advisor.clone());
+    // ミドルウェアチェーン構築（DeerFlow知見: 5段パイプライン）
+    state.middleware_chain = unsafe { crate::agent::middleware::build_default_chain(&session.id, store) };
 
     let ctx = StepContext {
         backend,
@@ -698,17 +704,22 @@ fn handle_outcome(
             } else {
                 state.consecutive_failures = 0;
             }
-            log_step_outcome(store, session, iteration, "continue", duration_ms, &step_tools, state.consecutive_failures);
-            state.all_tools.extend(step_tools);
+            // ミドルウェアチェーンでafter_step処理（Audit/ToolTrack/Stall/Compact/TokenBudget）
             let output_hash = compute_output_hash(session);
+            let mw_result = MwStepResult {
+                outcome_type: "continue",
+                iteration,
+                duration_ms,
+                tools_used: step_tools.clone(),
+                tools_succeeded,
+                output_hash,
+                consecutive_failures: state.consecutive_failures,
+            };
+            state.middleware_chain.run_after_step(session, &mw_result);
+            // ツール追跡はミドルウェア外で保持（ReturnでのAgentLoopResult構築に必要）
+            state.all_tools.extend(step_tools);
+            // Advisor連携の停滞検出（ミドルウェアのStallとは別に、Advisor呼び出しが必要）
             inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, task_context, tools_succeeded, output_hash, store);
-            let (lv, _offloaded) = compact_if_needed(
-                &mut session.messages,
-                &CompactionConfig::default(),
-            );
-            if lv > 0 {
-                log_event(LogLevel::Debug, "compact", &format!("level {lv} applied (iter {iteration})"));
-            }
             OutcomeAction::Continue
         }
     }

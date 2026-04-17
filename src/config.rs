@@ -147,6 +147,31 @@ pub struct McpConfig {
 }
 
 /// 推論サーバーの種別
+/// 推論パラメータ（config.toml [model.inference] セクション）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InferenceParams {
+    pub temperature: f64,
+    pub top_p: f64,
+    pub top_k: u32,
+    pub min_p: f64,
+    pub max_tokens: u32,
+    pub repeat_penalty: f64,
+}
+
+impl Default for InferenceParams {
+    fn default() -> Self {
+        Self {
+            temperature: 0.5,
+            top_p: 0.85,
+            top_k: 20,
+            min_p: 0.05,
+            max_tokens: 1024,
+            repeat_penalty: 1.15,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerBackend {
@@ -171,6 +196,9 @@ pub struct ModelConfig {
     pub kv_cache_type: String,
     /// GGUFファイルパス（llama-server起動時に使用、Noneならconnect専用）
     pub gguf_path: Option<String>,
+    /// 推論パラメータ（temperature等）
+    #[serde(default)]
+    pub inference: InferenceParams,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +235,7 @@ impl Default for ModelConfig {
             context_length: 16384,
             kv_cache_type: "q8_0".to_string(),
             gguf_path: None,
+            inference: InferenceParams::default(),
         }
     }
 }

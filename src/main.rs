@@ -248,7 +248,7 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
                 .collect(),
         ))
     } else {
-        let b = LlamaServerBackend::connect(&ctx.server_url, &ctx.app_config.model.model_id);
+        let b = LlamaServerBackend::connect_with_params(&ctx.server_url, &ctx.app_config.model.model_id, ctx.app_config.model.inference.clone());
         if !b.is_healthy() {
             eprintln!(
                 "エラー: llama-server ({}) に接続できません。",
@@ -272,7 +272,7 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
             (0..10000).map(|_| "1024".to_string()).collect(),
         ))
     } else {
-        let b = LlamaServerBackend::connect(&ctx.server_url, &ctx.app_config.model.model_id);
+        let b = LlamaServerBackend::connect_with_params(&ctx.server_url, &ctx.app_config.model.model_id, ctx.app_config.model.inference.clone());
         if !b.is_healthy() {
             eprintln!(
                 "エラー: llama-server ({}) に接続できません。",

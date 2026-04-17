@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::agent::conversation::Message;
 use crate::cancel::CancellationToken;
+use crate::config::InferenceParams;
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 use crate::tools::ToolSchema;
 
@@ -14,6 +15,7 @@ use crate::tools::ToolSchema;
 pub struct LlamaServerBackend {
     base_url: String,
     model_id: String,
+    inference: InferenceParams,
 }
 
 impl LlamaServerBackend {
@@ -22,6 +24,16 @@ impl LlamaServerBackend {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model_id: model_id.to_string(),
+            inference: InferenceParams::default(),
+        }
+    }
+
+    /// 推論パラメータ付きで接続
+    pub fn connect_with_params(base_url: &str, model_id: &str, inference: InferenceParams) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model_id: model_id.to_string(),
+            inference,
         }
     }
 
@@ -114,12 +126,12 @@ impl LlamaServerBackend {
 
         serde_json::json!({
             "messages": msgs,
-            "temperature": 0.5,
-            "top_k": 20,
-            "top_p": 0.85,
-            "min_p": 0.05,
-            "max_tokens": 1024,
-            "repeat_penalty": 1.15,
+            "temperature": self.inference.temperature,
+            "top_k": self.inference.top_k,
+            "top_p": self.inference.top_p,
+            "min_p": self.inference.min_p,
+            "max_tokens": self.inference.max_tokens,
+            "repeat_penalty": self.inference.repeat_penalty,
             "stream": false,
         })
     }
