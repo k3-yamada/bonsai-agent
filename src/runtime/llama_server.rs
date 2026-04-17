@@ -182,11 +182,11 @@ impl LlamaServerBackend {
             };
 
             // delta.contentからトークンを抽出
-            if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str() {
-                if !content.is_empty() {
-                    on_token(content);
-                    full_text.push_str(content);
-                }
+            if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str()
+                && !content.is_empty()
+            {
+                on_token(content);
+                full_text.push_str(content);
             }
 
             // usage情報（最後のチャンクに含まれる場合）
