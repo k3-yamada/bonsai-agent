@@ -221,6 +221,76 @@ impl Default for CircuitBreaker {
     }
 }
 
+/// ファイル単位スタック段階エスカレーション（macOS26/Agent StuckGuard パターン）
+///
+/// 同一ファイルへの編集失敗をファイル単位で追跡し、段階的に回復指示を強化:
+/// - 3回失敗: 「file_readで再読込→write_fileで全上書き」とnudge
+/// - 6回失敗: 「このファイルを諦めて次に進め」と指示
+pub struct FileStuckGuard {
+    failure_counts: HashMap<String, usize>,
+    nudge_threshold: usize,
+    give_up_threshold: usize,
+}
+
+impl FileStuckGuard {
+    pub fn new(nudge: usize, give_up: usize) -> Self {
+        Self {
+            failure_counts: HashMap::new(),
+            nudge_threshold: nudge,
+            give_up_threshold: give_up,
+        }
+    }
+
+    /// ファイル編集失敗を記録
+    pub fn record_file_failure(&mut self, file_path: &str) {
+        *self.failure_counts.entry(file_path.to_string()).or_insert(0) += 1;
+    }
+
+    /// ファイル編集成功を記録（カウンタリセット）
+    pub fn record_file_success(&mut self, file_path: &str) {
+        self.failure_counts.remove(file_path);
+    }
+
+    /// 段階的回復指示を返す
+    /// None = 通常のリトライ、Some(msg) = 注入すべきシステムメッセージ
+    pub fn check_stuck(&self, file_path: &str) -> Option<FileStuckAction> {
+        let count = self.failure_counts.get(file_path).copied().unwrap_or(0);
+        if count >= self.give_up_threshold {
+            Some(FileStuckAction::GiveUp(format!(
+                "ファイル '{}' の編集に{}回連続失敗しました。このファイルの編集を諦めて、別の方法でタスクを進めてください。",
+                file_path, count
+            )))
+        } else if count >= self.nudge_threshold {
+            Some(FileStuckAction::Nudge(format!(
+                "ファイル '{}' の編集に{}回失敗しています。file_readでファイル全体を再読込し、write_fileでファイル全体を上書きしてください。部分編集は避けてください。",
+                file_path, count
+            )))
+        } else {
+            None
+        }
+    }
+
+    /// 追跡中のファイル数
+    pub fn tracked_files(&self) -> usize {
+        self.failure_counts.len()
+    }
+}
+
+impl Default for FileStuckGuard {
+    fn default() -> Self {
+        Self::new(3, 6)
+    }
+}
+
+/// FileStuckGuard の回復アクション
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileStuckAction {
+    /// 回復手順を提示（再読込→全上書き推奨）
+    Nudge(String),
+    /// このファイルの編集を諦めて次に進む
+    GiveUp(String),
+}
+
 /// ループ検出器: 2層検出（ハッシュ+頻度）
 pub struct LoopDetector {
     // 既存: 完全文字列一致（後方互換）
@@ -606,5 +676,54 @@ mod tests {
         assert!(!ld.record_and_check("exact_same_string"));
         assert!(!ld.record_and_check("exact_same_string"));
         assert!(ld.record_and_check("exact_same_string"));
+    }
+
+    // --- FileStuckGuard テスト ---
+
+    #[test]
+    fn test_file_stuck_guard_no_failure() {
+        let guard = FileStuckGuard::default();
+        assert!(guard.check_stuck("main.rs").is_none());
+    }
+
+    #[test]
+    fn test_file_stuck_guard_nudge_at_3() {
+        let mut guard = FileStuckGuard::default();
+        for _ in 0..3 {
+            guard.record_file_failure("main.rs");
+        }
+        let action = guard.check_stuck("main.rs");
+        assert!(matches!(action, Some(FileStuckAction::Nudge(_))));
+    }
+
+    #[test]
+    fn test_file_stuck_guard_give_up_at_6() {
+        let mut guard = FileStuckGuard::default();
+        for _ in 0..6 {
+            guard.record_file_failure("main.rs");
+        }
+        let action = guard.check_stuck("main.rs");
+        assert!(matches!(action, Some(FileStuckAction::GiveUp(_))));
+    }
+
+    #[test]
+    fn test_file_stuck_guard_reset_on_success() {
+        let mut guard = FileStuckGuard::default();
+        guard.record_file_failure("main.rs");
+        guard.record_file_failure("main.rs");
+        guard.record_file_success("main.rs");
+        assert!(guard.check_stuck("main.rs").is_none());
+    }
+
+    #[test]
+    fn test_file_stuck_guard_tracks_per_file() {
+        let mut guard = FileStuckGuard::default();
+        for _ in 0..4 {
+            guard.record_file_failure("a.rs");
+        }
+        guard.record_file_failure("b.rs");
+        assert!(guard.check_stuck("a.rs").is_some());
+        assert!(guard.check_stuck("b.rs").is_none());
+        assert_eq!(guard.tracked_files(), 2);
     }
 }

@@ -82,6 +82,8 @@ Gitの状態を確認する:
 7. わからないことは「わからない」と答える
 8. 「検索して」→ web_search。URLが分かっている時だけ web_fetch
 9. 複数ステップが必要な場合、まず計画を <think> に書いてから実行する
+10. ツール結果を確認せずに内容を主張しない。「たぶん」「おそらく」は使わない
+11. 同じファイルを連続で再読込しない。前回の結果を使う
 "#;
 
 /// エージェントループの構造化戻り値
@@ -116,6 +118,8 @@ pub struct LoopState {
     pub all_tools: Vec<String>,
     pub consecutive_failures: usize,
     pub iteration: usize,
+    /// トークン予算追跡（diminishing returns検出用、macOS26/Agent知見）
+    pub token_budget: TokenBudgetTracker,
 }
 
 impl LoopState {
@@ -128,7 +132,74 @@ impl LoopState {
             all_tools: Vec::new(),
             consecutive_failures: 0,
             iteration: 0,
+            token_budget: TokenBudgetTracker::default(),
         }
+    }
+}
+
+/// トークン予算追跡器（macOS26/Agent TokenBudgetTracker パターン）
+///
+/// 累積トークンを追跡し、diminishing returns（連続低出力）を検出。
+/// 90%でnudge、100%で停止、5ターン連続100トークン未満で早期停止推奨。
+pub struct TokenBudgetTracker {
+    total_tokens: usize,
+    budget: usize,
+    recent_outputs: Vec<usize>,
+    low_output_threshold: usize,
+    diminishing_window: usize,
+}
+
+impl TokenBudgetTracker {
+    pub fn new(budget: usize) -> Self {
+        Self {
+            total_tokens: 0,
+            budget,
+            recent_outputs: Vec::new(),
+            low_output_threshold: 100,
+            diminishing_window: 5,
+        }
+    }
+
+    /// ステップのトークン使用量を記録
+    pub fn record(&mut self, tokens: usize) {
+        self.total_tokens += tokens;
+        self.recent_outputs.push(tokens);
+        if self.recent_outputs.len() > self.diminishing_window * 2 {
+            self.recent_outputs.remove(0);
+        }
+    }
+
+    /// 予算使用率 (0.0〜1.0+)
+    pub fn usage_ratio(&self) -> f64 {
+        self.total_tokens as f64 / self.budget as f64
+    }
+
+    /// diminishing returns 検出（直近N回が低出力）
+    pub fn is_diminishing(&self) -> bool {
+        if self.recent_outputs.len() < self.diminishing_window {
+            return false;
+        }
+        let recent = &self.recent_outputs[self.recent_outputs.len() - self.diminishing_window..];
+        recent.iter().all(|&t| t < self.low_output_threshold)
+    }
+
+    /// 予算チェック: None=OK, Some(msg)=nudge/stop
+    pub fn check(&self) -> Option<&'static str> {
+        if self.usage_ratio() >= 1.0 {
+            Some("トークン予算上限に到達。タスクを完了してください。")
+        } else if self.is_diminishing() {
+            Some("出力が減少傾向です。効率的にタスクを完了してください。")
+        } else if self.usage_ratio() >= 0.9 {
+            Some("トークン予算の90%を消費しました。速やかにタスクを完了してください。")
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for TokenBudgetTracker {
+    fn default() -> Self {
+        Self::new(8000) // llama-server の max_tokens デフォルト
     }
 }
 
