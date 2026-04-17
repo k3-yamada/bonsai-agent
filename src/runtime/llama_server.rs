@@ -390,4 +390,41 @@ mod tests {
         // base_url はトリムされる
         assert!(!b.model_id().is_empty());
     }
+
+    #[test]
+    fn test_connect_with_params() {
+        let params = InferenceParams {
+            temperature: 0.3,
+            top_k: 10,
+            ..Default::default()
+        };
+        let b = LlamaServerBackend::connect_with_params("http://localhost:8000", "ternary-bonsai-8b", params);
+        assert_eq!(b.model_id(), "ternary-bonsai-8b");
+        assert!((b.inference.temperature - 0.3).abs() < f64::EPSILON);
+        assert_eq!(b.inference.top_k, 10);
+        // 未指定はデフォルト
+        assert_eq!(b.inference.max_tokens, 1024);
+    }
+
+    #[test]
+    fn test_build_request_body_uses_inference_params() {
+        let params = InferenceParams {
+            temperature: 0.7,
+            max_tokens: 2048,
+            ..Default::default()
+        };
+        let b = LlamaServerBackend::connect_with_params("http://localhost:8000", "test", params);
+        let messages = vec![Message::user("test")];
+        let body = b.build_request_body(&messages, &[]);
+        assert!((body["temperature"].as_f64().unwrap() - 0.7).abs() < f64::EPSILON);
+        assert_eq!(body["max_tokens"].as_u64().unwrap(), 2048);
+    }
+
+    #[test]
+    fn test_health_fallback_to_models() {
+        // 存在しないサーバーでは /health も /v1/models も失敗 → false
+        let b = LlamaServerBackend::connect("http://127.0.0.1:19998", "test");
+        assert!(!b.is_healthy());
+    }
+
 }
