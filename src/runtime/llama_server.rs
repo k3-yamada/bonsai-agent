@@ -17,6 +17,8 @@ pub struct LlamaServerBackend {
     base_url: String,
     model_id: String,
     inference: InferenceParams,
+    /// MLX互換モード（未サポートパラメータを除外）
+    mlx_compatible: bool,
 }
 
 impl LlamaServerBackend {
@@ -26,6 +28,7 @@ impl LlamaServerBackend {
             base_url: base_url.trim_end_matches('/').to_string(),
             model_id: model_id.to_string(),
             inference: InferenceParams::default(),
+            mlx_compatible: false,
         }
     }
 
@@ -35,7 +38,14 @@ impl LlamaServerBackend {
             base_url: base_url.trim_end_matches('/').to_string(),
             model_id: model_id.to_string(),
             inference,
+            mlx_compatible: false,
         }
+    }
+
+    /// MLX互換モードを設定
+    pub fn with_mlx_compatible(mut self, mlx: bool) -> Self {
+        self.mlx_compatible = mlx;
+        self
     }
 
     /// ヘルスチェック（/health → /v1/models フォールバック）
@@ -125,16 +135,28 @@ impl LlamaServerBackend {
             }));
         }
 
-        serde_json::json!({
-            "messages": msgs,
-            "temperature": self.inference.temperature,
-            "top_k": self.inference.top_k,
-            "top_p": self.inference.top_p,
-            "min_p": self.inference.min_p,
-            "max_tokens": self.inference.max_tokens,
-            "repeat_penalty": self.inference.repeat_penalty,
-            "stream": true,
-        })
+        // MLX互換: top_k/min_p/repeat_penaltyはMLXサーバーでサイレント無視されるため除外
+        if self.mlx_compatible {
+            serde_json::json!({
+                "messages": msgs,
+                "temperature": self.inference.temperature,
+                "top_p": self.inference.top_p,
+                "max_tokens": self.inference.max_tokens,
+                "repetition_penalty": self.inference.repeat_penalty,
+                "stream": true,
+            })
+        } else {
+            serde_json::json!({
+                "messages": msgs,
+                "temperature": self.inference.temperature,
+                "top_k": self.inference.top_k,
+                "top_p": self.inference.top_p,
+                "min_p": self.inference.min_p,
+                "max_tokens": self.inference.max_tokens,
+                "repeat_penalty": self.inference.repeat_penalty,
+                "stream": true,
+            })
+        }
     }
 
     /// SSEストリームをパースし、トークンごとにon_tokenを呼ぶ
