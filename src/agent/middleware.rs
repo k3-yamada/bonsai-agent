@@ -454,4 +454,34 @@ mod tests {
             chain.run_after_step(&mut session, &r);
         }
     }
+
+    #[test]
+    fn test_send_safe_middlewares() {
+        fn _assert_send<T: Send>() {}
+        _assert_send::<ToolTrackingMiddleware>();
+        _assert_send::<StallMiddleware>();
+        _assert_send::<CompactionMiddleware>();
+        _assert_send::<TokenBudgetMiddleware>();
+    }
+
+    #[test]
+    fn test_independent_chains_in_parallel_threads() {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|i| {
+                    s.spawn(move || {
+                        let mut chain = MiddlewareChain::new();
+                        chain.add(Box::new(ToolTrackingMiddleware::new()));
+                        chain.add(Box::new(StallMiddleware::default()));
+                        let mut session = Session::new();
+                        let r = make_continue_result(i, vec![format!("tool_{i}")]);
+                        chain.run_after_step(&mut session, &r);
+                        chain.len()
+                    })
+                })
+                .collect();
+            let results: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            assert!(results.iter().all(|&len| len == 2));
+        });
+    }
 }

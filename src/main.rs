@@ -100,6 +100,10 @@ struct Cli {
     /// 指定IDのチェックポイントにロールバック
     #[arg(long)]
     rollback: Option<i64>,
+
+    /// サーバー診断（接続・モデル・推論テスト）
+    #[arg(long)]
+    diagnose: bool,
 }
 
 /// 共有コンテキスト（各モードハンドラに渡す）
@@ -152,6 +156,9 @@ fn main() -> Result<()> {
     };
 
     // 早期リターンモード（DB不要）
+    if cli.diagnose {
+        return handle_diagnose_mode(&ctx);
+    }
     if cli.lab {
         return handle_lab_mode(&ctx, cli.lab_experiments);
     }
@@ -201,6 +208,116 @@ fn main() -> Result<()> {
 }
 
 // --- ツール初期化 ---
+
+fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
+    println!("╔══════════════════════════════════════════╗");
+    println!("║       bonsai-agent サーバー診断            ║");
+    println!("╚══════════════════════════════════════════╝");
+
+    let backend_name = match ctx.app_config.model.backend {
+        bonsai_agent::config::ServerBackend::LlamaServer => "llama-server",
+        bonsai_agent::config::ServerBackend::MlxLm => "mlx-lm",
+    };
+    let mlx_compat = ctx.app_config.model.backend == bonsai_agent::config::ServerBackend::MlxLm;
+
+    println!("\n📋 設定:");
+    println!("  server_url: {}", ctx.server_url);
+    println!("  backend: {}", backend_name);
+    println!("  model_id: {}", ctx.app_config.model.model_id);
+    println!("  context_length: {}", ctx.app_config.model.context_length);
+    println!("  mlx_compatible: {}", mlx_compat);
+
+    let inf = &ctx.app_config.model.inference;
+    println!("\n⚙️  InferenceParams:");
+    println!("  temperature: {}", inf.temperature);
+    println!("  top_p: {}", inf.top_p);
+    println!("  top_k: {}", inf.top_k);
+    println!("  min_p: {}", inf.min_p);
+    println!("  max_tokens: {}", inf.max_tokens);
+    println!("  repeat_penalty: {}", inf.repeat_penalty);
+
+    // 接続テスト
+    println!("\n🔌 接続テスト...");
+    let health_url = format!("{}/health", ctx.server_url);
+    let models_url = format!("{}/v1/models", ctx.server_url);
+
+    let health_ok = ureq::get(&health_url).call().is_ok();
+    let models_resp = ureq::get(&models_url).call();
+
+    if health_ok {
+        println!("  /health: ✓ OK");
+    } else {
+        println!("  /health: ✗ 応答なし");
+    }
+
+    // モデル一覧取得
+    match models_resp {
+        Ok(resp) => {
+            println!("  /v1/models: ✓ OK");
+            if let Ok(body) = resp.into_body().read_to_string()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                && let Some(data) = json.get("data").and_then(|d| d.as_array())
+            {
+                println!("\n📦 モデル一覧:");
+                for model in data {
+                    if let Some(id) = model.get("id").and_then(|v| v.as_str()) {
+                        println!("  - {}", id);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("  /v1/models: ✗ エラー ({})", e);
+            println!("\nサーバーに接続できません。llama-serverが起動しているか確認してください。");
+            return Ok(());
+        }
+    }
+
+    // テストプロンプト
+    if !health_ok && ureq::get(&models_url).call().is_err() {
+        println!("\nサーバーに接続できないため、テストプロンプトをスキップします。");
+        return Ok(());
+    }
+
+    println!("\n🧪 テストプロンプト: \"1+1=\"");
+    let chat_url = format!("{}/v1/chat/completions", ctx.server_url);
+    let request_body = serde_json::json!({
+        "messages": [{"role": "user", "content": "1+1="}],
+        "temperature": inf.temperature,
+        "max_tokens": 32_u32,
+        "stream": false,
+    });
+
+    let start = std::time::Instant::now();
+    match ureq::post(&chat_url)
+        .header("Content-Type", "application/json")
+        .send_json(&request_body)
+    {
+        Ok(resp) => {
+            let elapsed = start.elapsed();
+            if let Ok(body) = resp.into_body().read_to_string()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+            {
+                let answer = json["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("(応答なし)");
+                let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+                let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+                println!("  応答: {}", answer.trim());
+                println!("  応答時間: {:.1}ms", elapsed.as_secs_f64() * 1000.0);
+                println!("  トークン数: prompt={}, completion={}", prompt_tokens, completion_tokens);
+            } else {
+                println!("  応答パースエラー");
+            }
+        }
+        Err(e) => {
+            println!("  テストプロンプト失敗: {}", e);
+        }
+    }
+
+    println!("\n診断完了。");
+    Ok(())
+}
 
 fn handle_init_mode() -> Result<()> {
     let path = AppConfig::config_path();

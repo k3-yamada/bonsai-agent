@@ -404,4 +404,39 @@ mod tests {
         let selected = reg.select_relevant("天気を教えて", 3);
         assert_eq!(selected.len(), 3);
     }
+
+    /// Tool トレイトが Send+Sync を要求していることのコンパイル時保証
+    fn _assert_tool_send_sync<T: Tool>() {}
+
+    #[test]
+    fn test_tool_send_sync_compile_time() {
+        _assert_tool_send_sync::<DummyTool>();
+    }
+
+    #[test]
+    fn test_tool_parallel_call_via_thread_scope() {
+        let reg = build_registry();
+        let tool = reg.get("shell").unwrap();
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        let result = tool.call(serde_json::json!({})).unwrap();
+                        assert!(result.success);
+                        result.output.clone()
+                    })
+                })
+                .collect();
+            let results: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            assert_eq!(results.len(), 4);
+            assert!(results.iter().all(|r| r == "ok"));
+        });
+    }
+
+    #[test]
+    fn test_registry_send_sync() {
+        fn _assert_send_sync<T: Send + Sync>() {}
+        _assert_send_sync::<ToolRegistry>();
+    }
 }
