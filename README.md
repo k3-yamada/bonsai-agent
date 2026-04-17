@@ -11,6 +11,10 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
+- **60のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（541テスト、61ソースファイル）
+- **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
+- **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
+- **読取ツール並列実行** — 連続読取2件以上で自動並列化（書き込みはバリア逐次）
 
 ## クイックスタート
 
@@ -45,6 +49,30 @@ bonsai> Rustについて検索して
 bonsai> exit
 ```
 
+### MLXバックエンド（Apple Silicon向け代替）
+
+Ternary Bonsai 8BのMLX版を使う場合:
+
+```bash
+# セットアップ（初回のみ）
+./scripts/setup_mlx_ternary.sh
+
+# サーバー起動
+~/.venvs/bonsai-mlx/bin/mlx-openai-server launch \
+  --model-path prism-ml/Ternary-Bonsai-8B-mlx-2bit \
+  --model-type lm --port 8000
+```
+
+config.tomlでバックエンドを切替:
+
+```toml
+[model]
+backend = "mlx-lm"
+server_url = "http://localhost:8000"
+model_id = "ternary-bonsai-8b"
+context_length = 65536
+```
+
 ### モックモード（LLMなしで動作確認）
 
 ```bash
@@ -64,6 +92,11 @@ cargo run -- --tasks                   # 未完了タスク一覧
 cargo run -- --audit                   # 監査ログ
 cargo run -- --vault                   # ナレッジVault概要
 cargo run -- --manifest                # ケイパビリティ一覧
+cargo run -- --dashboard               # 統合統計ダッシュボード
+cargo run -- --checkpoints             # チェックポイント一覧
+cargo run -- --rollback <id>           # チェックポイント復元
+cargo run -- --lab                     # 自律的自己改善ループ
+cargo run -- --init                    # config.tomlテンプレート生成
 cargo run -- --server-url <URL>        # カスタムサーバーURL
 ```
 
@@ -72,14 +105,16 @@ cargo run -- --server-url <URL>        # カスタムサーバーURL
 | ツール | 権限 | 機能 |
 |--------|------|------|
 | `shell` | Confirm | シェルコマンド実行（Sandbox経由） |
-| `file_read` | Auto | ファイル読み取り |
-| `file_write` | Confirm | ファイル書き込み（全文 or search/replace差分） |
+| `file_read` | Auto | ファイル読み取り（並列実行対応） |
+| `file_write` | Confirm | ファイル書き込み（全文 or search/replace差分、fuzzy 7戦略） |
 | `git` | Confirm | Git操作（status/diff/log/commit/add/branch） |
 | `web_search` | Auto | Web検索（DuckDuckGo API） |
 | `web_fetch` | Auto | URLからテキスト取得 |
-| `repo_map` | Auto | コード構造マップ（関数/構造体名抽出） |
+| `repo_map` | Auto | コード構造マップ（Rust/Python/TS/JS/Go/Java/C/C++/Kotlin/Swift対応） |
 | **プラグイン** | 設定可能 | TOML定義でカスタムツール追加 |
 | **MCP** | Confirm | MCPサーバーのツールを利用 |
+
+読取専用ツール（`file_read`, `web_search`, `web_fetch`, `repo_map`）は`is_read_only()`トレイトにより、連続2件以上で自動並列実行される。書き込みツールはバリアとして逐次実行を保証。
 
 ## アーキテクチャ
 
@@ -90,11 +125,18 @@ cargo run -- --server-url <URL>        # カスタムサーバーURL
  ↓
 過去の経験（成功/失敗）→ プロンプトに注入
  ↓
-LLM推論（Bonsai-8B via llama-server）
+LLM推論（Bonsai-8B via llama-server / mlx-lm）
  ↓
 パース → バリデーション → ツール実行
  ↓                              ↓
 秘密フィルタ適用              監査ログ記録
+ ↓
+ミドルウェアチェーン（5段パイプライン）
+ ├── AuditMiddleware      — ステップ監査
+ ├── ToolTrackMiddleware   — ツール使用追跡
+ ├── StallMiddleware       — 停滞検出→再計画
+ ├── CompactMiddleware     — コンテキスト圧縮
+ └── TokenBudgetMiddleware — トークン予算管理
  ↓
 経験自動記録 → 3回成功でスキル昇格
  ↓
@@ -107,16 +149,37 @@ LLM推論（Bonsai-8B via llama-server）
 
 `~/.config/bonsai-agent/config.toml`（オプション、なくてもデフォルト値で動作）
 
+`cargo run -- --init` でテンプレートを生成可能。
+
 ```toml
 [model]
 server_url = "http://localhost:8080"
 model_id = "bonsai-8b"
 context_length = 16384
+# backend = "mlx-lm"  # MLXバックエンドを使う場合
+
+[model.inference]
+temperature = 0.5
+top_p = 0.85
+top_k = 20
+min_p = 0.05
+max_tokens = 1024
+repeat_penalty = 1.15
 
 [agent]
 max_iterations = 10
 max_retries = 3
 shell_timeout_secs = 30
+auto_checkpoint = true
+
+[advisor]
+# api_key は環境変数 OPENAI_API_KEY / ANTHROPIC_API_KEY から自動検出
+# api_model = "gpt-4o-mini"
+# timeout_secs = 30
+
+[experiment]
+dreamer_interval = 5
+max_experiments = 10
 
 [safety]
 deny_paths = ["~/.ssh", "~/.gnupg", "~/.aws"]
@@ -175,10 +238,53 @@ arxiv論文自動収集 → 知識蓄積 ─────────────
   - 頻出ツールを検出 → 精度向上の優先度を自動記録
   - 全てメモリに蓄積され、次回セッションでプロンプトに自動注入
 
+## Lab実機テスト結果
+
+Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
+
+### v6結果（最新）
+- ベースライン: **score=0.8054**
+
+### v5結果 — 承認率40%（v3の4倍）
+- ベースライン: score=0.8429, pass@k=0.9167
+- **ACCEPT 1**: 「ツール使用前に思考を強制」(+0.032) → デフォルト化済
+- **ACCEPT 2**: 「フォールバック戦略」(+0.001) → デフォルト化済
+- 承認率: **2/5 (40%)**
+
+### v3結果 — ベースライン+1.9%
+- ベースライン: **score=0.8762**, pass@k=1.0（完全安定）
+- 全変異REJECT → デフォルト設定が最適解に収束
+
+### v1結果 — 初回計測
+- ベースライン: score=0.8596, pass@k=1.0
+- 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
+
+## ハーネスパターン（60項目）
+
+「Scaffolding > Model」設計原則に基づく、1ビットモデルの信頼性向上パターン:
+
+- **pass^k評価**: 各タスクk回実行、連続成功率で変異効果を検出
+- **Continue Sites**: 連続失敗→リトライ→再計画→安全停止の3段エスカレーション
+- **2層LoopDetector**: salient hash + 頻度閾値 + 循環パターン検出
+- **StallDetector**: 進捗なし検出→Advisor連携で再計画注入
+- **fuzzyマッチ7戦略**: 空白正規化/Trim/インデント柔軟/Unicode/エスケープ/Blockアンカー/境界Trim
+- **Deferred Schema**: ツールスキーマ名+説明のみでトークン80%節約
+- **段階分離パイプライン**: 複雑タスク検出→計画プレステップ自動注入
+- **Event Sourcing**: 統一イベントストリーム（リプレイ・分析対応）
+- **Advisor Tool**: 簡潔化指示 + 完了前自己検証 + HttpAdvisor（OpenAI互換API委託）
+- **ミドルウェアチェーン**: trait Middleware + MiddlewareChain（5段パイプライン）
+- **読取ツール並列実行**: is_read_only() + std::thread::scope
+- **MLXバックエンド**: ServerBackend enum（llama-server/mlx-lm切替）
+- **InferenceParams**: temperature/top_p/top_k/min_p/max_tokens/repeat_penalty設定可能
+- **構造化エラー分類12種**: FailureMode拡張 + RecoveryHint
+- **ヘルスチェック統一**: /health + /v1/modelsフォールバック（MLX対応）
+
+全60項目の詳細はCLAUDE.mdを参照。
+
 ## 開発
 
 ```bash
-cargo test                     # 302テスト
+cargo test                     # 541テスト
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマット
 cargo build --features full    # fastembed有効化ビルド
@@ -189,6 +295,7 @@ cargo build --features full    # fastembed有効化ビルド
 - macOS (Apple Silicon) or Linux
 - Rust 1.80+ (edition 2024)
 - llama-server（[PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo)から取得）
+- または mlx-lm + mlx-openai-server（`./scripts/setup_mlx_ternary.sh` でセットアップ）
 
 ## ライセンス
 
