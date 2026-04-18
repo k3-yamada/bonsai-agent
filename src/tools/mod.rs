@@ -56,6 +56,56 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// タスク種別 — ツール選択のフィルタリングに使用
+/// CrewAI知見: 選択肢が少ないほど1ビットモデルは正確に動作する
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskType {
+    /// ファイル操作: file_read, file_write, repo_map
+    FileOperation,
+    /// コード実行: shell, git
+    CodeExecution,
+    /// リサーチ: web_search, web_fetch, arxiv_search
+    Research,
+    /// 全ツール使用可能（フィルタなし）
+    General,
+}
+
+/// クエリ文字列からタスク種別を推定する
+/// 日本語キーワードマッチングで判定（1ビットモデル向けにツール選択肢を絞る）
+pub fn detect_task_type(query: &str) -> TaskType {
+    let q = query.to_lowercase();
+
+    // ファイル操作キーワード
+    if q.contains("ファイル") || q.contains("読") || q.contains("書") || q.contains("編集") {
+        return TaskType::FileOperation;
+    }
+
+    // コード実行キーワード
+    if q.contains("実行") || q.contains("ビルド") || q.contains("テスト") || q.contains("コマンド") {
+        return TaskType::CodeExecution;
+    }
+
+    // リサーチキーワード
+    if q.contains("検索") || q.contains("調べ") || q.contains("論文") || q.contains("url") {
+        return TaskType::Research;
+    }
+
+    TaskType::General
+}
+
+impl TaskType {
+    /// このタスク種別で許可されるツール名プレフィックスを返す
+    /// GeneralはNone（フィルタなし）
+    fn allowed_prefixes(&self) -> Option<&[&str]> {
+        match self {
+            TaskType::FileOperation => Some(&["file_read", "file_write", "repo_map"]),
+            TaskType::CodeExecution => Some(&["shell", "git"]),
+            TaskType::Research => Some(&["web_search", "web_fetch", "arxiv_search"]),
+            TaskType::General => None,
+        }
+    }
+}
+
 /// ツールレジストリ — 登録・検索・動的選択を管理
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
@@ -161,6 +211,90 @@ impl ToolRegistry {
         }
         output
     }
+    /// タスク種別に基づいてツールをフィルタリングしてから選択する
+    /// GeneralはフィルタなしでIALを維持（既存動作と同一）
+    pub fn select_relevant_with_type(&self, query: &str, max: usize) -> Vec<&dyn Tool> {
+        let task_type = detect_task_type(query);
+        let allowed = task_type.allowed_prefixes();
+
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+        let task_boost = Self::detect_task_boost(&query_lower);
+
+        let mut scored: Vec<(&dyn Tool, usize)> = self
+            .tools
+            .values()
+            .filter(|tool| {
+                // Generalならフィルタなし、それ以外は許可リストでフィルタ
+                match allowed {
+                    None => true,
+                    Some(prefixes) => prefixes.iter().any(|p| tool.name() == *p),
+                }
+            })
+            .map(|tool| {
+                let name = tool.name().to_lowercase();
+                let desc = tool.description().to_lowercase();
+                let mut score = query_words
+                    .iter()
+                    .filter(|w| name.contains(*w) || desc.contains(*w))
+                    .count();
+                if task_boost.iter().any(|b| name.contains(b)) { score += 2; }
+                (tool.as_ref(), score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
+        scored.into_iter().take(max).map(|(t, _)| t).collect()
+    }
+
+    /// 段階的開示: 第1段階は名前+summaryのみ（超軽量）、第2段階は選択ツールの全スキーマ展開
+    ///
+    /// compactとの違い: compactは名前+description、progressiveは名前+summary（より短い1行）
+    pub fn format_schemas_progressive(
+        &self,
+        tools: &[&dyn Tool],
+        expanded_names: &[&str],
+    ) -> String {
+        if tools.is_empty() {
+            return String::new();
+        }
+
+        let mut output = String::from("# 使用可能なツール
+
+");
+
+        for tool in tools {
+            if expanded_names.contains(&tool.name()) {
+                // 第2段階: 全スキーマ展開
+                output.push_str(&format!("## {}
+", tool.name()));
+                output.push_str(&format!("{}
+", tool.description()));
+                output.push_str(&format!(
+                    "パラメータ: {}
+
+",
+                    serde_json::to_string_pretty(&tool.parameters_schema())
+                        .unwrap_or_else(|_| "{}".to_string())
+                ));
+            } else {
+                // 第1段階: 名前+summaryのみ（descriptionの先頭40文字をsummary代替）
+                let desc = tool.description();
+                let summary = if desc.chars().count() <= 40 {
+                    desc.to_string()
+                } else {
+                    match desc.char_indices().nth(40) {
+                        Some((idx, _)) => format!("{}…", &desc[..idx]),
+                        None => desc.to_string(),
+                    }
+                };
+                output.push_str(&format!("- **{}**: {}
+", tool.name(), summary));
+            }
+        }
+        output
+    }
+
     /// 登録済みツール名のHashSetを返す（バリデーション用）
     pub fn known_names(&self) -> std::collections::HashSet<String> {
         self.tools.keys().cloned().collect()
@@ -438,5 +572,98 @@ mod tests {
     fn test_registry_send_sync() {
         fn _assert_send_sync<T: Send + Sync>() {}
         _assert_send_sync::<ToolRegistry>();
+    }
+
+    #[test]
+    fn test_detect_task_type_file_operation() {
+        assert_eq!(detect_task_type("ファイルを読みたい"), TaskType::FileOperation);
+        assert_eq!(detect_task_type("設定を書き込む"), TaskType::FileOperation);
+        assert_eq!(detect_task_type("コードを編集する"), TaskType::FileOperation);
+    }
+
+    #[test]
+    fn test_detect_task_type_code_execution() {
+        assert_eq!(detect_task_type("コマンドを実行する"), TaskType::CodeExecution);
+        assert_eq!(detect_task_type("プロジェクトをビルドしたい"), TaskType::CodeExecution);
+        assert_eq!(detect_task_type("テストを走らせる"), TaskType::CodeExecution);
+    }
+
+    #[test]
+    fn test_detect_task_type_research() {
+        assert_eq!(detect_task_type("Webで検索して"), TaskType::Research);
+        assert_eq!(detect_task_type("この問題を調べて"), TaskType::Research);
+        assert_eq!(detect_task_type("最新の論文を探す"), TaskType::Research);
+        assert_eq!(detect_task_type("このURLを開いて"), TaskType::Research);
+    }
+
+    #[test]
+    fn test_detect_task_type_general() {
+        assert_eq!(detect_task_type("天気を教えて"), TaskType::General);
+        assert_eq!(detect_task_type("こんにちは"), TaskType::General);
+    }
+
+    #[test]
+    fn test_select_relevant_with_type_file_operation() {
+        let reg = build_registry();
+        // ファイル操作クエリ → file_read, file_writeのみに絞られる
+        let selected = reg.select_relevant_with_type("ファイルを読みたい", 10);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"file_read"));
+        assert!(names.contains(&"file_write"));
+        // shell, git, web_search等は含まれない
+        assert!(!names.contains(&"shell"));
+        assert!(!names.contains(&"git"));
+        assert!(!names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn test_select_relevant_with_type_code_execution() {
+        let reg = build_registry();
+        let selected = reg.select_relevant_with_type("コマンドを実行する", 10);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"git"));
+        assert!(!names.contains(&"file_read"));
+    }
+
+    #[test]
+    fn test_select_relevant_with_type_research() {
+        let reg = build_registry();
+        let selected = reg.select_relevant_with_type("Webで検索して", 10);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"web_search"));
+        assert!(!names.contains(&"shell"));
+    }
+
+    #[test]
+    fn test_select_relevant_with_type_general_no_filter() {
+        let reg = build_registry();
+        // Generalは全ツールが候補（既存動作と同一）
+        let selected = reg.select_relevant_with_type("天気を教えて", 10);
+        assert_eq!(selected.len(), 6); // build_registry()は6ツール登録
+    }
+
+    #[test]
+    fn test_select_relevant_with_type_respects_max() {
+        let reg = build_registry();
+        let selected = reg.select_relevant_with_type("天気を教えて", 2);
+        assert!(selected.len() <= 2);
+    }
+
+    #[test]
+    fn test_select_relevant_unchanged() {
+        // 既存のselect_relevantが変更されていないことを確認
+        let reg = build_registry();
+        let selected = reg.select_relevant("ファイルを読みたい", 5);
+        // select_relevantはフィルタなし → 5件返る
+        assert_eq!(selected.len(), 5);
+    }
+
+    #[test]
+    fn test_task_type_allowed_prefixes() {
+        assert!(TaskType::FileOperation.allowed_prefixes().is_some());
+        assert!(TaskType::CodeExecution.allowed_prefixes().is_some());
+        assert!(TaskType::Research.allowed_prefixes().is_some());
+        assert!(TaskType::General.allowed_prefixes().is_none());
     }
 }
