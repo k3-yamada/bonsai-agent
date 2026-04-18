@@ -110,6 +110,38 @@ impl<'a> SkillStore<'a> {
             .map_err(Into::into)
     }
 
+    /// 全スキルをMarkdown形式にエクスポート
+    pub fn export_markdown(&self) -> Result<String> {
+        let skills = self.list_all()?;
+        let mut md = String::from("# Skills\n\n");
+
+        if skills.is_empty() {
+            md.push_str("スキルはありません。\n");
+            return Ok(md);
+        }
+
+        md.push_str(&format!("総スキル数: {}\n\n", skills.len()));
+
+        for skill in &skills {
+            md.push_str(&format!("## {}\n\n", skill.name));
+            md.push_str(&format!("{}\n\n", skill.description));
+            md.push_str(&format!("- **ツールチェーン**: `{}`\n", skill.tool_chain));
+            md.push_str(&format!("- **トリガーパターン**: {}\n", skill.trigger_patterns));
+            md.push_str(&format!("- **成功回数**: {}\n", skill.success_count));
+            md.push_str(&format!("- **作成日**: {}\n", skill.created_at));
+            md.push('\n');
+        }
+
+        Ok(md)
+    }
+
+    /// Markdownをファイルに書き出し
+    pub fn export_to_file(&self, path: &std::path::Path) -> Result<()> {
+        let md = self.export_markdown()?;
+        std::fs::write(path, md)?;
+        Ok(())
+    }
+
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
     /// frequency(0.4) + recency(0.35) + diversity(0.25)
     pub fn promote_from_experiences(
@@ -258,6 +290,48 @@ mod tests {
         // 2回目は重複しない
         let promoted2 = skills.promote_from_experiences(store.conn(), 3).unwrap();
         assert!(promoted2.is_empty());
+    }
+
+    #[test]
+    fn t_export_markdown_empty() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        let md = skills.export_markdown().unwrap();
+        assert!(md.contains("# Skills"));
+        assert!(md.contains("スキルはありません"));
+    }
+
+    #[test]
+    fn t_export_markdown_with_skills() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        skills.save("list_files", "ファイル一覧を表示", "shell: ls -la", r#"[\"list\", \"files\"]"#).unwrap();
+        skills.save("read_file", "ファイルを読む", "file_read: path", "[]").unwrap();
+        skills.save("list_files", "ファイル一覧を表示", "shell: ls -la", r#"[\"list\", \"files\"]"#).unwrap();
+
+        let md = skills.export_markdown().unwrap();
+        assert!(md.contains("# Skills"));
+        assert!(md.contains("## list_files"));
+        assert!(md.contains("## read_file"));
+        assert!(md.contains("ファイル一覧を表示"));
+        assert!(md.contains("shell: ls -la"));
+        assert!(md.contains("**成功回数**: 2"));
+        assert!(md.contains("**成功回数**: 1"));
+    }
+
+    #[test]
+    fn t_export_to_file() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        skills.save("test_skill", "テスト用", "echo hello", "[]").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILLS.md");
+        skills.export_to_file(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# Skills"));
+        assert!(content.contains("## test_skill"));
     }
 
     #[test]
