@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -22,6 +22,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 4,
         description: "チェックポイント永続化: checkpoints テーブル",
         sql: SCHEMA_V4,
+    },
+    Migration {
+        version: 5,
+        description: "グラフ構造連想記憶: knowledge_nodes, knowledge_edges テーブル",
+        sql: SCHEMA_V5,
     },
 ];
 
@@ -162,6 +167,28 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_timestamp ON checkpoints(timestamp);
 "#;
 
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS knowledge_nodes (
+    id INTEGER PRIMARY KEY,
+    node_type TEXT NOT NULL,
+    name TEXT NOT NULL UNIQUE,
+    metadata TEXT DEFAULT '{}',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_edges (
+    id INTEGER PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES knowledge_nodes(id),
+    target_id INTEGER NOT NULL REFERENCES knowledge_nodes(id),
+    relation TEXT NOT NULL,
+    weight REAL DEFAULT 1.0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, target_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_edges_source ON knowledge_edges(source_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_edges_target ON knowledge_edges(target_id);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +276,13 @@ mod tests {
     fn test_schema_v4_contains_checkpoints_table() {
         assert!(SCHEMA_V4.contains("checkpoints"), "V4にcheckpointsテーブルが必要");
         assert!(SCHEMA_V4.contains("idx_checkpoints_session"), "V4にセッションインデックスが必要");
+    }
+
+    #[test]
+    fn test_schema_v5_contains_knowledge_graph_tables() {
+        assert!(SCHEMA_V5.contains("knowledge_nodes"), "V5にknowledge_nodesテーブルが必要");
+        assert!(SCHEMA_V5.contains("knowledge_edges"), "V5にknowledge_edgesテーブルが必要");
+        assert!(SCHEMA_V5.contains("idx_knowledge_edges_source"), "V5にソースインデックスが必要");
+        assert!(SCHEMA_V5.contains("idx_knowledge_edges_target"), "V5にターゲットインデックスが必要");
     }
 }

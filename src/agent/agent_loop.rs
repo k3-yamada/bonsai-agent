@@ -366,6 +366,10 @@ fn apply_tool_result(
             });
         }
         session.add_message(Message::tool(&redacted, &r.name));
+        // TODO(次フェーズ): KnowledgeGraph統合
+        // ツール成功時にグラフ記録を呼ぶ:
+        //   let graph = KnowledgeGraph::new(s.conn());
+        //   let _ = graph.record_tool_usage(&r.name, &file_path_from_args);
     }
 }
 
