@@ -104,6 +104,10 @@ struct Cli {
     /// サーバー診断（接続・モデル・推論テスト）
     #[arg(long)]
     diagnose: bool,
+
+    /// スキルをMarkdownにエクスポート（デフォルト: SKILLS.md）
+    #[arg(long)]
+    skills_export: bool,
 }
 
 /// 共有コンテキスト（各モードハンドラに渡す）
@@ -179,6 +183,9 @@ fn main() -> Result<()> {
     // DB必要モード
     let store = MemoryStore::open(&get_db_path())?;
 
+    if cli.skills_export {
+        return handle_skills_export_mode(&store);
+    }
     if cli.sessions {
         return handle_sessions_mode(&store);
     }
@@ -464,6 +471,16 @@ fn handle_vault_mode() -> Result<()> {
     if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(&vp) {
         println!("{}", v.summary().unwrap_or_default());
     }
+    Ok(())
+}
+
+fn handle_skills_export_mode(store: &MemoryStore) -> Result<()> {
+    use bonsai_agent::memory::skill::SkillStore;
+
+    let skills = SkillStore::new(store.conn());
+    let path = std::path::Path::new("SKILLS.md");
+    skills.export_to_file(path)?;
+    println!("スキルをエクスポートしました: {}", path.display());
     Ok(())
 }
 
