@@ -30,6 +30,60 @@ impl StockCategory {
             Self::Todo => "todos",
         }
     }
+
+    /// Rules: 常時ロード（判断ルール・繰り返しパターン）
+    /// Docs: オンデマンド（参照情報・事実・好み）
+    pub fn is_rule(&self) -> bool {
+        matches!(self, Self::Decision | Self::Pattern)
+    }
+
+    /// 全カテゴリ一覧
+    pub fn all() -> &'static [StockCategory] {
+        &[
+            Self::Decision,
+            Self::Fact,
+            Self::Preference,
+            Self::Pattern,
+            Self::Insight,
+            Self::Todo,
+        ]
+    }
+
+    /// タスク種別に関連するDocsカテゴリを返す
+    pub fn docs_for_task_context(task_context: &str) -> Vec<StockCategory> {
+        let mut cats = Vec::new();
+        let ctx = task_context.to_lowercase();
+
+        // Fact: 技術的事実が必要な場面
+        if ctx.contains("仕様") || ctx.contains("制約") || ctx.contains("spec")
+            || ctx.contains("fact") || ctx.contains("情報")
+        {
+            cats.push(Self::Fact);
+        }
+
+        // Preference: 設定・好みが関係する場面
+        if ctx.contains("設定") || ctx.contains("好") || ctx.contains("config")
+            || ctx.contains("prefer") || ctx.contains("スタイル")
+        {
+            cats.push(Self::Preference);
+        }
+
+        // Insight: 学び・発見が参考になる場面
+        if ctx.contains("なぜ") || ctx.contains("原因") || ctx.contains("debug")
+            || ctx.contains("問題") || ctx.contains("エラー") || ctx.contains("学")
+        {
+            cats.push(Self::Insight);
+        }
+
+        // Todo: タスク管理
+        if ctx.contains("todo") || ctx.contains("やる") || ctx.contains("次")
+            || ctx.contains("残り") || ctx.contains("計画")
+        {
+            cats.push(Self::Todo);
+        }
+
+        cats
+    }
 }
 
 static DECISION_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -126,5 +180,39 @@ mod tests {
     fn t_no_match() {
         let e = extract_stock("ファイルを読んで", "s1");
         assert!(e.is_empty());
+    }
+
+    #[test]
+    fn t_is_rule() {
+        assert!(StockCategory::Decision.is_rule());
+        assert!(StockCategory::Pattern.is_rule());
+        assert!(!StockCategory::Fact.is_rule());
+        assert!(!StockCategory::Preference.is_rule());
+        assert!(!StockCategory::Insight.is_rule());
+        assert!(!StockCategory::Todo.is_rule());
+    }
+
+    #[test]
+    fn t_docs_for_task_context() {
+        let cats = StockCategory::docs_for_task_context("エラーの原因を調べて");
+        assert!(cats.contains(&StockCategory::Insight));
+        assert!(!cats.contains(&StockCategory::Decision));
+    }
+
+    #[test]
+    fn t_docs_for_task_todo() {
+        let cats = StockCategory::docs_for_task_context("次にやることを教えて");
+        assert!(cats.contains(&StockCategory::Todo));
+    }
+
+    #[test]
+    fn t_docs_for_task_empty() {
+        let cats = StockCategory::docs_for_task_context("hello");
+        assert!(cats.is_empty());
+    }
+
+    #[test]
+    fn t_all_categories() {
+        assert_eq!(StockCategory::all().len(), 6);
     }
 }

@@ -930,38 +930,27 @@ fn inject_vault_knowledge(
     task_context: &str,
     vault: &crate::knowledge::vault::Vault,
 ) {
-    use crate::knowledge::extractor::StockCategory;
-    let categories: Vec<StockCategory> = [
-        ("決", StockCategory::Decision),
-        ("パターン", StockCategory::Pattern),
-        ("学", StockCategory::Insight),
-        ("好", StockCategory::Preference),
-    ]
-    .iter()
-    .filter(|(keyword, _)| task_context.contains(keyword))
-    .map(|(_, cat)| cat.clone())
-    .collect();
+    // Rules（Decision/Pattern）は常時注入 — 判断基準として常に必要
+    let rules = vault.read_rules(3).unwrap_or_default();
+    // Docs（Fact/Insight/Preference/Todo）はタスクコンテキストに応じて選択的注入
+    let docs = vault.read_docs_for_context(task_context, 2).unwrap_or_default();
 
-    if categories.is_empty() {
+    if rules.is_empty() && docs.is_empty() {
         return;
     }
 
-    let mut vault_ctx = Vec::new();
-    for cat in &categories {
-        if let Ok(content) = vault.read_category(cat) {
-            let lines: Vec<&str> = content.lines().filter(|l| l.starts_with("- [")).take(3).collect();
-            if !lines.is_empty() {
-                vault_ctx.extend(lines.iter().map(|l| l.to_string()));
-            }
-        }
+    let mut parts = Vec::new();
+    if !rules.is_empty() {
+        parts.push(format!("[Rules]\n{}", rules.join("\n")));
+    }
+    if !docs.is_empty() {
+        parts.push(format!("[Docs]\n{}", docs.join("\n")));
     }
 
-    if !vault_ctx.is_empty() {
-        session.add_message(Message::system(format!(
-            "関連する蓄積知識:\n{}",
-            vault_ctx.join("\n")
-        )));
-    }
+    session.add_message(Message::system(format!(
+        "<vault-knowledge>\n{}\n</vault-knowledge>",
+        parts.join("\n")
+    )));
 }
 
 /// SOUL.mdからペルソナを読み込む
