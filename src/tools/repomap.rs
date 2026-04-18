@@ -146,10 +146,10 @@ mod ast {
             _ => None,
         };
 
-        if let Some(e) = entry {
-            if seen.insert(e.clone()) {
-                syms.push(e);
-            }
+        if let Some(e) = entry
+            && seen.insert(e.clone())
+        {
+            syms.push(e);
         }
 
         for i in 0..node.child_count() {
@@ -301,17 +301,16 @@ mod ast {
             }
             "type_declaration" => {
                 for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i as u32) {
-                        if child.kind() == "type_spec" {
-                            if let Some(name_node) = child.child_by_field_name("name") {
-                                let name = &source[name_node.byte_range()];
-                                if let Some(type_node) = child.child_by_field_name("type") {
-                                    let type_kind = type_node.kind();
-                                    return Some(format!("L{line}: type {name} {type_kind}"));
-                                }
-                                return Some(format!("L{line}: type {name}"));
-                            }
+                    if let Some(child) = node.child(i as u32)
+                        && child.kind() == "type_spec"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = &source[name_node.byte_range()];
+                        if let Some(type_node) = child.child_by_field_name("type") {
+                            let type_kind = type_node.kind();
+                            return Some(format!("L{line}: type {name} {type_kind}"));
                         }
+                        return Some(format!("L{line}: type {name}"));
                     }
                 }
                 None
@@ -333,11 +332,11 @@ mod ast {
 
     fn visibility_text(node: &tree_sitter::Node, source: &str) -> String {
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if child.kind() == "visibility_modifier" {
-                    let vis = &source[child.byte_range()];
-                    return format!("{vis} ");
-                }
+            if let Some(child) = node.child(i as u32)
+                && child.kind() == "visibility_modifier"
+            {
+                let vis = &source[child.byte_range()];
+                return format!("{vis} ");
             }
         }
         String::new()
@@ -346,10 +345,10 @@ mod ast {
     /// 指定した子ノードの中に孫ノードがあるか（例: function_modifiers > async）
     fn has_grandchild_kind(node: &tree_sitter::Node, parent_kind: &str, child_kind: &str) -> bool {
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if child.kind() == parent_kind {
-                    return has_child_kind(&child, child_kind);
-                }
+            if let Some(child) = node.child(i as u32)
+                && child.kind() == parent_kind
+            {
+                return has_child_kind(&child, child_kind);
             }
         }
         false
@@ -357,10 +356,10 @@ mod ast {
 
     fn has_child_kind(node: &tree_sitter::Node, kind: &str) -> bool {
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if child.kind() == kind {
-                    return true;
-                }
+            if let Some(child) = node.child(i as u32)
+                && child.kind() == kind
+            {
+                return true;
             }
         }
         false
