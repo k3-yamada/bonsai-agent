@@ -20,7 +20,7 @@ use crate::runtime::embedder::create_embedder;
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolResult, ToolResultCache};
 
 /// エージェント設定
 pub struct AgentConfig {
@@ -126,6 +126,8 @@ pub struct LoopState {
     pub token_budget: TokenBudgetTracker,
     /// ミドルウェアチェーン（DeerFlow知見: 5段パイプライン）
     pub middleware_chain: MiddlewareChain,
+    /// ツール結果キャッシュ（読取専用ツールの重複呼び出し回避）
+    pub tool_cache: ToolResultCache,
 }
 
 impl LoopState {
@@ -140,6 +142,7 @@ impl LoopState {
             iteration: 0,
             token_budget: TokenBudgetTracker::default(),
             middleware_chain: MiddlewareChain::default(),
+            tool_cache: ToolResultCache::new(),
         }
     }
 }
@@ -281,6 +284,7 @@ fn execute_validated_calls(
     circuit_breaker: &mut CircuitBreaker,
     secrets_filter: &SecretsFilter,
     store: Option<&MemoryStore>,
+    cache: &mut ToolResultCache,
 ) -> Vec<String> {
     let mut step_tools: Vec<String> = Vec::new();
     let mut i = 0;
@@ -293,6 +297,12 @@ fn execute_validated_calls(
         if read_batch.len() >= 2 {
             let results = execute_read_batch_parallel(read_batch);
             for r in results {
+                // 読取専用ツール結果をキャッシュに保存
+                if !r.is_error {
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
+                        cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
+                    }
+                }
                 apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
                 if !r.is_error {
                     step_tools.push(r.name);
@@ -300,7 +310,22 @@ fn execute_validated_calls(
             }
         } else {
             for call in read_batch {
+                // キャッシュヒット判定
+                if let Some(cached) = cache.get(&call.name, &call.coerced_args) {
+                    let cached_output = cached.output.clone();
+                    let cached_success = cached.success;
+                    session.add_message(Message::tool(&cached_output, &call.name));
+                    step_tools.push(call.name.clone());
+                    log_event(LogLevel::Debug, "cache", &format!("キャッシュヒット: {}", call.name));
+                    continue;
+                }
                 let r = execute_single_call(call);
+                // 成功結果をキャッシュに保存
+                if !r.is_error {
+                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
+                        cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
+                    }
+                }
                 apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
                 if !r.is_error {
                     step_tools.push(r.name);
@@ -313,6 +338,9 @@ fn execute_validated_calls(
             if !r.is_error {
                 step_tools.push(r.name);
             }
+            // 書き込みツール実行後: 読取キャッシュを無効化
+            cache.invalidate("file_read");
+            cache.invalidate("repo_map");
             i += 1;
         }
     }
@@ -402,6 +430,7 @@ pub fn execute_step(
     circuit_breaker: &mut CircuitBreaker,
     loop_detector: &mut LoopDetector,
     attempt: usize,
+    tool_cache: &mut ToolResultCache,
 ) -> Result<StepOutcome> {
     if ctx.cancel.is_cancelled() {
         return Ok(StepOutcome::Aborted("キャンセルされました".to_string()));
@@ -524,7 +553,7 @@ pub fn execute_step(
         });
     }
 
-    let step_tools = execute_validated_calls(&validated, session, circuit_breaker, ctx.secrets_filter, ctx.store);
+    let step_tools = execute_validated_calls(&validated, session, circuit_breaker, ctx.secrets_filter, ctx.store, tool_cache);
     Ok(StepOutcome::Continue(step_tools))
 }
 
@@ -621,6 +650,7 @@ pub fn run_agent_loop_with_session(
             &mut state.circuit_breaker,
             &mut state.loop_detector,
             iteration,
+            &mut state.tool_cache,
         )?;
 
 
@@ -1947,7 +1977,8 @@ mod tests {
         let mut session = Session::new();
         let mut cb = CircuitBreaker::default();
         let sf = SecretsFilter::default();
-        let result = execute_validated_calls(&[], &mut session, &mut cb, &sf, None);
+        let mut cache = ToolResultCache::new();
+        let result = execute_validated_calls(&[], &mut session, &mut cb, &sf, None, &mut cache);
         assert!(result.is_empty());
     }
 
