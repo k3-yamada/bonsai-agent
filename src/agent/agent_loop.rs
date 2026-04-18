@@ -3,7 +3,7 @@ use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
-use crate::agent::conversation::{Message, ParsedOutput, Session};
+use crate::agent::conversation::{Message, ParsedOutput, Role, Session};
 use crate::agent::error_recovery::TrialSummary;
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
@@ -588,6 +588,11 @@ fn handle_outcome(
             if inject_verification_step(session, &mut state.advisor, task_context, &answer, iteration, max_iterations, store) {
                 return OutcomeAction::Continue;
             }
+            // 不変条件チェック（非ブロッキング警告）
+            let violations = check_invariants(session, task_context);
+            for v in &violations {
+                log_event(LogLevel::Warn, "invariant", v);
+            }
             record_success(store, session, task_context, &answer);
             OutcomeAction::Return(AgentLoopResult {
                 answer,
@@ -807,7 +812,10 @@ fn inject_verification_step(
         "検証チェックリスト:\n\
          - 全ての主張にツール結果の根拠があるか？\n\
          - 未検証の仮定が残っていないか？\n\
-         - エッジケースを見落としていないか？".to_string(),
+         - エッジケースを見落としていないか？\n\
+         - ツール呼び出し成功率が80%以上か？\n\
+         - ファイル変更がある場合、コンパイル/構文チェックを通過したか？\n\
+         - 元のタスクの完了条件をすべて満たしているか？".to_string(),
     ));
     advisor.record_call();
     eprintln!(
@@ -850,6 +858,29 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
 // load_soul → context_inject.rs に移動
 
 // inject_contextual_memories → context_inject.rs に移動
+
+/// タスク完了時の不変条件チェック（PaperOrchestra知見）
+fn check_invariants(session: &Session, task_context: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let tool_msgs: Vec<_> = session.messages.iter()
+        .filter(|m| m.role == Role::Tool)
+        .collect();
+    if !tool_msgs.is_empty() {
+        let success_count = tool_msgs.iter()
+            .filter(|m| !m.content.contains("エラー") && !m.content.contains("失敗"))
+            .count();
+        let rate = success_count as f64 / tool_msgs.len() as f64;
+        if rate < 0.5 {
+            violations.push(format!("ツール成功率が低い: {:.0}%", rate * 100.0));
+        }
+    }
+    if let Some(answer) = session.messages.iter().rev().find(|m| m.role == Role::Assistant) {
+        if answer.content.len() < 10 && task_context.len() > 50 {
+            violations.push("回答が短すぎる可能性".to_string());
+        }
+    }
+    violations
+}
 
 /// 成功時のセッション保存・経験記録・スキル昇格
 fn record_success(
@@ -1892,6 +1923,51 @@ mod tests {
             let has_trial = session.messages.iter().any(|m| m.content.contains("試行済み"));
             assert!(has_trial, "試行サマリーがreplanに含まれる");
         }
+    }
+
+
+    // テスト: check_invariants — 正常セッションで違反なし
+    #[test]
+    fn t_check_invariants_no_violations() {
+        use crate::agent::conversation::Role;
+        let mut session = Session::new();
+        session.add_message(Message::user("テストを書いて、実装して、リファクタリングして"));
+        session.add_message(Message::assistant("実装が完了しました。テスト結果: 全パス".to_string()));
+        session.add_message(Message {
+            role: Role::Tool,
+            content: "ファイルを正常に読み込みました".to_string(),
+            attachments: Vec::new(),
+            tool_call_id: None,
+        });
+        let violations = check_invariants(&session, "テストを書いて実装して");
+        assert!(violations.is_empty(), "正常セッションでは違反なし: {:?}", violations);
+    }
+
+    // テスト: check_invariants — ツール失敗多い場合に違反検出
+    #[test]
+    fn t_check_invariants_low_success_rate() {
+        use crate::agent::conversation::Role;
+        let mut session = Session::new();
+        session.add_message(Message::user("テストを書いて"));
+        // ツール失敗メッセージ3件
+        for _ in 0..3 {
+            session.add_message(Message {
+                role: Role::Tool,
+                content: "エラー: ファイルが見つかりません".to_string(),
+                attachments: Vec::new(),
+                tool_call_id: None,
+            });
+        }
+        // ツール成功メッセージ1件（成功率25% < 50%）
+        session.add_message(Message {
+            role: Role::Tool,
+            content: "OK".to_string(),
+            attachments: Vec::new(),
+            tool_call_id: None,
+        });
+        let violations = check_invariants(&session, "テストを書いて");
+        assert!(!violations.is_empty(), "低成功率で違反検出されるべき");
+        assert!(violations[0].contains("ツール成功率が低い"), "成功率警告: {}", violations[0]);
     }
 
 }
