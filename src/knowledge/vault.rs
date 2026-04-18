@@ -96,16 +96,16 @@ impl Vault {
         use crate::knowledge::extractor::StockCategory;
         let mut rules = Vec::new();
         for cat in StockCategory::all() {
-            if cat.is_rule() {
-                if let Ok(content) = self.read_category(cat) {
-                    let lines: Vec<&str> = content
-                        .lines()
-                        .filter(|l| l.starts_with("- ["))
-                        .collect();
-                    // 最新N件（末尾から取得）
-                    for line in lines.iter().rev().take(max_per_category) {
-                        rules.push(line.to_string());
-                    }
+            if cat.is_rule()
+                && let Ok(content) = self.read_category(cat)
+            {
+                let lines: Vec<&str> = content
+                    .lines()
+                    .filter(|l| l.starts_with("- ["))
+                    .collect();
+                // 最新N件（末尾から取得）
+                for line in lines.iter().rev().take(max_per_category) {
+                    rules.push(line.to_string());
                 }
             }
         }

@@ -924,6 +924,72 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
     }
 }
 
+/// 過去の経験を成功/失敗パターンに分離してセッションに注入
+///
+/// ExperienceStore::find_similar で類似経験を取得し、
+/// 成功と失敗を分けて <experience-context> タグで注入する。
+/// 経験が空の場合はメッセージを追加しない。
+fn inject_experience_context(
+    session: &mut Session,
+    task_context: &str,
+    store: &MemoryStore,
+) {
+    let exp = ExperienceStore::new(store.conn());
+    let past = match exp.find_similar(task_context, 3) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[warn] 経験検索エラー: {e}");
+            return;
+        }
+    };
+    if past.is_empty() {
+        return;
+    }
+
+    let successes: Vec<String> = past
+        .iter()
+        .filter(|e| e.exp_type == ExperienceType::Success)
+        .map(|e| {
+            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
+            format!("- タスク: \"{}\" → {}", e.task_context, lesson)
+        })
+        .collect();
+
+    let failures: Vec<String> = past
+        .iter()
+        .filter(|e| e.exp_type == ExperienceType::Failure)
+        .map(|e| {
+            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
+            format!("- タスク: \"{}\" → {}", e.task_context, lesson)
+        })
+        .collect();
+
+    let insights: Vec<String> = past
+        .iter()
+        .filter(|e| e.exp_type == ExperienceType::Insight)
+        .map(|e| {
+            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
+            format!("- {}", lesson)
+        })
+        .collect();
+
+    let mut parts = Vec::new();
+    if !successes.is_empty() {
+        parts.push(format!("[成功パターン]\n{}", successes.join("\n")));
+    }
+    if !failures.is_empty() {
+        parts.push(format!("[失敗パターン]\n{}", failures.join("\n")));
+    }
+    if !insights.is_empty() {
+        parts.push(format!("[学び]\n{}", insights.join("\n")));
+    }
+
+    session.add_message(Message::system(format!(
+        "<experience-context>\n{}\n</experience-context>",
+        parts.join("\n")
+    )));
+}
+
 /// Vault知識を選択的にセッションに注入（関連カテゴリのみ）
 fn inject_vault_knowledge(
     session: &mut Session,
@@ -1014,30 +1080,8 @@ fn inject_contextual_memories(
         session.add_message(Message::system(format!("<memory-context>\n関連する過去の記憶:\n{ctx}\n</memory-context>")));
     }
 
-    // 類似経験
-    let exp = ExperienceStore::new(s.conn());
-    let past = match exp.find_similar(task_context, 3) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[warn] 経験検索エラー: {e}");
-            vec![]
-        }
-    };
-    if !past.is_empty() {
-        let ctx: String = past
-            .iter()
-            .map(|e| {
-                let prefix = match e.exp_type {
-                    ExperienceType::Success => "成功",
-                    ExperienceType::Failure => "失敗（避けよ）",
-                    ExperienceType::Insight => "学び",
-                };
-                format!("- [{prefix}] {}: {}", e.action, e.outcome)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        session.add_message(Message::system(format!("<memory-context>\n過去の経験:\n{ctx}\n</memory-context>")));
-    }
+    // 類似経験（成功/失敗分離フォーマットで注入）
+    inject_experience_context(session, task_context, s);
 
     // 関連スキル
     let skills = SkillStore::new(s.conn());
@@ -1956,6 +2000,85 @@ mod tests {
         let error_neighbors = graph.neighbors("tool_error", 1).unwrap();
         assert!(error_neighbors.iter().any(|(name, rel, _)| name == "src/lib.rs" && rel == "caused_by"),
             "エラー→ファイルのcaused_byエッジが記録されるべき");
+    }
+
+
+    // テスト: inject_experience_context — 成功/失敗を分離してフォーマット
+    #[test]
+    fn t_inject_experience_context_formats_correctly() {
+        let store = MemoryStore::in_memory().unwrap();
+        let exp = ExperienceStore::new(store.conn());
+
+        // 成功経験を記録
+        exp.record(&RecordParams {
+            exp_type: ExperienceType::Success,
+            task_context: "file editing",
+            action: "file_write with fuzzy match",
+            outcome: "edit succeeded",
+            lesson: Some("fuzzyマッチで成功"),
+            tool_name: Some("file_write"),
+            error_type: None,
+            error_detail: None,
+        }).unwrap();
+
+        // 失敗経験を記録
+        exp.record(&RecordParams {
+            exp_type: ExperienceType::Failure,
+            task_context: "file reading",
+            action: "file_read timeout",
+            outcome: "timeout error",
+            lesson: Some("タイムアウト、リトライで解決"),
+            tool_name: Some("file_read"),
+            error_type: Some("Timeout"),
+            error_detail: Some("read timeout"),
+        }).unwrap();
+
+        let mut session = Session::new();
+        inject_experience_context(&mut session, "file", &store);
+
+        // メッセージが追加されていること
+        assert_eq!(session.messages.len(), 1);
+        let msg = &session.messages[0].content;
+        assert!(msg.contains("<experience-context>"), "experience-contextタグで囲まれるべき");
+        assert!(msg.contains("[成功パターン]"), "成功パターンセクションがあるべき");
+        assert!(msg.contains("[失敗パターン]"), "失敗パターンセクションがあるべき");
+        assert!(msg.contains("fuzzyマッチで成功"), "成功のlessonが含まれるべき");
+        assert!(msg.contains("タイムアウト、リトライで解決"), "失敗のlessonが含まれるべき");
+    }
+
+    // テスト: inject_experience_context — 経験が空の場合にメッセージ追加しない
+    #[test]
+    fn t_inject_experience_context_empty_no_message() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        inject_experience_context(&mut session, "nonexistent_task_xyz", &store);
+        assert!(session.messages.is_empty(), "経験が空ならメッセージ不追加");
+    }
+
+    // テスト: inject_experience_context — Insightタイプも含まれる
+    #[test]
+    fn t_inject_experience_context_includes_insights() {
+        let store = MemoryStore::in_memory().unwrap();
+        let exp = ExperienceStore::new(store.conn());
+
+        exp.record(&RecordParams {
+            exp_type: ExperienceType::Insight,
+            task_context: "deploy task",
+            action: "deploy analysis",
+            outcome: "rollback needed",
+            lesson: Some("デプロイ前にテスト必須"),
+            tool_name: None,
+            error_type: None,
+            error_detail: None,
+        }).unwrap();
+
+        let mut session = Session::new();
+        inject_experience_context(&mut session, "deploy", &store);
+
+        assert_eq!(session.messages.len(), 1);
+        let msg = &session.messages[0].content;
+        assert!(msg.contains("[学び]"), "学びセクションがあるべき");
+        assert!(msg.contains("デプロイ前にテスト必須"), "Insightのlessonが含まれるべき");
     }
 
 }
