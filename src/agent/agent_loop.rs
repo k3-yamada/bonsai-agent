@@ -11,6 +11,7 @@ use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::validate::{PathGuard, Severity, validate_tool_call};
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
+use crate::memory::graph::KnowledgeGraph;
 use crate::memory::search::HybridSearch;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
@@ -346,6 +347,11 @@ fn apply_tool_result(
     r: &ToolExecResult, session: &mut Session, circuit_breaker: &mut CircuitBreaker,
     secrets_filter: &SecretsFilter, store: Option<&MemoryStore>,
 ) {
+    // args_jsonからファイルパスを抽出（"path"フィールドがあれば）
+    let file_path = serde_json::from_str::<serde_json::Value>(&r.args_json)
+        .ok()
+        .and_then(|v| v.get("path").and_then(|p| p.as_str().map(String::from)));
+
     if r.is_error {
         circuit_breaker.record_failure(&r.name);
         if let Some(s) = store {
@@ -353,6 +359,10 @@ fn apply_tool_result(
             let _ = audit.log(Some(&session.id), &AuditAction::ToolCall {
                 tool_name: r.name.clone(), args: r.args_json.clone(), success: false, output_preview: r.output.clone(),
             });
+            // グラフ記憶: エラーパターン記録
+            let graph = KnowledgeGraph::new(s.conn());
+            let path = file_path.as_deref().unwrap_or("unknown");
+            let _ = graph.record_error_pattern("tool_error", path, &r.name);
         }
         session.add_message(Message::tool(&r.output, &r.name));
     } else {
@@ -364,12 +374,13 @@ fn apply_tool_result(
                 tool_name: r.name.clone(), args: r.args_json.clone(), success: r.success,
                 output_preview: redacted.chars().take(200).collect(),
             });
+            // グラフ記憶: ツール使用記録（ファイルパスがある場合のみ）
+            if let Some(ref fp) = file_path {
+                let graph = KnowledgeGraph::new(s.conn());
+                let _ = graph.record_tool_usage(&r.name, fp);
+            }
         }
         session.add_message(Message::tool(&redacted, &r.name));
-        // TODO(次フェーズ): KnowledgeGraph統合
-        // ツール成功時にグラフ記録を呼ぶ:
-        //   let graph = KnowledgeGraph::new(s.conn());
-        //   let _ = graph.record_tool_usage(&r.name, &file_path_from_args);
     }
 }
 
@@ -1061,6 +1072,15 @@ fn inject_contextual_memories(
             .join("\n");
         session.add_message(Message::system(format!(
             "利用可能なスキル（過去の成功パターン）:\n{ctx}\n上記のパターンが適用可能な場合は参考にしてください。"
+        )));
+    }
+
+    // グラフ構造連想記憶: 関連コンテキスト注入
+    let graph = KnowledgeGraph::new(s.conn());
+    let graph_ctx = graph.related_context(task_context, 5).unwrap_or_default();
+    if !graph_ctx.is_empty() {
+        session.add_message(Message::system(format!(
+            "<graph-context>\n関連するグラフ知識:\n{graph_ctx}\n</graph-context>"
         )));
     }
 }
@@ -1896,6 +1916,57 @@ mod tests {
         let sf = SecretsFilter::default();
         let result = execute_validated_calls(&[], &mut session, &mut cb, &sf, None);
         assert!(result.is_empty());
+    }
+
+    // テスト: apply_tool_result でツール成功時にKnowledgeGraphにツール使用が記録される
+    #[test]
+    fn test_apply_tool_result_records_graph_tool_usage() {
+        use crate::safety::secrets::SecretsFilter;
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let mut cb = CircuitBreaker::default();
+        let sf = SecretsFilter::default();
+
+        let r = ToolExecResult {
+            name: "file_read".to_string(),
+            args_json: r#"{"path": "src/main.rs"}"#.to_string(),
+            output: "file contents here".to_string(),
+            success: true,
+            is_error: false,
+        };
+        apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store));
+
+        // グラフにツール使用が記録されていることを確認
+        let graph = KnowledgeGraph::new(store.conn());
+        let neighbors = graph.neighbors("file_read", 1).unwrap();
+        assert_eq!(neighbors.len(), 1, "ツール→ファイルのエッジが記録されるべき");
+        assert_eq!(neighbors[0].0, "src/main.rs");
+        assert_eq!(neighbors[0].1, "uses");
+    }
+
+    // テスト: apply_tool_result でツール失敗時にエラーパターンが記録される
+    #[test]
+    fn test_apply_tool_result_records_graph_error_pattern() {
+        use crate::safety::secrets::SecretsFilter;
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let mut cb = CircuitBreaker::default();
+        let sf = SecretsFilter::default();
+
+        let r = ToolExecResult {
+            name: "shell".to_string(),
+            args_json: r#"{"path": "src/lib.rs"}"#.to_string(),
+            output: "error: compilation failed".to_string(),
+            success: false,
+            is_error: true,
+        };
+        apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store));
+
+        // グラフにエラーパターンが記録されていることを確認
+        let graph = KnowledgeGraph::new(store.conn());
+        let error_neighbors = graph.neighbors("tool_error", 1).unwrap();
+        assert!(error_neighbors.iter().any(|(name, rel, _)| name == "src/lib.rs" && rel == "caused_by"),
+            "エラー→ファイルのcaused_byエッジが記録されるべき");
     }
 
 }
