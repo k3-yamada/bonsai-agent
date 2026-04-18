@@ -125,8 +125,7 @@ pub(crate) fn execute_validated_calls(
         } else {
             for call in read_batch {
                 if let Some(cached) = cache.get(&call.name, &call.coerced_args) {
-                    let cached_output = cached.output.clone();
-                    session.add_message(Message::tool(&cached_output, &call.name));
+                    session.add_message(Message::tool(&cached.output, &call.name));
                     step_tools.push(call.name.clone());
                     log_event(LogLevel::Debug, "cache", &format!("キャッシュヒット: {}", call.name));
                     continue;

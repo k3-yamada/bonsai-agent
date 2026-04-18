@@ -592,7 +592,7 @@ fn handle_outcome(
             OutcomeAction::Return(AgentLoopResult {
                 answer,
                 iterations_used: final_iteration,
-                tools_called: state.all_tools.clone(),
+                tools_called: std::mem::take(&mut state.all_tools),
             })
         }
         StepOutcome::Aborted(reason) => {
@@ -607,7 +607,7 @@ fn handle_outcome(
             OutcomeAction::Return(AgentLoopResult {
                 answer: format!("[中断] {reason}"),
                 iterations_used: final_iteration,
-                tools_called: state.all_tools.clone(),
+                tools_called: std::mem::take(&mut state.all_tools),
             })
         }
         StepOutcome::Continue(step_tools) => {
