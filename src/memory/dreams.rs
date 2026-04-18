@@ -116,7 +116,7 @@ impl<'a> Dreamer<'a> {
     }
 
     /// ツール使用頻度を集計
-    fn tool_usage_stats(&self, cutoff: &str) -> Result<Vec<(String, i64)>> {
+    pub fn tool_usage_stats(&self, cutoff: &str) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT tool_name, COUNT(*) as cnt
              FROM experiences
@@ -132,7 +132,7 @@ impl<'a> Dreamer<'a> {
     }
 
     /// 失敗パターンを集計
-    fn failure_stats(&self, cutoff: &str) -> Result<Vec<(String, i64)>> {
+    pub fn failure_stats(&self, cutoff: &str) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT error_detail, COUNT(*) as cnt
              FROM experiences
@@ -149,7 +149,7 @@ impl<'a> Dreamer<'a> {
     }
 
     /// 成功率を計算
-    fn success_rate(&self, cutoff: &str) -> Result<f64> {
+    pub fn success_rate(&self, cutoff: &str) -> Result<f64> {
         let total: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM experiences WHERE created_at > ?1",
             params![cutoff],
@@ -168,7 +168,7 @@ impl<'a> Dreamer<'a> {
     }
 
     /// ルールベースの洞察生成
-    fn generate_insights(
+    pub fn generate_insights(
         &self,
         tool_usage: &[(String, i64)],
         failure_patterns: &[(String, i64)],
@@ -208,7 +208,7 @@ impl<'a> Dreamer<'a> {
     }
 
     /// パターン検出（行動の傾向を定量追跡）
-    fn detect_patterns(&self, cutoff: &str) -> Result<Vec<Pattern>> {
+    pub fn detect_patterns(&self, cutoff: &str) -> Result<Vec<Pattern>> {
         let mut patterns = Vec::new();
         let now = chrono::Utc::now().to_rfc3339();
 

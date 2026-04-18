@@ -267,6 +267,14 @@ impl<'a> EvolutionEngine<'a> {
         Ok(applied)
     }
 
+
+    /// Deep分析: dreams.rsの統計メソッドを使い、フルレポートを生成
+    /// dream_deep()の機能を吸収し、EvolutionEngine経由で統一アクセスを提供
+    pub fn analyze_deep(&self, days: i64) -> Result<crate::memory::dreams::DreamReport> {
+        let dreamer = crate::memory::dreams::Dreamer::new(self.store.conn());
+        dreamer.dream_deep(days)
+    }
+
     /// 実験ループ用: Dreamerのinsightからプロンプトルール候補を生成
     pub fn insight_based_mutations(&self) -> Result<Vec<String>> {
         let mut mutations = Vec::new();

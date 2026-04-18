@@ -498,7 +498,7 @@ pub fn run_experiment_loop(
 
         // g. Dreamer統合（N実験ごと）
         if experiment_count % loop_config.dreamer_interval == 0
-            && let Ok(report) = crate::memory::dreams::Dreamer::new(store.conn()).dream_deep(7)
+            && let Ok(report) = crate::memory::evolution::EvolutionEngine::new(store).analyze_deep(7)
         {
             for insight in &report.insights {
                 generator.add_insight_mutation(insight);
