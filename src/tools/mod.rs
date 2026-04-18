@@ -106,6 +106,78 @@ impl TaskType {
     }
 }
 
+/// ツール結果のセッション内キャッシュ — 読取専用ツールの重複I/Oを防止
+/// キー: "tool_name:args_json" でツール名+引数のJSON文字列化
+pub struct ToolResultCache {
+    cache: HashMap<String, ToolResult>,
+    hits: usize,
+    misses: usize,
+}
+
+impl ToolResultCache {
+    pub fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    /// キャッシュキーを生成（ツール名+引数JSON）
+    fn make_key(tool_name: &str, args: &serde_json::Value) -> String {
+        format!("{}:{}", tool_name, args)
+    }
+
+    /// キャッシュからツール結果を取得（ヒット時にhitsカウント加算）
+    pub fn get(&mut self, tool_name: &str, args: &serde_json::Value) -> Option<&ToolResult> {
+        let key = Self::make_key(tool_name, args);
+        if self.cache.contains_key(&key) {
+            self.hits += 1;
+            self.cache.get(&key)
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    /// ツール結果をキャッシュに保存
+    pub fn put(&mut self, tool_name: &str, args: &serde_json::Value, result: ToolResult) {
+        let key = Self::make_key(tool_name, args);
+        self.cache.insert(key, result);
+    }
+
+    /// ヒット/ミス統計を返す
+    pub fn stats(&self) -> (usize, usize) {
+        (self.hits, self.misses)
+    }
+
+    /// 特定ツール名に関連するキャッシュエントリを無効化
+    /// 書き込みツール実行後に呼ぶ（file_write→file_read/repo_mapクリア等）
+    pub fn invalidate(&mut self, tool_name: &str) {
+        self.cache.retain(|key, _| !key.starts_with(&format!("{}:", tool_name)));
+    }
+
+    /// 全キャッシュをクリア
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+
+    /// キャッシュ済みエントリ数
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+}
+
+impl Default for ToolResultCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// ツールレジストリ — 登録・検索・動的選択を管理
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
@@ -722,4 +794,87 @@ mod tests {
         // summary形式（- **name**）は含まれない
         assert!(!progressive.contains("- **shell**"));
     }
+
+    #[test]
+    fn t_cache_hit() {
+        // 同じ引数で2回目はキャッシュから返る
+        let mut cache = ToolResultCache::new();
+        let args = serde_json::json!({"path": "src/main.rs"});
+        let result = ToolResult { output: "fn main()".to_string(), success: true };
+        cache.put("file_read", &args, result);
+
+        let cached = cache.get("file_read", &args);
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().output, "fn main()");
+        assert!(cached.unwrap().success);
+    }
+
+    #[test]
+    fn t_cache_miss() {
+        // 異なる引数はミス
+        let mut cache = ToolResultCache::new();
+        let args1 = serde_json::json!({"path": "src/main.rs"});
+        let args2 = serde_json::json!({"path": "src/lib.rs"});
+        let result = ToolResult { output: "content".to_string(), success: true };
+        cache.put("file_read", &args1, result);
+
+        let cached = cache.get("file_read", &args2);
+        assert!(cached.is_none());
+    }
+
+    #[test]
+    fn t_cache_invalidate() {
+        // 書き込み後にキャッシュクリアされる
+        let mut cache = ToolResultCache::new();
+        let args = serde_json::json!({"path": "src/main.rs"});
+        cache.put("file_read", &args, ToolResult { output: "old".to_string(), success: true });
+        cache.put("repo_map", &serde_json::json!({}), ToolResult { output: "map".to_string(), success: true });
+        assert_eq!(cache.len(), 2);
+
+        // file_readのキャッシュだけ無効化
+        cache.invalidate("file_read");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("file_read", &args).is_none());
+
+        // repo_mapは残っている
+        let map_cached = cache.get("repo_map", &serde_json::json!({}));
+        assert!(map_cached.is_some());
+    }
+
+    #[test]
+    fn t_cache_stats() {
+        // ヒット/ミス統計が正しい
+        let mut cache = ToolResultCache::new();
+        let args = serde_json::json!({"path": "test.rs"});
+        cache.put("file_read", &args, ToolResult { output: "ok".to_string(), success: true });
+
+        // 1回ヒット
+        let _ = cache.get("file_read", &args);
+        // 1回ミス
+        let _ = cache.get("file_read", &serde_json::json!({"path": "other.rs"}));
+        // もう1回ヒット
+        let _ = cache.get("file_read", &args);
+
+        let (hits, misses) = cache.stats();
+        assert_eq!(hits, 2);
+        assert_eq!(misses, 1);
+    }
+
+    #[test]
+    fn t_cache_read_only_only() {
+        // 書き込みツールはキャッシュしないことを示すテスト
+        // ToolResultCache自体はツールのis_read_only()を知らないので、
+        // 呼び出し側がis_read_only()チェック後にのみputすることを期待する。
+        // ここではclearの動作を確認する。
+        let mut cache = ToolResultCache::new();
+        let args = serde_json::json!({"command": "ls"});
+        // 仮にshell結果をputしても…
+        cache.put("shell", &args, ToolResult { output: "files".to_string(), success: true });
+        assert_eq!(cache.len(), 1);
+        // clearで全消去される
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
 }
