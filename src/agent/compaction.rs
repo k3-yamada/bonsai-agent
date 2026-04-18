@@ -78,6 +78,50 @@ fn extract_name_from_json(json_str: &str) -> Option<String> {
     Some(value_start[..end_quote].to_string())
 }
 
+/// Assistantメッセージから<think>ブロックの結論部分を抽出（GLM-5.1 Preserved Thinking知見）
+///
+/// 各thinkブロックの最後の文（結論部分）を最大3件保持し、
+/// 推論の連続性を保護する。200文字で切り詰め。
+pub fn extract_thinking_summary(messages: &[Message]) -> Vec<String> {
+    let mut summaries = Vec::new();
+    for msg in messages {
+        if !matches!(msg.role, Role::Assistant) {
+            continue;
+        }
+        let mut remaining = msg.content.as_str();
+        while let Some(start) = remaining.find("<think>") {
+            let after_tag = &remaining[start + 7..];
+            if let Some(end) = after_tag.find("</think>") {
+                let block = after_tag[..end].trim();
+                if !block.is_empty() {
+                    let last_sentence = extract_last_sentence(block);
+                    if !last_sentence.is_empty() {
+                        let truncated: String = last_sentence.chars().take(200).collect();
+                        summaries.push(truncated);
+                        if summaries.len() >= 3 {
+                            return summaries;
+                        }
+                    }
+                }
+                remaining = &after_tag[end + 8..];
+            } else {
+                break;
+            }
+        }
+    }
+    summaries
+}
+
+/// thinkブロックから最後の文を抽出するヘルパー
+fn extract_last_sentence(block: &str) -> String {
+    let lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+    if let Some(last_line) = lines.last() {
+        last_line.trim().to_string()
+    } else {
+        block.trim().to_string()
+    }
+}
+
 /// 最後のAssistant/Toolメッセージからタスクの成果を200文字以内で抽出
 ///
 /// 最後のAssistantメッセージの内容を優先し、<think>タグは除外する。
@@ -120,6 +164,39 @@ fn strip_think_tags(s: &str) -> String {
     }
     result.push_str(remaining);
     result
+}
+
+/// メッセージの重要度スコアを計算（GLM-5.1 DSA知見）
+///
+/// トークン重要度による動的注意配分。重要度が低いメッセージから優先的に削除。
+pub fn score_message_importance(msg: &Message) -> f64 {
+    match msg.role {
+        Role::User => 1.0,
+        Role::System => {
+            if msg.content.contains("<context") || msg.content.contains("<memory-context") {
+                0.3
+            } else {
+                0.9
+            }
+        }
+        Role::Assistant => {
+            if msg.content.contains("<tool_call>") {
+                0.7
+            } else {
+                0.4
+            }
+        }
+        Role::Tool => {
+            if msg.content.contains("error") || msg.content.contains("Error")
+                || msg.content.contains("\u30a8\u30e9\u30fc") || msg.content.contains("failed")
+                || msg.content.contains("Failed")
+            {
+                0.2
+            } else {
+                0.5
+            }
+        }
+    }
 }
 
 /// Toolメッセージからエラー（未解決事項）を検出
@@ -176,8 +253,29 @@ pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
             if a >= boundary || b >= boundary { vec![a, b] } else { vec![] }
         })
         .collect();
-    for (i, msg) in messages[..boundary].iter_mut().enumerate() {
-        if protected.contains(&i) { continue; }
+
+    // 重要度ベース適応的削除（GLM-5.1 DSA知見）:
+    // 最初と最後のUserメッセージは絶対保護
+    let first_user_idx = messages[..boundary]
+        .iter()
+        .position(|m| matches!(m.role, Role::User));
+    let last_user_idx = messages[..boundary]
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User));
+
+    // 重要度スコアが低い順にソートした削除候補
+    let mut candidates: Vec<(usize, f64)> = (0..boundary)
+        .filter(|&i| {
+            !protected.contains(&i)
+                && Some(i) != first_user_idx
+                && Some(i) != last_user_idx
+        })
+        .map(|i| (i, score_message_importance(&messages[i])))
+        .collect();
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (i, _score) in &candidates {
+        let msg = &mut messages[*i];
         if matches!(msg.role, Role::Tool) && msg.content.len() > 50 {
             let id = msg.tool_call_id.as_deref().unwrap_or("?");
             msg.content = format!("[prev:{id}]");
@@ -189,10 +287,30 @@ pub fn compact_level2(messages: &mut [Message], config: &CompactionConfig) {
     if t <= config.placeholder_keep_recent {
         return;
     }
-    for msg in messages[..t - config.placeholder_keep_recent].iter_mut() {
+    let boundary = t - config.placeholder_keep_recent;
+    // Preserved Thinking: 削除対象から思考サマリーを抽出してから要約
+    let thinking_summaries = extract_thinking_summary(&messages[..boundary]);
+    for msg in messages[..boundary].iter_mut() {
         if matches!(msg.role, Role::Assistant) && msg.content.len() > config.summary_max_chars {
             let s: String = msg.content.chars().take(config.summary_max_chars).collect();
             msg.content = format!("{s}...[summarized]");
+        }
+    }
+    // 思考サマリーを最後の要約済みAssistantメッセージに追加
+    if !thinking_summaries.is_empty() {
+        let thinking_text = thinking_summaries
+            .iter()
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(last_assistant) = messages[..boundary]
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m.role, Role::Assistant))
+        {
+            last_assistant.content.push_str(&format!(
+                "\n[Preserved Thinking]\n{thinking_text}"
+            ));
         }
     }
 }
@@ -661,5 +779,89 @@ mod tests {
         let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
         assert!(handoff.content.contains("Unresolved"), "未解決事項が含まれるべき");
         assert!(handoff.content.contains("エラー"), "エラー内容が含まれるべき");
+    
+    // --- Preserved Thinking テスト ---
+
+    #[test]
+    fn t_extract_thinking_summary() {
+        let msgs = vec![
+            Message::assistant(
+                "<think>まずファイル構造を確認する。\n次にテストを書く。\n結論: TDDアプローチで進める。</think>実装開始"
+                    .to_string(),
+            ),
+            Message::assistant(
+                "<think>エラーの原因を分析。\n借用チェッカーが問題。\n解決策: Cloneを導入する。</think>修正完了"
+                    .to_string(),
+            ),
+        ];
+        let summaries = extract_thinking_summary(&msgs);
+        assert_eq!(summaries.len(), 2, "2つのthinkブロックからサマリー抽出");
+        assert!(summaries[0].contains("TDD"), "最後の文（結論）が抽出される");
+        assert!(summaries[1].contains("Clone"), "2つ目の結論も抽出される");
     }
+
+    #[test]
+    fn t_extract_thinking_empty() {
+        let msgs = vec![
+            Message::assistant("ツール呼び出しのみ".to_string()),
+            Message::user("質問"),
+        ];
+        let summaries = extract_thinking_summary(&msgs);
+        assert!(summaries.is_empty(), "thinkブロックがなければ空");
+    }
+
+    #[test]
+    fn t_score_importance_user() {
+        let msg = Message::user("タスクの定義");
+        assert_eq!(score_message_importance(&msg), 1.0, "Userメッセージは最高スコア");
+    }
+
+    #[test]
+    fn t_score_importance_error() {
+        let msg = Message::tool("error: file not found", "t1");
+        assert_eq!(score_message_importance(&msg), 0.2, "エラーToolは低スコア");
+    }
+
+    #[test]
+    fn t_level2_preserves_thinking() {
+        let mut msgs = vec![Message::system("s")];
+        for i in 0..6 {
+            msgs.push(Message::user(format!("q{i}")));
+            msgs.push(Message::assistant(format!(
+                "<think>ステップ{i}の分析。{}結論: 方針{i}で進める。</think>{}",
+                "x".repeat(300),
+                "y".repeat(100),
+            )));
+            msgs.push(Message::tool(format!("result{i}"), format!("t{i}")));
+        }
+        let config = CompactionConfig {
+            placeholder_keep_recent: 3,
+            summary_max_chars: 50,
+            ..Default::default()
+        };
+        compact_level2(&mut msgs, &config);
+        let has_preserved = msgs.iter().any(|m| m.content.contains("[Preserved Thinking]"));
+        assert!(has_preserved, "level2後に思考サマリーが残るべき");
+    }
+
+    // --- 重要度スコア追加テスト ---
+
+    #[test]
+    fn t_score_importance_tool_call() {
+        let msg = Message::assistant(r#"<tool_call>{"name":"shell"}</tool_call>"#);
+        assert_eq!(score_message_importance(&msg), 0.7, "tool_call含むAssistantは0.7");
+    }
+
+    #[test]
+    fn t_score_importance_system_context() {
+        let msg = Message::system("<context>injected</context>");
+        assert_eq!(score_message_importance(&msg), 0.3, "注入コンテキストSystemは0.3");
+    }
+
+    #[test]
+    fn t_score_importance_system_normal() {
+        let msg = Message::system("通常のシステムプロンプト");
+        assert_eq!(score_message_importance(&msg), 0.9, "通常Systemは0.9");
+    }
+
 }
