@@ -668,6 +668,12 @@ fn resolve_advisor_prompt(
     task_context: &str,
 ) -> AdvisorResolution {
     let start = std::time::Instant::now();
+    // Claude Code バックエンド優先
+    if let Ok(Some(cc_advice)) = advisor.try_claude_code_advice(role, task_context) {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        eprintln!("[advisor] Claude Code応答取得 role={:?} ({}文字, {}ms)", role, cc_advice.len(), duration_ms);
+        return AdvisorResolution { prompt: cc_advice, source: "claude-code", duration_ms };
+    }
     match advisor.try_remote_advice(role, task_context) {
         Ok(Some(remote)) => {
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -719,6 +725,7 @@ fn log_advisor_call(
 /// 停滞検出時に再計画ステップを注入
 ///
 /// 戻り値: true なら再計画ステップ挿入済（StallDetectorをreset）
+#[allow(clippy::too_many_arguments)]
 fn inject_replan_on_stall(
     session: &mut Session,
     stall_detector: &mut StallDetector,

@@ -43,6 +43,8 @@ pub struct AdvisorSettings {
     pub verification_prompt: String,
     /// 停滞時再計画プロンプト（カスタマイズ用、空文字なら組込みデフォルト）
     pub replan_prompt: String,
+    /// バックエンド: "local", "http", "claude-code"（デフォルト: local）
+    pub backend: String,
 }
 
 impl Default for AdvisorSettings {
@@ -56,6 +58,7 @@ impl Default for AdvisorSettings {
             timeout_secs: 10,
             verification_prompt: String::new(), // 空 = ランタイムでDEFAULTを使用
             replan_prompt: String::new(),
+            backend: String::new(),
         }
     }
 }
@@ -85,6 +88,11 @@ impl AdvisorSettings {
         } else {
             self.replan_prompt.clone()
         };
+        let backend = if self.backend.is_empty() {
+            crate::runtime::model_router::AdvisorBackend::default()
+        } else {
+            crate::runtime::model_router::AdvisorBackend::from_str(&self.backend)
+        };
         AdvisorConfig {
             max_uses: self.max_uses,
             calls_used: 0,
@@ -95,6 +103,7 @@ impl AdvisorSettings {
             timeout_secs: self.timeout_secs,
             verification_prompt,
             replan_prompt,
+            backend,
             cache: std::collections::HashMap::new(),
         }
     }

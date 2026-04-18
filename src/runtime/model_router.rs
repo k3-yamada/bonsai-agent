@@ -54,6 +54,8 @@ pub struct AdvisorConfig {
     pub verification_prompt: String,
     /// 停滞時再計画プロンプト（api_endpoint未設定時に使用）
     pub replan_prompt: String,
+    /// バックエンド選択（Local/Http/ClaudeCode）
+    pub backend: AdvisorBackend,
     /// セッション内キャッシュ（同一role+task_contextの重複API呼出を回避）
     /// キー: hash(role, task_context)、値: 外部APIのレスポンス本文
     /// セッションごとにクローンされるため、セッション境界で自動リセット
@@ -76,6 +78,34 @@ pub enum AdvisorRole {
     Verification,
     /// 停滞時の再計画
     Replan,
+}
+
+
+/// アドバイザーバックエンド選択
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvisorBackend {
+    /// ローカルプロンプト（api_endpoint未設定時のデフォルト）
+    Local,
+    /// 外部HTTP API（OpenAI互換）
+    Http,
+    /// Claude Code CLI（`claude -p`サブプロセス、Pro/Team契約内で無料）
+    ClaudeCode,
+}
+
+impl AdvisorBackend {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "http" | "api" => Self::Http,
+            "claude-code" | "claude_code" | "claude" => Self::ClaudeCode,
+            _ => Self::Local,
+        }
+    }
+}
+
+impl Default for AdvisorBackend {
+    fn default() -> Self {
+        Self::Local
+    }
 }
 
 impl AdvisorRole {
@@ -110,6 +140,7 @@ impl Default for AdvisorConfig {
             timeout_secs: 10,
             verification_prompt: DEFAULT_VERIFICATION_PROMPT.to_string(),
             replan_prompt: DEFAULT_REPLAN_PROMPT.to_string(),
+            backend: AdvisorBackend::default(),
             cache: HashMap::new(),
         }
     }
@@ -158,6 +189,8 @@ impl AdvisorConfig {
             log_event(LogLevel::Info, "advisor", &format!("リモートモード: endpoint={}, model={}, key={}, max_uses={}, timeout={}s",
                 endpoint, model, key_status, self.max_uses, self.timeout_secs
             ));
+        } else if self.backend == AdvisorBackend::ClaudeCode {
+            log_event(LogLevel::Info, "advisor", &format!("Claude Codeモード (max_uses={}, claude -p経由)", self.max_uses));
         } else {
             log_event(LogLevel::Info, "advisor", &format!("ローカルモード (max_uses={}, 検証+再計画)", self.max_uses));
         }
@@ -224,6 +257,60 @@ impl AdvisorConfig {
         self.cache.insert(key, content.clone());
         Ok(Some(content))
     }
+
+    /// Claude Code CLI経由でアドバイザー応答を取得
+    ///
+    /// `claude -p "prompt" --output-format text` をサブプロセスで実行。
+    /// Pro/Team契約内で追加API料金なし。
+    pub fn try_claude_code_advice(
+        &mut self,
+        role: AdvisorRole,
+        task_context: &str,
+    ) -> anyhow::Result<Option<String>> {
+        if self.backend != AdvisorBackend::ClaudeCode {
+            return Ok(None);
+        }
+        // キャッシュヒット
+        let key = Self::cache_key(role, task_context);
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(Some(cached.clone()));
+        }
+
+        let prompt = format!(
+            "{}
+
+{}
+
+制約: 100語以内、列挙形式で簡潔に回答。",
+            role.system_prompt(),
+            role.user_prompt(task_context)
+        );
+
+        let output = std::process::Command::new("claude")
+            .args(["-p", &prompt, "--output-format", "text"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let content = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if content.is_empty() {
+                    anyhow::bail!("Claude Code応答が空");
+                }
+                self.cache.insert(key, content.clone());
+                Ok(Some(content))
+            }
+            Ok(out) => {
+                anyhow::bail!("Claude Code終了コード: {:?}", out.status.code())
+            }
+            Err(e) => {
+                anyhow::bail!("Claude Code実行失敗: {e}")
+            }
+        }
+    }
+
 }
 
 /// タスクコンテキスト（モデル選択の入力）
