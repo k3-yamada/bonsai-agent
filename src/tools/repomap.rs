@@ -193,12 +193,12 @@ fn extract_definitions(path: &Path) -> Vec<String> {
     let re = Regex::new(r"(?:fn|struct|enum|trait|class|type|interface|func|def|const|static|mod|object|protocol|actor)\s+(\w+)").unwrap();
     let mut defs = Vec::new();
     for s in &syms {
-        if let Some(caps) = re.captures(s) {
-            if let Some(m) = caps.get(1) {
-                let name = m.as_str().to_string();
-                if name.len() >= 2 {
-                    defs.push(name);
-                }
+        if let Some(caps) = re.captures(s)
+            && let Some(m) = caps.get(1)
+        {
+            let name = m.as_str().to_string();
+            if name.len() >= 2 {
+                defs.push(name);
             }
         }
     }
