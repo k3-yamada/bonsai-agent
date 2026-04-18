@@ -20,7 +20,9 @@ use crate::runtime::embedder::create_embedder;
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
-use crate::tools::{ToolRegistry, ToolResult, ToolResultCache};
+use crate::tools::{ToolRegistry, ToolResultCache};
+use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
+use crate::agent::context_inject::inject_contextual_memories;
 
 /// エージェント設定
 pub struct AgentConfig {
@@ -260,157 +262,15 @@ impl Default for StallDetector {
 }
 
 /// バリデーション済みのツール呼び出し
-struct ValidatedCall<'a> {
-    name: String,
-    args_json: String,
-    coerced_args: serde_json::Value,
-    tool: &'a dyn crate::tools::Tool,
-    is_read_only: bool,
-}
+// ValidatedCall, ToolExecResult → tool_exec.rs に移動
 
-/// ツール実行結果（並列実行からの収集用）
-struct ToolExecResult {
-    name: String,
-    args_json: String,
-    output: String,
-    success: bool,
-    is_error: bool,
-}
+// execute_validated_calls → tool_exec.rs に移動
 
-/// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
-fn execute_validated_calls(
-    calls: &[ValidatedCall<'_>],
-    session: &mut Session,
-    circuit_breaker: &mut CircuitBreaker,
-    secrets_filter: &SecretsFilter,
-    store: Option<&MemoryStore>,
-    cache: &mut ToolResultCache,
-) -> Vec<String> {
-    let mut step_tools: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < calls.len() {
-        let batch_start = i;
-        while i < calls.len() && calls[i].is_read_only {
-            i += 1;
-        }
-        let read_batch = &calls[batch_start..i];
-        if read_batch.len() >= 2 {
-            let results = execute_read_batch_parallel(read_batch);
-            for r in results {
-                // 読取専用ツール結果をキャッシュに保存
-                if !r.is_error {
-                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
-                        cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
-                    }
-                }
-                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
-                if !r.is_error {
-                    step_tools.push(r.name);
-                }
-            }
-        } else {
-            for call in read_batch {
-                // キャッシュヒット判定
-                if let Some(cached) = cache.get(&call.name, &call.coerced_args) {
-                    let cached_output = cached.output.clone();
-                    let cached_success = cached.success;
-                    session.add_message(Message::tool(&cached_output, &call.name));
-                    step_tools.push(call.name.clone());
-                    log_event(LogLevel::Debug, "cache", &format!("キャッシュヒット: {}", call.name));
-                    continue;
-                }
-                let r = execute_single_call(call);
-                // 成功結果をキャッシュに保存
-                if !r.is_error {
-                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
-                        cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
-                    }
-                }
-                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
-                if !r.is_error {
-                    step_tools.push(r.name);
-                }
-            }
-        }
-        if i < calls.len() && !calls[i].is_read_only {
-            let r = execute_single_call(&calls[i]);
-            apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
-            if !r.is_error {
-                step_tools.push(r.name);
-            }
-            // 書き込みツール実行後: 読取キャッシュを無効化
-            cache.invalidate("file_read");
-            cache.invalidate("repo_map");
-            i += 1;
-        }
-    }
-    step_tools
-}
+// execute_read_batch_parallel → tool_exec.rs に移動
 
-/// 読取専用ツールをstd::thread::scopeで並列実行
-fn execute_read_batch_parallel(batch: &[ValidatedCall<'_>]) -> Vec<ToolExecResult> {
-    log_event(LogLevel::Debug, "parallel", &format!("読取ツール{}件を並列実行", batch.len()));
-    std::thread::scope(|s| {
-        let handles: Vec<_> = batch.iter().map(|call| s.spawn(move || execute_single_call(call))).collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    })
-}
+// execute_single_call → tool_exec.rs に移動
 
-/// 単一ツール呼び出しを実行
-fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
-    match call.tool.call(call.coerced_args.clone()) {
-        Ok(tool_result) => ToolExecResult {
-            name: call.name.clone(), args_json: call.args_json.clone(),
-            output: tool_result.output, success: tool_result.success, is_error: false,
-        },
-        Err(e) => ToolExecResult {
-            name: call.name.clone(), args_json: call.args_json.clone(),
-            output: format!("ツール実行エラー: {e}"), success: false, is_error: true,
-        },
-    }
-}
-
-/// ツール実行結果をセッション・サーキットブレーカー・監査ログに反映
-fn apply_tool_result(
-    r: &ToolExecResult, session: &mut Session, circuit_breaker: &mut CircuitBreaker,
-    secrets_filter: &SecretsFilter, store: Option<&MemoryStore>,
-) {
-    // args_jsonからファイルパスを抽出（"path"フィールドがあれば）
-    let file_path = serde_json::from_str::<serde_json::Value>(&r.args_json)
-        .ok()
-        .and_then(|v| v.get("path").and_then(|p| p.as_str().map(String::from)));
-
-    if r.is_error {
-        circuit_breaker.record_failure(&r.name);
-        if let Some(s) = store {
-            let audit = AuditLog::new(s.conn());
-            let _ = audit.log(Some(&session.id), &AuditAction::ToolCall {
-                tool_name: r.name.clone(), args: r.args_json.clone(), success: false, output_preview: r.output.clone(),
-            });
-            // グラフ記憶: エラーパターン記録
-            let graph = KnowledgeGraph::new(s.conn());
-            let path = file_path.as_deref().unwrap_or("unknown");
-            let _ = graph.record_error_pattern("tool_error", path, &r.name);
-        }
-        session.add_message(Message::tool(&r.output, &r.name));
-    } else {
-        circuit_breaker.record_success(&r.name);
-        let redacted = secrets_filter.redact(&r.output);
-        if let Some(s) = store {
-            let audit = AuditLog::new(s.conn());
-            let _ = audit.log(Some(&session.id), &AuditAction::ToolCall {
-                tool_name: r.name.clone(), args: r.args_json.clone(), success: r.success,
-                output_preview: redacted.chars().take(200).collect(),
-            });
-            // グラフ記憶: ツール使用記録（ファイルパスがある場合のみ）
-            if let Some(ref fp) = file_path {
-                let graph = KnowledgeGraph::new(s.conn());
-                let _ = graph.record_tool_usage(&r.name, fp);
-            }
-        }
-        session.add_message(Message::tool(&redacted, &r.name));
-    }
-}
+// apply_tool_result → tool_exec.rs に移動
 
 /// ステップ実行に必要なコンテキスト
 pub struct StepContext<'a> {
@@ -954,199 +814,13 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
     }
 }
 
-/// 過去の経験を成功/失敗パターンに分離してセッションに注入
-///
-/// ExperienceStore::find_similar で類似経験を取得し、
-/// 成功と失敗を分けて <context type="experience"> タグで注入する。
-/// 経験が空の場合はメッセージを追加しない。
-fn inject_experience_context(
-    session: &mut Session,
-    task_context: &str,
-    store: &MemoryStore,
-) {
-    let exp = ExperienceStore::new(store.conn());
-    let past = match exp.find_similar(task_context, 3) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[warn] 経験検索エラー: {e}");
-            return;
-        }
-    };
-    if past.is_empty() {
-        return;
-    }
+// inject_experience_context → context_inject.rs に移動
 
-    let successes: Vec<String> = past
-        .iter()
-        .filter(|e| e.exp_type == ExperienceType::Success)
-        .map(|e| {
-            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
-            format!("- タスク: \"{}\" → {}", e.task_context, lesson)
-        })
-        .collect();
+// inject_vault_knowledge → context_inject.rs に移動
 
-    let failures: Vec<String> = past
-        .iter()
-        .filter(|e| e.exp_type == ExperienceType::Failure)
-        .map(|e| {
-            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
-            format!("- タスク: \"{}\" → {}", e.task_context, lesson)
-        })
-        .collect();
+// load_soul → context_inject.rs に移動
 
-    let insights: Vec<String> = past
-        .iter()
-        .filter(|e| e.exp_type == ExperienceType::Insight)
-        .map(|e| {
-            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
-            format!("- {}", lesson)
-        })
-        .collect();
-
-    let mut parts = Vec::new();
-    if !successes.is_empty() {
-        parts.push(format!("[成功パターン]\n{}", successes.join("\n")));
-    }
-    if !failures.is_empty() {
-        parts.push(format!("[失敗パターン]\n{}", failures.join("\n")));
-    }
-    if !insights.is_empty() {
-        parts.push(format!("[学び]\n{}", insights.join("\n")));
-    }
-
-    session.add_message(Message::system(format!(
-        "<context type=\"experience\">\n{}\n</context>",
-        parts.join("\n")
-    )));
-}
-
-/// Vault知識を選択的にセッションに注入（関連カテゴリのみ）
-fn inject_vault_knowledge(
-    session: &mut Session,
-    task_context: &str,
-    vault: &crate::knowledge::vault::Vault,
-) {
-    // Rules（Decision/Pattern）は常時注入 — 判断基準として常に必要
-    let rules = vault.read_rules(3).unwrap_or_default();
-    // Docs（Fact/Insight/Preference/Todo）はタスクコンテキストに応じて選択的注入
-    let docs = vault.read_docs_for_context(task_context, 2).unwrap_or_default();
-
-    if rules.is_empty() && docs.is_empty() {
-        return;
-    }
-
-    if !rules.is_empty() {
-        session.add_message(Message::system(format!(
-            "<context type=\"vault-rules\">\n{}\n</context>",
-            rules.join("\n")
-        )));
-    }
-    if !docs.is_empty() {
-        session.add_message(Message::system(format!(
-            "<context type=\"vault-docs\">\n{}\n</context>",
-            docs.join("\n")
-        )));
-    }
-}
-
-/// SOUL.mdからペルソナを読み込む
-/// 検索順: (1) 明示パス, (2) .bonsai/SOUL.md, (3) ~/.config/bonsai-agent/SOUL.md
-pub fn load_soul(soul_path: &Option<std::path::PathBuf>) -> Option<String> {
-    let candidates: Vec<std::path::PathBuf> = [
-        soul_path.clone(),
-        Some(std::path::PathBuf::from(".bonsai/SOUL.md")),
-        dirs::config_dir().map(|d| d.join("bonsai-agent").join("SOUL.md")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    for path in candidates {
-        if let Ok(content) = std::fs::read_to_string(&path)
-            && !content.trim().is_empty()
-        {
-            return Some(content);
-        }
-    }
-    None
-}
-
-/// コンテキストメモリ・経験・スキルをセッションに注入
-fn inject_contextual_memories(
-    session: &mut Session,
-    task_context: &str,
-    store: Option<&MemoryStore>,
-) {
-    let vault_path = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("bonsai-agent")
-        .join("vault");
-    let vault = crate::knowledge::vault::Vault::new(&vault_path).ok();
-    if let Some(ref v) = vault {
-        let stocks = crate::knowledge::extractor::extract_stock(task_context, &session.id);
-        let _ = v.append_all(&stocks);
-        // Vault知識の選択的注入（関連カテゴリのみ）
-        inject_vault_knowledge(session, task_context, v);
-    }
-    let embedder = create_embedder();
-
-    let Some(s) = store else { return };
-
-    // ハイブリッド検索: 関連メモリ
-    let search = HybridSearch::new(s, embedder.as_ref());
-    let memories = match search.search(task_context, 3) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[warn] メモリ検索エラー: {e}");
-            vec![]
-        }
-    };
-    if !memories.is_empty() {
-        let ctx: String = memories
-            .iter()
-            .map(|r| format!("- {}", r.memory.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        session.add_message(Message::system(format!("<context type=\"memory\">\n関連する過去の記憶:\n{ctx}\n</context>")));
-    }
-
-    // 類似経験（成功/失敗分離フォーマットで注入）
-    inject_experience_context(session, task_context, s);
-
-    // 関連スキル
-    let skills = SkillStore::new(s.conn());
-    let matching = match skills.find_matching(task_context, 3) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[warn] スキル検索エラー: {e}");
-            vec![]
-        }
-    };
-    if !matching.is_empty() {
-        let ctx: String = matching
-            .iter()
-            .map(|sk| {
-                format!(
-                    "- スキル「{}」: {} (ツール: {})",
-                    sk.name, sk.description, sk.tool_chain
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        session.add_message(Message::system(format!(
-            "<context type=\"skills\">\n利用可能なスキル（過去の成功パターン）:\n{ctx}\n上記のパターンが適用可能な場合は参考にしてください。\n</context>"
-        )));
-    }
-
-    // グラフ構造連想記憶: 関連コンテキスト注入
-    let graph = KnowledgeGraph::new(s.conn());
-    let graph_ctx = graph.related_context(task_context, 5).unwrap_or_default();
-    if !graph_ctx.is_empty() {
-        session.add_message(Message::system(format!(
-            "<context type=\"graph\">\n関連するグラフ知識:\n{graph_ctx}\n</context>"
-        )));
-    }
-}
+// inject_contextual_memories → context_inject.rs に移動
 
 /// 成功時のセッション保存・経験記録・スキル昇格
 fn record_success(
@@ -1221,6 +895,8 @@ fn clean_response(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tool_exec::{ToolExecResult, apply_tool_result};
+    use crate::agent::context_inject::inject_experience_context;
     use crate::memory::store::MemoryStore;
     use crate::runtime::inference::MockLlmBackend;
     use crate::tools::permission::Permission;
@@ -1535,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_load_soul_missing_is_none() {
-        let result = load_soul(&Some(std::path::PathBuf::from("/tmp/nonexistent_soul_bonsai.md")));
+        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from("/tmp/nonexistent_soul_bonsai.md")));
         assert!(result.is_none());
     }
 
@@ -1543,7 +1219,7 @@ mod tests {
     fn test_load_soul_from_explicit_path() {
         let path = format!("/tmp/bonsai-test-soul-{}.md", uuid::Uuid::new_v4());
         std::fs::write(&path, "私はテスト用ペルソナです").unwrap();
-        let result = load_soul(&Some(std::path::PathBuf::from(&path)));
+        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
         assert!(result.is_some());
         assert!(result.unwrap().contains("ペルソナ"));
         std::fs::remove_file(&path).ok();
@@ -1553,7 +1229,7 @@ mod tests {
     fn test_load_soul_empty_file_is_none() {
         let path = format!("/tmp/bonsai-test-soul-empty-{}.md", uuid::Uuid::new_v4());
         std::fs::write(&path, "   ").unwrap();
-        let result = load_soul(&Some(std::path::PathBuf::from(&path)));
+        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
         assert!(result.is_none());
         std::fs::remove_file(&path).ok();
     }
@@ -1561,7 +1237,7 @@ mod tests {
     #[test]
     fn test_load_soul_none_path() {
         // Noneパスの場合、.bonsai/SOUL.mdなどを探すが通常存在しない
-        let result = load_soul(&None);
+        let result = crate::agent::context_inject::load_soul(&None);
         // テスト環境では存在しないのでNone（存在する場合はSome）
         // assertはしない — 環境依存
         let _ = result;
