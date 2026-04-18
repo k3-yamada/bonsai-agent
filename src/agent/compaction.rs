@@ -779,7 +779,8 @@ mod tests {
         let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
         assert!(handoff.content.contains("Unresolved"), "未解決事項が含まれるべき");
         assert!(handoff.content.contains("エラー"), "エラー内容が含まれるべき");
-    
+    }
+
     // --- Preserved Thinking テスト ---
 
     #[test]
