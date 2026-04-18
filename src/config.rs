@@ -172,6 +172,28 @@ impl Default for InferenceParams {
     }
 }
 
+impl InferenceParams {
+    /// llama-server向けデフォルト（Default::defaultと同一、明示的エイリアス）
+    pub fn llama_server_default() -> Self {
+        Self::default()
+    }
+
+    /// MLX最適化プリセット（Ternary Bonsai向け）
+    /// - temperature: 0.3（低めでツール呼び出し精度向上）
+    /// - top_p: 0.9（やや広めで多様性確保）
+    /// - repeat_penalty: 1.1（緩めで自然な応答）
+    pub fn mlx_optimized() -> Self {
+        Self {
+            temperature: 0.3,
+            top_p: 0.9,
+            top_k: 20,
+            min_p: 0.05,
+            max_tokens: 1024,
+            repeat_penalty: 1.1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerBackend {
@@ -583,6 +605,30 @@ max_tokens = 2048
         assert_eq!(config.model.inference.max_tokens, 2048);
         // 未指定はデフォルト
         assert!((config.model.inference.top_p - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_mlx_optimized_preset() {
+        let params = InferenceParams::mlx_optimized();
+        assert!((params.temperature - 0.3).abs() < f64::EPSILON);
+        assert!((params.top_p - 0.9).abs() < f64::EPSILON);
+        assert_eq!(params.top_k, 20);
+        assert!((params.min_p - 0.05).abs() < f64::EPSILON);
+        assert_eq!(params.max_tokens, 1024);
+        assert!((params.repeat_penalty - 1.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_llama_server_default_preset() {
+        // llama_server_default()はDefault::default()と同一であることを検証
+        let preset = InferenceParams::llama_server_default();
+        let default = InferenceParams::default();
+        assert!((preset.temperature - default.temperature).abs() < f64::EPSILON);
+        assert!((preset.top_p - default.top_p).abs() < f64::EPSILON);
+        assert_eq!(preset.top_k, default.top_k);
+        assert!((preset.min_p - default.min_p).abs() < f64::EPSILON);
+        assert_eq!(preset.max_tokens, default.max_tokens);
+        assert!((preset.repeat_penalty - default.repeat_penalty).abs() < f64::EPSILON);
     }
 
 }
