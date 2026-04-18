@@ -156,3 +156,118 @@ pub(crate) fn execute_validated_calls(
     }
     step_tools
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::error_recovery::CircuitBreaker;
+    use crate::safety::secrets::SecretsFilter;
+    use crate::tools::permission::Permission;
+
+    struct DummyTool;
+    impl crate::tools::Tool for DummyTool {
+        fn name(&self) -> &str { "dummy" }
+        fn description(&self) -> &str { "test" }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn permission(&self) -> Permission { Permission::Auto }
+        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
+            Ok(crate::tools::ToolResult { output: "ok".into(), success: true })
+        }
+        fn is_read_only(&self) -> bool { true }
+    }
+
+    struct ErrorTool;
+    impl crate::tools::Tool for ErrorTool {
+        fn name(&self) -> &str { "error_tool" }
+        fn description(&self) -> &str { "fails" }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn permission(&self) -> Permission { Permission::Auto }
+        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
+            anyhow::bail!("test error")
+        }
+        fn is_read_only(&self) -> bool { true }
+    }
+
+    #[test]
+    fn t_execute_single_call_success() {
+        let tool = DummyTool;
+        let call = ValidatedCall {
+            name: "dummy".into(),
+            args_json: "{}".into(),
+            coerced_args: serde_json::json!({}),
+            tool: &tool,
+            is_read_only: true,
+        };
+        let result = execute_single_call(&call);
+        assert!(!result.is_error);
+        assert!(result.success);
+        assert_eq!(result.output, "ok");
+    }
+
+    #[test]
+    fn t_execute_single_call_error() {
+        let tool = ErrorTool;
+        let call = ValidatedCall {
+            name: "error_tool".into(),
+            args_json: "{}".into(),
+            coerced_args: serde_json::json!({}),
+            tool: &tool,
+            is_read_only: true,
+        };
+        let result = execute_single_call(&call);
+        assert!(result.is_error);
+        assert!(!result.success);
+        assert!(result.output.contains("エラー"));
+    }
+
+    #[test]
+    fn t_apply_tool_result_success() {
+        let mut session = Session::new();
+        let mut cb = CircuitBreaker::default();
+        let sf = SecretsFilter::default();
+        let r = ToolExecResult {
+            name: "dummy".into(),
+            args_json: "{}".into(),
+            output: "success output".into(),
+            success: true,
+            is_error: false,
+        };
+        apply_tool_result(&r, &mut session, &mut cb, &sf, None);
+        assert!(session.messages.iter().any(|m| m.content.contains("success output")));
+    }
+
+    #[test]
+    fn t_apply_tool_result_error() {
+        let mut session = Session::new();
+        let mut cb = CircuitBreaker::default();
+        let sf = SecretsFilter::default();
+        let r = ToolExecResult {
+            name: "dummy".into(),
+            args_json: "{}".into(),
+            output: "error occurred".into(),
+            success: false,
+            is_error: true,
+        };
+        apply_tool_result(&r, &mut session, &mut cb, &sf, None);
+        assert!(session.messages.iter().any(|m| m.content.contains("error occurred")));
+    }
+
+    #[test]
+    fn t_validated_call_fields() {
+        let tool = DummyTool;
+        let call = ValidatedCall {
+            name: "test".into(),
+            args_json: r#"{"key":"val"}"#.into(),
+            coerced_args: serde_json::json!({"key": "val"}),
+            tool: &tool,
+            is_read_only: true,
+        };
+        assert_eq!(call.name, "test");
+        assert!(call.is_read_only);
+    }
+}

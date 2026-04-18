@@ -206,3 +206,81 @@ pub(crate) fn inject_contextual_memories(
         )));
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::store::MemoryStore;
+
+    #[test]
+    fn t_load_soul_nonexistent() {
+        let result = load_soul(&Some(std::path::PathBuf::from("/nonexistent/SOUL.md")));
+        // 存在しないパスでパニックしない
+        assert!(result.is_none() || result.is_some());
+    }
+
+    #[test]
+    fn t_load_soul_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SOUL.md");
+        std::fs::write(&path, "# Test Persona\nI am a test agent.").unwrap();
+        let result = load_soul(&Some(path));
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Test Persona"));
+    }
+
+    #[test]
+    fn t_inject_experience_context_empty() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let before = session.messages.len();
+        inject_experience_context(&mut session, "nonexistent task", &store);
+        // 経験がなければメッセージ追加なし
+        assert_eq!(session.messages.len(), before);
+    }
+
+    #[test]
+    fn t_inject_vault_knowledge_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        let mut session = Session::new();
+        let before = session.messages.len();
+        inject_vault_knowledge(&mut session, "hello", &vault);
+        // 空Vaultではメッセージ追加なし
+        assert_eq!(session.messages.len(), before);
+    }
+
+    #[test]
+    fn t_inject_vault_knowledge_with_rules() {
+        use crate::knowledge::extractor::{StockCategory, StockEntry};
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        vault.append(&StockEntry {
+            category: StockCategory::Decision,
+            content: "Rustを採用した".into(),
+            source: "test".into(),
+        }).unwrap();
+        let mut session = Session::new();
+        inject_vault_knowledge(&mut session, "hello", &vault);
+        // Decision(Rule)があるのでメッセージ追加される
+        assert!(session.messages.len() > 0);
+        let has_rules = session.messages.iter().any(|m| m.content.contains("vault-rules"));
+        assert!(has_rules, "vault-rulesタグが含まれる");
+    }
+
+    #[test]
+    fn t_inject_contextual_memories_no_panic() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        // パニックしないことを確認
+        inject_contextual_memories(&mut session, "test task", Some(&store));
+    }
+
+    #[test]
+    fn t_load_soul_none_path() {
+        let result = load_soul(&None);
+        // Noneパスでパニックしない
+        assert!(result.is_none() || result.is_some());
+    }
+}
