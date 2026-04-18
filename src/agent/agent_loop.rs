@@ -4,6 +4,7 @@ use anyhow::Result;
 use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
 use crate::agent::conversation::{Message, ParsedOutput, Session};
+use crate::agent::error_recovery::TrialSummary;
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
 };
@@ -127,6 +128,8 @@ pub struct LoopState {
     pub middleware_chain: MiddlewareChain,
     /// ツール結果キャッシュ（読取専用ツールの重複呼び出し回避）
     pub tool_cache: ToolResultCache,
+    /// 試行サマリー記憶（GrandCode知見: 失敗履歴を保持し再計画時に注入）
+    pub trial_summary: TrialSummary,
 }
 
 impl LoopState {
@@ -142,6 +145,7 @@ impl LoopState {
             token_budget: TokenBudgetTracker::default(),
             middleware_chain: MiddlewareChain::default(),
             tool_cache: ToolResultCache::new(),
+            trial_summary: TrialSummary::default(),
         }
     }
 }
@@ -628,7 +632,7 @@ fn handle_outcome(
             // ツール追跡はミドルウェア外で保持（ReturnでのAgentLoopResult構築に必要）
             state.all_tools.extend(step_tools);
             // Advisor連携の停滞検出（ミドルウェアのStallとは別に、Advisor呼び出しが必要）
-            inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, task_context, tools_succeeded, output_hash, store);
+            inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, task_context, tools_succeeded, output_hash, store, &state.trial_summary);
             OutcomeAction::Continue
         }
     }
@@ -723,6 +727,7 @@ fn inject_replan_on_stall(
     tools_succeeded: bool,
     output_hash: u64,
     store: Option<&MemoryStore>,
+    trial_summary: &TrialSummary,
 ) -> bool {
     if !stall_detector.record_step(tools_succeeded, output_hash) {
         return false;
@@ -734,7 +739,12 @@ fn inject_replan_on_stall(
     }
     let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Replan, task_context);
     log_advisor_call(store, session, AdvisorRole::Replan, &resolution);
-    session.add_message(Message::system(resolution.prompt));
+    let mut replan_msg = resolution.prompt;
+    if !trial_summary.is_empty() {
+        replan_msg.push_str("\n\n");
+        replan_msg.push_str(&trial_summary.format_for_replan());
+    }
+    session.add_message(Message::system(replan_msg));
     advisor.record_call();
     stall_detector.reset();
     eprintln!(
@@ -786,6 +796,12 @@ fn inject_verification_step(
     let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Verification, task_context);
     log_advisor_call(store, session, AdvisorRole::Verification, &resolution);
     session.add_message(Message::system(resolution.prompt));
+    session.add_message(Message::system(
+        "検証チェックリスト:\n\
+         - 全ての主張にツール結果の根拠があるか？\n\
+         - 未検証の仮定が残っていないか？\n\
+         - エッジケースを見落としていないか？".to_string(),
+    ));
     advisor.record_call();
     eprintln!(
         "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
@@ -801,10 +817,12 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
         // Advisor Tool パターン: 100語以内・列挙形式でトークン35-45%削減（Anthropic実測）
         session.add_message(Message::system(
             "このタスクは複数ステップが必要です。\n\
-             <think> 内で計画を立ててから実行。計画は100語以内、列挙形式で:\n\
-             1. [ステップ] - [ツール]\n\
-             2. [ステップ] - [ツール]\n\
-             計画後、ステップ1から順に実行。完了前に成果を検証。".to_string(),
+             <think> 内で以下を実行:\n\
+             1. 仮説: 解決策の仮説を立てる\n\
+             2. 検証: 最小限のテスト（ファイル確認、小規模実行）で仮説を検証\n\
+             3. 計画: 検証結果に基づき100語以内の実行計画を列挙形式で作成\n\
+             仮説が間違っていた場合は別の仮説を立て直すこと。\n\
+             計画後、ステップ1から順に実行。".to_string(),
         ));
         log_event(LogLevel::Info, "advisor", "複雑タスク検出 → 簡潔計画プレステップ注入");
     }
@@ -1449,10 +1467,10 @@ mod tests {
         let mut stall = StallDetector::new(3);
         let mut advisor = AdvisorConfig::default();
         // 1〜2回目: 検出されない
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
         // 3回目: 停滞検出→再計画注入
-        assert!(inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
+        assert!(inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
         assert_eq!(advisor.calls_used, 1);
         assert!(session.messages.iter().any(|m| m.content.contains("停滞")));
     }
@@ -1467,8 +1485,8 @@ mod tests {
             calls_used: 1,
             ..Default::default()
         };
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None));
-        let injected = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None);
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
+        let injected = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default());
         assert!(!injected, "max_uses超過時は注入しない");
         assert_eq!(advisor.calls_used, 1, "calls_usedは増えない");
     }
@@ -1479,9 +1497,9 @@ mod tests {
         let mut session = Session::new();
         let mut stall = StallDetector::new(2);
         let mut advisor = AdvisorConfig::default();
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 1, None));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 2, None));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 3, None));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 1, None, &TrialSummary::default()));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 2, None, &TrialSummary::default()));
+        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 3, None, &TrialSummary::default()));
         assert_eq!(advisor.calls_used, 0);
     }
 
@@ -1811,6 +1829,53 @@ mod tests {
             let msg = &session.messages[0].content;
             assert!(msg.starts_with("<context type="), "経験注入は<context type=で始まるべき");
             assert!(msg.ends_with("</context>"), "経験注入は</context>で終わるべき");
+        }
+    }
+
+
+    #[test]
+    fn t_loop_state_has_trial_summary() {
+        let state = LoopState::new(AdvisorConfig::default());
+        assert!(state.trial_summary.is_empty());
+    }
+
+    #[test]
+    fn t_planning_step_contains_hypothesis() {
+        let mut session = Session::new();
+        inject_planning_step(&mut session, "テストを書いて、実装して、リファクタリングして");
+        let last = session.messages.last().unwrap();
+        assert!(last.content.contains("仮説"), "仮説キーワード: {}", last.content);
+    }
+
+    #[test]
+    fn t_verification_checklist() {
+        let mut session = Session::new();
+        let mut advisor = AdvisorConfig::default();
+        let injected = inject_verification_step(
+            &mut session, &mut advisor,
+            "テストを書いて、実装して、リファクタリングして",
+            "完了しました", 1, 10, None,
+        );
+        if injected {
+            let has_checklist = session.messages.iter().any(|m| m.content.contains("チェックリスト"));
+            assert!(has_checklist, "検証チェックリストが注入される");
+        }
+    }
+
+    #[test]
+    fn t_replan_with_trial_summary() {
+        let mut session = Session::new();
+        let mut stall = StallDetector::default();
+        let mut advisor = AdvisorConfig::default();
+        let mut ts = TrialSummary::default();
+        ts.record_failure("shell", r#"{"command":"cargo build"}"#, "compile error", 1);
+        // 閾値到達させる
+        inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
+        inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
+        let triggered = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
+        if triggered {
+            let has_trial = session.messages.iter().any(|m| m.content.contains("試行済み"));
+            assert!(has_trial, "試行サマリーがreplanに含まれる");
         }
     }
 
