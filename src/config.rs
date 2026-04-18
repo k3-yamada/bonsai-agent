@@ -104,6 +104,7 @@ impl AdvisorSettings {
             verification_prompt,
             replan_prompt,
             backend,
+            retry_policy: crate::runtime::model_router::RetryPolicy::default(),
             cache: std::collections::HashMap::new(),
         }
     }

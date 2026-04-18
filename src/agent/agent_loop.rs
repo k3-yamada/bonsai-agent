@@ -824,12 +824,20 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
         // Advisor Tool パターン: 100語以内・列挙形式でトークン35-45%削減（Anthropic実測）
         session.add_message(Message::system(
             "このタスクは複数ステップが必要です。\n\
-             <think> 内で以下を実行:\n\
-             1. 仮説: 解決策の仮説を立てる\n\
-             2. 検証: 最小限のテスト（ファイル確認、小規模実行）で仮説を検証\n\
-             3. 計画: 検証結果に基づき100語以内の実行計画を列挙形式で作成\n\
-             仮説が間違っていた場合は別の仮説を立て直すこと。\n\
-             計画後、ステップ1から順に実行。".to_string(),
+             <think> 内で以下のプロセスを実行:\n\
+             \n\
+             【役割分割】\n\
+             1. Research: 関連ファイル・情報を収集（file_read, repo_map）\n\
+             2. Plan: 仮説を立て、最小テストで検証\n\
+             3. Execute: 計画に沿って実装（1ステップずつ）\n\
+             4. Review: 成果を検証（期待結果との照合）\n\
+             \n\
+             【完了条件】\n\
+             - 全ステップ実行済み\n\
+             - エラーなし or エラー解決済み\n\
+             - 成果物が要件を満たす\n\
+             \n\
+             計画は100語以内、列挙形式で。Researchから順に実行。".to_string(),
         ));
         log_event(LogLevel::Info, "advisor", "複雑タスク検出 → 簡潔計画プレステップ注入");
     }

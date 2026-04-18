@@ -56,6 +56,8 @@ pub struct AdvisorConfig {
     pub replan_prompt: String,
     /// バックエンド選択（Local/Http/ClaudeCode）
     pub backend: AdvisorBackend,
+    /// リトライポリシー
+    pub retry_policy: RetryPolicy,
     /// セッション内キャッシュ（同一role+task_contextの重複API呼出を回避）
     /// キー: hash(role, task_context)、値: 外部APIのレスポンス本文
     /// セッションごとにクローンされるため、セッション境界で自動リセット
@@ -103,6 +105,52 @@ impl AdvisorBackend {
     }
 }
 
+
+/// リトライポリシー（Hermes Agent/OpenClaw知見）
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    /// 同一バックエンドへの最大リトライ回数
+    pub max_retries: usize,
+    /// 初回リトライの待機時間（ms）。指数バックオフで増加
+    pub base_delay_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            base_delay_ms: 500,
+        }
+    }
+}
+
+/// エラー分類（Retry vs Fallback判定用）
+#[derive(Debug, PartialEq)]
+pub enum RetryErrorKind {
+    /// 同じバックエンドでリトライ可能（timeout, 429, 503）
+    Retryable,
+    /// 認証失敗 → 次のバックエンドへ即座にfallback
+    AuthFailure,
+    /// その他のエラー → 次のバックエンドへfallback
+    Other,
+}
+
+/// エラーメッセージからリトライ可否を分類
+pub fn classify_advisor_error(error_msg: &str) -> RetryErrorKind {
+    let lower = error_msg.to_lowercase();
+    if lower.contains("timeout") || lower.contains("429") || lower.contains("503")
+        || lower.contains("rate limit") || lower.contains("too many")
+    {
+        RetryErrorKind::Retryable
+    } else if lower.contains("401") || lower.contains("403") || lower.contains("auth")
+        || lower.contains("unauthorized") || lower.contains("forbidden")
+    {
+        RetryErrorKind::AuthFailure
+    } else {
+        RetryErrorKind::Other
+    }
+}
+
 impl AdvisorRole {
     fn system_prompt(self) -> &'static str {
         match self {
@@ -136,6 +184,7 @@ impl Default for AdvisorConfig {
             verification_prompt: DEFAULT_VERIFICATION_PROMPT.to_string(),
             replan_prompt: DEFAULT_REPLAN_PROMPT.to_string(),
             backend: AdvisorBackend::default(),
+            retry_policy: RetryPolicy::default(),
             cache: HashMap::new(),
         }
     }
