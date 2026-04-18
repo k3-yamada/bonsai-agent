@@ -82,9 +82,10 @@ pub enum AdvisorRole {
 
 
 /// アドバイザーバックエンド選択
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AdvisorBackend {
     /// ローカルプロンプト（api_endpoint未設定時のデフォルト）
+    #[default]
     Local,
     /// 外部HTTP API（OpenAI互換）
     Http,
@@ -93,18 +94,12 @@ pub enum AdvisorBackend {
 }
 
 impl AdvisorBackend {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_backend(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "http" | "api" => Self::Http,
             "claude-code" | "claude_code" | "claude" => Self::ClaudeCode,
             _ => Self::Local,
         }
-    }
-}
-
-impl Default for AdvisorBackend {
-    fn default() -> Self {
-        Self::Local
     }
 }
 

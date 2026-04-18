@@ -91,7 +91,7 @@ impl AdvisorSettings {
         let backend = if self.backend.is_empty() {
             crate::runtime::model_router::AdvisorBackend::default()
         } else {
-            crate::runtime::model_router::AdvisorBackend::from_str(&self.backend)
+            crate::runtime::model_router::AdvisorBackend::parse_backend(&self.backend)
         };
         AdvisorConfig {
             max_uses: self.max_uses,
