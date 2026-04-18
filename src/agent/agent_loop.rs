@@ -927,7 +927,7 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
 /// 過去の経験を成功/失敗パターンに分離してセッションに注入
 ///
 /// ExperienceStore::find_similar で類似経験を取得し、
-/// 成功と失敗を分けて <experience-context> タグで注入する。
+/// 成功と失敗を分けて <context type="experience"> タグで注入する。
 /// 経験が空の場合はメッセージを追加しない。
 fn inject_experience_context(
     session: &mut Session,
@@ -985,7 +985,7 @@ fn inject_experience_context(
     }
 
     session.add_message(Message::system(format!(
-        "<experience-context>\n{}\n</experience-context>",
+        "<context type=\"experience\">\n{}\n</context>",
         parts.join("\n")
     )));
 }
@@ -1005,18 +1005,18 @@ fn inject_vault_knowledge(
         return;
     }
 
-    let mut parts = Vec::new();
     if !rules.is_empty() {
-        parts.push(format!("[Rules]\n{}", rules.join("\n")));
+        session.add_message(Message::system(format!(
+            "<context type=\"vault-rules\">\n{}\n</context>",
+            rules.join("\n")
+        )));
     }
     if !docs.is_empty() {
-        parts.push(format!("[Docs]\n{}", docs.join("\n")));
+        session.add_message(Message::system(format!(
+            "<context type=\"vault-docs\">\n{}\n</context>",
+            docs.join("\n")
+        )));
     }
-
-    session.add_message(Message::system(format!(
-        "<vault-knowledge>\n{}\n</vault-knowledge>",
-        parts.join("\n")
-    )));
 }
 
 /// SOUL.mdからペルソナを読み込む
@@ -1077,7 +1077,7 @@ fn inject_contextual_memories(
             .map(|r| format!("- {}", r.memory.content))
             .collect::<Vec<_>>()
             .join("\n");
-        session.add_message(Message::system(format!("<memory-context>\n関連する過去の記憶:\n{ctx}\n</memory-context>")));
+        session.add_message(Message::system(format!("<context type=\"memory\">\n関連する過去の記憶:\n{ctx}\n</context>")));
     }
 
     // 類似経験（成功/失敗分離フォーマットで注入）
@@ -1104,7 +1104,7 @@ fn inject_contextual_memories(
             .collect::<Vec<_>>()
             .join("\n");
         session.add_message(Message::system(format!(
-            "利用可能なスキル（過去の成功パターン）:\n{ctx}\n上記のパターンが適用可能な場合は参考にしてください。"
+            "<context type=\"skills\">\n利用可能なスキル（過去の成功パターン）:\n{ctx}\n上記のパターンが適用可能な場合は参考にしてください。\n</context>"
         )));
     }
 
@@ -1113,7 +1113,7 @@ fn inject_contextual_memories(
     let graph_ctx = graph.related_context(task_context, 5).unwrap_or_default();
     if !graph_ctx.is_empty() {
         session.add_message(Message::system(format!(
-            "<graph-context>\n関連するグラフ知識:\n{graph_ctx}\n</graph-context>"
+            "<context type=\"graph\">\n関連するグラフ知識:\n{graph_ctx}\n</context>"
         )));
     }
 }
@@ -2039,7 +2039,7 @@ mod tests {
         // メッセージが追加されていること
         assert_eq!(session.messages.len(), 1);
         let msg = &session.messages[0].content;
-        assert!(msg.contains("<experience-context>"), "experience-contextタグで囲まれるべき");
+        assert!(msg.contains("<context type=\"experience\">"), "統一コンテキストタグで囲まれるべき");
         assert!(msg.contains("[成功パターン]"), "成功パターンセクションがあるべき");
         assert!(msg.contains("[失敗パターン]"), "失敗パターンセクションがあるべき");
         assert!(msg.contains("fuzzyマッチで成功"), "成功のlessonが含まれるべき");
@@ -2079,6 +2079,35 @@ mod tests {
         let msg = &session.messages[0].content;
         assert!(msg.contains("[学び]"), "学びセクションがあるべき");
         assert!(msg.contains("デプロイ前にテスト必須"), "Insightのlessonが含まれるべき");
+    }
+
+
+    // テスト: 全コンテキスト注入が統一タグフォーマット <context type="xxx"> を使用する
+    #[test]
+    fn t_context_tags_consistent() {
+        let store = MemoryStore::in_memory().unwrap();
+        let exp = ExperienceStore::new(store.conn());
+
+        // 経験注入が統一タグを使用
+        exp.record(&RecordParams {
+            exp_type: ExperienceType::Success,
+            task_context: "consistency check",
+            action: "test action",
+            outcome: "ok",
+            lesson: Some("lesson"),
+            tool_name: None,
+            error_type: None,
+            error_detail: None,
+        }).unwrap();
+
+        let mut session = Session::new();
+        inject_experience_context(&mut session, "consistency", &store);
+
+        if !session.messages.is_empty() {
+            let msg = &session.messages[0].content;
+            assert!(msg.starts_with("<context type="), "経験注入は<context type=で始まるべき");
+            assert!(msg.ends_with("</context>"), "経験注入は</context>で終わるべき");
+        }
     }
 
 }
