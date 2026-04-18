@@ -166,7 +166,7 @@ pub(crate) fn inject_contextual_memories(
             .map(|r| format!("- {}", r.memory.content))
             .collect::<Vec<_>>()
             .join("\n");
-        session.add_message(Message::system(format!("<context type=\"memory\">\n関連する過去の記憶:\n{ctx}\n</context>")));
+        session.add_message(Message::system(format!("<context type=\"memory\">\n関連する過去のメモ:\n{ctx}\n</context>")));
     }
 
     // 類似経験（成功/失敗分離フォーマットで注入）
@@ -193,7 +193,7 @@ pub(crate) fn inject_contextual_memories(
             .collect::<Vec<_>>()
             .join("\n");
         session.add_message(Message::system(format!(
-            "<context type=\"skills\">\n利用可能なスキル（過去の成功パターン）:\n{ctx}\n上記のパターンが適用可能な場合は参考にしてください。\n</context>"
+            "<context type=\"skills\">\n使えるスキル（過去の成功パターン）:\n{ctx}\n上のパターンが使える場合は参考にしてください。\n</context>"
         )));
     }
 
@@ -202,7 +202,7 @@ pub(crate) fn inject_contextual_memories(
     let graph_ctx = graph.related_context(task_context, 5).unwrap_or_default();
     if !graph_ctx.is_empty() {
         session.add_message(Message::system(format!(
-            "<context type=\"graph\">\n関連するグラフ知識:\n{graph_ctx}\n</context>"
+            "<context type=\"graph\">\n関連する知識:\n{graph_ctx}\n</context>"
         )));
     }
 }

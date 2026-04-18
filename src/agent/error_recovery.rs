@@ -167,7 +167,7 @@ impl ContinueSite {
         if self.consecutive_failures > MAX_CONSECUTIVE_FAILURES {
             // Stage 3: 安全停止
             return RecoveryAction::ExplainAndStop(format!(
-                "{}回連続で失敗しました。安全のため中断します。最後の原因: {:?}",
+                "{}回続けて失敗しました。安全のため中断します。原因: {:?}",
                 self.consecutive_failures, mode
             ));
         }
@@ -175,7 +175,7 @@ impl ContinueSite {
         if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             // Stage 2: 再計画
             return RecoveryAction::Replan(
-                "前のアプローチが失敗しました。目標を再確認し、別の方法で再計画してください。"
+                "前の方法がうまくいきませんでした。目標を確認して、別の方法で計画し直してください。"
                     .to_string(),
             );
         }
@@ -203,51 +203,51 @@ pub fn decide_recovery(mode: &FailureMode, attempt: usize, max_retries: usize) -
     match mode {
         FailureMode::ParseError(detail) => match detail {
             ParseErrorDetail::InvalidJson => RecoveryAction::RetryWithFix(
-                "前回の出力はJSON形式が不正でした。正しいJSON形式で<tool_call>を生成してください。"
+                "前回の出力のJSONが正しくありません。正しいJSON形式で<tool_call>を書いてください。"
                     .to_string(),
             ),
             ParseErrorDetail::MissingField(field) => RecoveryAction::RetryWithFix(format!(
-                "前回のツール呼び出しにフィールド '{field}' が不足しています。必須フィールドを含めて再生成してください。"
+                "前回のツール呼び出しに '{field}' がありません。必須フィールドを含めてもう一度書いてください。"
             )),
             ParseErrorDetail::UnexpectedFormat => RecoveryAction::RetryWithTemperatureDelta,
         },
         FailureMode::ToolExecError(detail) => match detail {
             ToolErrorDetail::PermissionDenied => RecoveryAction::SuggestAlternative(
-                "権限不足です。別のアプローチを検討してください。".to_string(),
+                "権限がありません。別の方法を試してください。".to_string(),
             ),
             ToolErrorDetail::CommandNotFound => RecoveryAction::SuggestAlternative(
-                "コマンドが見つかりません。代替コマンドを使用してください。".to_string(),
+                "コマンドが見つかりません。別のコマンドを使ってください。".to_string(),
             ),
             ToolErrorDetail::Timeout => RecoveryAction::RetryWithFix(
-                "前回のコマンドがタイムアウトしました。より短時間で完了する方法を試してください。"
+                "前回のコマンドがタイムアウトしました。もっと短い時間で終わる方法を試してください。"
                     .to_string(),
             ),
             ToolErrorDetail::InvalidArguments(msg) => RecoveryAction::RetryWithFix(format!(
-                "引数エラー: {msg}。引数を修正して再試行してください。"
+                "引数エラー: {msg}。引数を直してもう一度試してください。"
             )),
             ToolErrorDetail::ExitCodeNonZero(code) => RecoveryAction::RetryWithFix(format!(
-                "コマンドが終了コード {code} で失敗しました。エラー内容を確認して修正してください。"
+                "コマンドが終了コード {code} で失敗しました。エラーを確認して直してください。"
             )),
             ToolErrorDetail::Unknown(msg) => RecoveryAction::RetryWithFix(format!(
-                "不明なエラー: {msg}。別のアプローチを試してください。"
+                "エラー: {msg}。別の方法を試してください。"
             )),
         },
         FailureMode::ReasoningError => RecoveryAction::RetryWithTemperatureDelta,
         FailureMode::LoopDetected => RecoveryAction::Abort(
-            "同じ操作の繰り返しを検出しました。ループを回避するため中断します。".to_string(),
+            "同じ操作を繰り返しています。ループを止めるため中断します。".to_string(),
         ),
         FailureMode::ContextOverflow => RecoveryAction::Replan(
-            "コンテキストが長すぎます。不要な情報を省いて要点のみで再試行してください。".to_string(),
+            "コンテキストが長すぎます。要点だけにしてもう一度試してください。".to_string(),
         ),
         FailureMode::RateLimited => RecoveryAction::RetryWithFix(
-            "レート制限に達しました。少し待ってから再試行します。".to_string(),
+            "リクエスト制限に達しました。少し待ってからやり直します。".to_string(),
         ),
-        // 環境障害は再計画ではなくリトライ優先（GLM-5.1知見: 環境障害フィルタ）
+        // 通信エラーは再計画ではなくリトライ優先（GLM-5.1知見）
         FailureMode::NetworkError => RecoveryAction::RetryWithFix(
-            "ネットワークエラーが発生しました。環境障害のため待機後に再試行します。".to_string(),
+            "ネットワークエラーが起きました。接続を待ってからやり直します。".to_string(),
         ),
         FailureMode::ServerDisconnect => RecoveryAction::RetryWithFix(
-            "推論サーバーとの接続が切れました。環境障害のため待機後に再接続を試みます。".to_string(),
+            "サーバーとの接続が切れました。再接続を待ってからやり直します。".to_string(),
         ),
     }
 }
@@ -308,7 +308,7 @@ impl TrialSummary {
             return String::new();
         }
         let mut lines = vec![
-            "以下は既に試行済みの方法です。同じアプローチを避け、別の戦略を検討してください:".to_string(),
+            "すでに試した方法です。同じやり方を避けて、別の方法を考えてください:".to_string(),
         ];
         for (i, entry) in self.entries.iter().enumerate() {
             lines.push(format!(
@@ -462,12 +462,12 @@ impl FileStuckGuard {
         let count = self.failure_counts.get(file_path).copied().unwrap_or(0);
         if count >= self.give_up_threshold {
             Some(FileStuckAction::GiveUp(format!(
-                "ファイル '{}' の編集に{}回連続失敗しました。このファイルの編集を諦めて、別の方法でタスクを進めてください。",
+                "ファイル '{}' の編集が{}回続けて失敗しました。このファイルの編集はやめて、別の方法でタスクを進めてください。",
                 file_path, count
             )))
         } else if count >= self.nudge_threshold {
             Some(FileStuckAction::Nudge(format!(
-                "ファイル '{}' の編集に{}回失敗しています。file_readでファイル全体を再読込し、write_fileでファイル全体を上書きしてください。部分編集は避けてください。",
+                "ファイル '{}' の編集が{}回失敗しています。file_readでファイル全体を読み直して、write_fileで全体を書き直してください。部分編集は使わないでください。",
                 file_path, count
             )))
         } else {
@@ -1010,7 +1010,7 @@ mod tests {
         ts.record_failure("shell", r#"{"command":"cargo build"}"#, "コンパイルエラー E0308", 3);
         ts.record_failure("file_write", "src/main.rs", "権限拒否", 5);
         let output = ts.format_for_replan();
-        assert!(output.contains("試行済み"));
+        assert!(output.contains("試した方法"));
         assert!(output.contains("[iter 3]"));
         assert!(output.contains("[iter 5]"));
         assert!(output.contains("shell"));

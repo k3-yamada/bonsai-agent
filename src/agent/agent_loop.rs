@@ -199,11 +199,11 @@ impl TokenBudgetTracker {
     /// 予算チェック: None=OK, Some(msg)=nudge/stop
     pub fn check(&self) -> Option<&'static str> {
         if self.usage_ratio() >= 1.0 {
-            Some("トークン予算上限に到達。タスクを完了してください。")
+            Some("トークン予算の上限に達しました。タスクを完了してください。")
         } else if self.is_diminishing() {
-            Some("出力が減少傾向です。効率的にタスクを完了してください。")
+            Some("出力が少なくなっています。早めにタスクを完了してください。")
         } else if self.usage_ratio() >= 0.9 {
-            Some("トークン予算の90%を消費しました。速やかにタスクを完了してください。")
+            Some("トークン予算の90%を使いました。すぐにタスクを完了してください。")
         } else {
             None
         }
@@ -383,7 +383,7 @@ pub fn execute_step(
         }
         if !circuit_breaker.is_available(&tool_call.name) {
             session.add_message(Message::tool(
-                format!("ツール '{}' は連続失敗のため一時停止中です。別の方法を試してください。", tool_call.name),
+                format!("ツール '{}' は連続で失敗したため使えません。別の方法を試してください。", tool_call.name),
                 &tool_call.name,
             ));
             continue;
@@ -393,9 +393,9 @@ pub fn execute_step(
             let block_issues: Vec<_> = validation.issues.iter()
                 .filter(|i| i.severity == Severity::Block).map(|i| i.message.as_str()).collect();
             let alt = match tool_call.name.as_str() {
-                "shell" => "代替: file_readやgitツールを使用してください。",
-                "file_write" => "代替: 許可されたディレクトリ内のパスを指定してください。",
-                _ => "別のツールまたはパラメータで再試行してください。",
+                "shell" => "代わりにfile_readやgitツールを使ってください。",
+                "file_write" => "許可されたディレクトリのパスを指定してください。",
+                _ => "別のツールか、別のパラメータで試してください。",
             };
             session.add_message(Message::tool(format!("拒否: {}。{}", block_issues.join(", "), alt), &tool_call.name));
             continue;
@@ -523,7 +523,7 @@ pub fn run_agent_loop_with_session(
     }
 
     let timeout_msg = format!(
-        "最大イテレーション数({})に到達しました。タスクを完了できませんでした。",
+        "最大ステップ数({})に達しました。タスクを完了できませんでした。",
         config.max_iterations
     );
     Ok(AgentLoopResult {
@@ -804,10 +804,10 @@ fn inject_verification_step(
     log_advisor_call(store, session, AdvisorRole::Verification, &resolution);
     session.add_message(Message::system(resolution.prompt));
     session.add_message(Message::system(
-        "検証チェックリスト:\n\
-         - 全ての主張にツール結果の根拠があるか？\n\
-         - 未検証の仮定が残っていないか？\n\
-         - エッジケースを見落としていないか？".to_string(),
+        "確認チェックリスト:\n\
+         - すべての主張にツール結果の根拠があるか？\n\
+         - 確認していない仮定が残っていないか？\n\
+         - 見落としているケースはないか？".to_string(),
     ));
     advisor.record_call();
     eprintln!(
@@ -821,23 +821,23 @@ fn inject_verification_step(
 /// 複雑タスクに計画プレステップを注入
 fn inject_planning_step(session: &mut Session, task_context: &str) {
     if detect_task_complexity(task_context) {
-        // Advisor Tool パターン: 100語以内・列挙形式でトークン35-45%削減（Anthropic実測）
+        // Advisor Tool パターン: 100語以内・箇条書きでトークン35-45%削減（Anthropic実測）
         session.add_message(Message::system(
             "このタスクは複数ステップが必要です。\n\
-             <think> 内で以下のプロセスを実行:\n\
+             <think> 内で以下の手順を考えてください:\n\
              \n\
-             【役割分割】\n\
-             1. Research: 関連ファイル・情報を収集（file_read, repo_map）\n\
-             2. Plan: 仮説を立て、最小テストで検証\n\
-             3. Execute: 計画に沿って実装（1ステップずつ）\n\
-             4. Review: 成果を検証（期待結果との照合）\n\
+             【手順】\n\
+             1. 調査: 関連ファイル・情報を集める（file_read, repo_map）\n\
+             2. 計画: 仮説を立て、小さなテストで確認\n\
+             3. 実行: 計画どおりに実装（1ステップずつ）\n\
+             4. 確認: 結果を確認（期待どおりか照合）\n\
              \n\
              【完了条件】\n\
-             - 全ステップ実行済み\n\
-             - エラーなし or エラー解決済み\n\
-             - 成果物が要件を満たす\n\
+             - すべてのステップを実行した\n\
+             - エラーなし、またはエラーを解決した\n\
+             - 成果物が要件を満たしている\n\
              \n\
-             計画は100語以内、列挙形式で。Researchから順に実行。".to_string(),
+             計画は100語以内、箇条書きで。調査から順に実行。".to_string(),
         ));
         log_event(LogLevel::Info, "advisor", "複雑タスク検出 → 簡潔計画プレステップ注入");
     }
@@ -1889,7 +1889,7 @@ mod tests {
         inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
         let triggered = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
         if triggered {
-            let has_trial = session.messages.iter().any(|m| m.content.contains("試行済み"));
+            let has_trial = session.messages.iter().any(|m| m.content.contains("試した方法"));
             assert!(has_trial, "試行サマリーがreplanに含まれる");
         }
     }

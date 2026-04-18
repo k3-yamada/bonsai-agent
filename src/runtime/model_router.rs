@@ -67,11 +67,11 @@ pub struct AdvisorConfig {
 
 /// デフォルトの完了前自己検証プロンプト
 pub const DEFAULT_VERIFICATION_PROMPT: &str =
-    "回答前に検証: 目標を達成できていますか？不足があれば補完してください。問題なければ回答に[検証済]を含めてください。";
+    "回答前に確認: 目標を達成できていますか？不足があれば追加してください。問題なければ回答に[検証済]を含めてください。";
 
 /// デフォルトの停滞時再計画プロンプト
 pub const DEFAULT_REPLAN_PROMPT: &str =
-    "停滞検出: これまでのアプローチでは進捗していません。\n<think>内で別アプローチを再計画:\n1. 失敗の根本原因\n2. 別ツール/別手順\n3. 簡潔に再開";
+    "停滞しています。これまでの方法ではうまくいきません。\n<think>内で別の方法を計画:\n1. 失敗の原因\n2. 別のツール/手順\n3. 次にやること";
 
 /// アドバイザー呼び出しの目的
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,18 +155,18 @@ impl AdvisorRole {
     fn system_prompt(self) -> &'static str {
         match self {
             Self::Verification => {
-                "あなたは1bitローカルLLMの戦略アドバイザーです。                 実行者が回答を出す前に、不足や検証ポイントを100語以内・列挙形式で提示してください。"
+                "あなたは1bitローカルLLMのアドバイザーです。実行者が回答を出す前に、不足や確認すべき点を100語以内・箇条書きで提示してください。"
             }
             Self::Replan => {
-                "あなたは1bitローカルLLMの戦略アドバイザーです。                 実行者が停滞しています。別アプローチを100語以内・列挙形式で:                 1. 失敗の根本原因 2. 別ツール/別手順 3. 次の具体的アクション。"
+                "あなたは1bitローカルLLMのアドバイザーです。実行者が停滞しています。別の方法を100語以内・箇条書きで: 1. 失敗の原因 2. 別のツール/手順 3. 次にやること。"
             }
         }
     }
 
     fn user_prompt(self, task_context: &str) -> String {
         match self {
-            Self::Verification => format!("タスク: {task_context}\n\n上記の検証指示を簡潔に。"),
-            Self::Replan => format!("タスク: {task_context}\n\nこれまでが停滞中。別の手段を提案してください。"),
+            Self::Verification => format!("タスク: {task_context}\n\n上記の確認事項を簡潔に。"),
+            Self::Replan => format!("タスク: {task_context}\n\n停滞しています。別の方法を提案してください。"),
         }
     }
 }
@@ -325,7 +325,7 @@ impl AdvisorConfig {
 
 {}
 
-制約: 100語以内、列挙形式で簡潔に回答。",
+制約: 100語以内、箇条書きで簡潔に回答。",
             role.system_prompt(),
             role.user_prompt(task_context)
         );
@@ -615,7 +615,7 @@ mod tests {
     fn test_advisor_config_build_verification_prompt() {
         let config = AdvisorConfig::default();
         let prompt = config.build_verification_prompt("テストタスク");
-        assert!(prompt.contains("回答前に検証"));
+        assert!(prompt.contains("回答前に確認"));
     }
 
     #[test]
