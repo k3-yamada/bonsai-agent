@@ -112,10 +112,10 @@ pub(crate) fn execute_validated_calls(
         if read_batch.len() >= 2 {
             let results = execute_read_batch_parallel(read_batch);
             for r in results {
-                if !r.is_error {
-                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
-                        cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
-                    }
+                if !r.is_error
+                    && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
+                {
+                    cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
                 }
                 apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
                 if !r.is_error {
@@ -132,10 +132,10 @@ pub(crate) fn execute_validated_calls(
                     continue;
                 }
                 let r = execute_single_call(call);
-                if !r.is_error {
-                    if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
-                        cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
-                    }
+                if !r.is_error
+                    && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
+                {
+                    cache.put(&r.name, &args, ToolResult { output: r.output.clone(), success: r.success });
                 }
                 apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
                 if !r.is_error {

@@ -11,12 +11,9 @@ use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::validate::{PathGuard, Severity, validate_tool_call};
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
-use crate::memory::graph::KnowledgeGraph;
-use crate::memory::search::HybridSearch;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
-use crate::runtime::embedder::create_embedder;
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
@@ -261,7 +258,6 @@ impl Default for StallDetector {
     }
 }
 
-/// バリデーション済みのツール呼び出し
 // ValidatedCall, ToolExecResult → tool_exec.rs に移動
 
 // execute_validated_calls → tool_exec.rs に移動
