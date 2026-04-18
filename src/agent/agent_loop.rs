@@ -893,6 +893,7 @@ mod tests {
     use super::*;
     use crate::agent::tool_exec::{ToolExecResult, apply_tool_result};
     use crate::agent::context_inject::inject_experience_context;
+    use crate::memory::graph::KnowledgeGraph;
     use crate::memory::store::MemoryStore;
     use crate::runtime::inference::MockLlmBackend;
     use crate::tools::permission::Permission;
