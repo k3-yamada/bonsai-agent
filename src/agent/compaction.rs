@@ -188,7 +188,7 @@ pub fn score_message_importance(msg: &Message) -> f64 {
         }
         Role::Tool => {
             if msg.content.contains("error") || msg.content.contains("Error")
-                || msg.content.contains("\u30a8\u30e9\u30fc") || msg.content.contains("failed")
+                || msg.content.contains("エラー") || msg.content.contains("failed")
                 || msg.content.contains("Failed")
             {
                 0.2
