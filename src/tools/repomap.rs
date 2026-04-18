@@ -25,7 +25,7 @@ impl Tool for RepoMapTool {
     fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
         let p = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         Ok(ToolResult {
-            output: gen_map(Path::new(p), 3)?,
+            output: gen_map_ranked(Path::new(p), 3)?,
             success: true,
         })
     }
@@ -37,6 +37,56 @@ pub fn gen_map(root: &Path, depth: usize) -> Result<String> {
     collect(root, depth, 0, &mut files);
     files.sort();
     for f in &files {
+        let rel = f.strip_prefix(root).unwrap_or(f);
+        let syms = extract_syms(f);
+        if syms.is_empty() {
+            out.push_str(&format!("{}\n", rel.display()));
+        } else {
+            out.push_str(&format!("{}:\n", rel.display()));
+            for s in &syms {
+                out.push_str(&format!("  {s}\n"));
+            }
+        }
+    }
+    if out.is_empty() {
+        out = "(no source files)\n".into();
+    }
+    Ok(out)
+}
+
+
+/// PageRankでファイルを重要度順にソートしたRepoMap
+pub fn gen_map_ranked(root: &Path, depth: usize) -> Result<String> {
+    let mut files = Vec::new();
+    collect(root, depth, 0, &mut files);
+    if files.is_empty() {
+        return Ok("(no source files)\n".into());
+    }
+
+    let graph = build_dep_graph(&files);
+    let str_graph: std::collections::HashMap<String, Vec<String>> = graph
+        .iter()
+        .map(|(k, vs)| {
+            (
+                k.to_string_lossy().to_string(),
+                vs.iter().map(|v| v.to_string_lossy().to_string()).collect(),
+            )
+        })
+        .collect();
+    let ranks = pagerank(&str_graph, 20, 0.85);
+
+    let mut ranked: Vec<_> = files
+        .iter()
+        .map(|f| {
+            let key = f.to_string_lossy().to_string();
+            let score = ranks.get(&key).copied().unwrap_or(0.0);
+            (f, score)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out = String::new();
+    for (f, _score) in &ranked {
         let rel = f.strip_prefix(root).unwrap_or(f);
         let syms = extract_syms(f);
         if syms.is_empty() {
@@ -91,6 +141,113 @@ fn collect(dir: &Path, mx: usize, cur: usize, files: &mut Vec<PathBuf>) {
             files.push(p);
         }
     }
+}
+
+
+// ============================================================
+// PageRank — ファイル依存グラフから重要度を計算
+// ============================================================
+
+/// PageRankアルゴリズム（反復法）
+fn pagerank(
+    graph: &std::collections::HashMap<String, Vec<String>>,
+    iterations: usize,
+    damping: f64,
+) -> std::collections::HashMap<String, f64> {
+    let nodes: Vec<&String> = graph.keys().collect();
+    let n = nodes.len();
+    if n == 0 {
+        return std::collections::HashMap::new();
+    }
+    let init = 1.0 / n as f64;
+    let mut ranks: std::collections::HashMap<String, f64> =
+        nodes.iter().map(|&k| (k.clone(), init)).collect();
+
+    for _ in 0..iterations {
+        let mut new_ranks: std::collections::HashMap<String, f64> =
+            nodes.iter().map(|&k| (k.clone(), (1.0 - damping) / n as f64)).collect();
+
+        for (node, edges) in graph {
+            if edges.is_empty() {
+                let share = ranks[node] * damping / n as f64;
+                for nr in new_ranks.values_mut() {
+                    *nr += share;
+                }
+            } else {
+                let share = ranks[node] * damping / edges.len() as f64;
+                for target in edges {
+                    if let Some(r) = new_ranks.get_mut(target) {
+                        *r += share;
+                    }
+                }
+            }
+        }
+        ranks = new_ranks;
+    }
+    ranks
+}
+
+/// ファイルからシンボル定義名を抽出（PageRank用）
+fn extract_definitions(path: &Path) -> Vec<String> {
+    let syms = extract_syms(path);
+    let re = Regex::new(r"(?:fn|struct|enum|trait|class|type|interface|func|def|const|static|mod|object|protocol|actor)\s+(\w+)").unwrap();
+    let mut defs = Vec::new();
+    for s in &syms {
+        if let Some(caps) = re.captures(s) {
+            if let Some(m) = caps.get(1) {
+                let name = m.as_str().to_string();
+                if name.len() >= 2 {
+                    defs.push(name);
+                }
+            }
+        }
+    }
+    defs
+}
+
+/// ソースコード中の全識別子を抽出（参照検出用）
+fn extract_identifiers(content: &str) -> std::collections::HashSet<String> {
+    let re = Regex::new(r"\b([A-Z][a-zA-Z0-9_]*|[a-z][a-z0-9_]{1,})\b").unwrap();
+    re.find_iter(content)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+/// ファイル間依存グラフを構築
+fn build_dep_graph(files: &[PathBuf]) -> std::collections::HashMap<PathBuf, Vec<PathBuf>> {
+    let mut def_map: std::collections::HashMap<String, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+    for f in files {
+        for def in extract_definitions(f) {
+            def_map.entry(def).or_default().push(f.clone());
+        }
+    }
+
+    let mut graph: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+        files.iter().map(|f| (f.clone(), Vec::new())).collect();
+
+    for f in files {
+        let Ok(content) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        let idents = extract_identifiers(&content);
+        let mut deps_set = std::collections::HashSet::new();
+
+        for ident in &idents {
+            if let Some(def_files) = def_map.get(ident) {
+                for df in def_files {
+                    if df != f {
+                        deps_set.insert(df.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some(deps) = graph.get_mut(f) {
+            *deps = deps_set.into_iter().collect();
+        }
+    }
+    graph
 }
 
 // ============================================================
@@ -685,5 +842,90 @@ mod tests {
         std::fs::write(&rs_file, "pub enum Color {\n    Red,\n    Green,\n    Blue,\n}\n").unwrap();
         let syms = extract_syms(&rs_file);
         assert!(syms.iter().any(|s| s.contains("enum Color")), "enum: {syms:?}");
+    }
+
+    // --- PageRank テスト ---
+
+    #[test]
+    fn t_pagerank_simple() {
+        let mut graph = std::collections::HashMap::new();
+        graph.insert("A".to_string(), vec!["B".to_string()]);
+        graph.insert("B".to_string(), vec!["C".to_string()]);
+        graph.insert("C".to_string(), vec![]);
+        let ranks = pagerank(&graph, 20, 0.85);
+        assert!(ranks["C"] > ranks["A"], "C should rank higher: {ranks:?}");
+    }
+
+    #[test]
+    fn t_pagerank_cycle() {
+        let mut graph = std::collections::HashMap::new();
+        graph.insert("A".to_string(), vec!["B".to_string()]);
+        graph.insert("B".to_string(), vec!["A".to_string()]);
+        let ranks = pagerank(&graph, 20, 0.85);
+        assert!((ranks["A"] - ranks["B"]).abs() < 0.01, "A≈B: {ranks:?}");
+    }
+
+    #[test]
+    fn t_pagerank_hub() {
+        let mut graph = std::collections::HashMap::new();
+        graph.insert("A".to_string(), vec!["D".to_string()]);
+        graph.insert("B".to_string(), vec!["D".to_string()]);
+        graph.insert("C".to_string(), vec!["D".to_string()]);
+        graph.insert("D".to_string(), vec![]);
+        let ranks = pagerank(&graph, 20, 0.85);
+        assert!(ranks["D"] > ranks["A"], "D should be highest: {ranks:?}");
+        assert!(ranks["D"] > ranks["B"], "D > B: {ranks:?}");
+    }
+
+    #[test]
+    fn t_extract_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let rs_file = dir.path().join("lib.rs");
+        std::fs::write(&rs_file, "pub struct Foo;\npub fn bar() {}\n").unwrap();
+        let defs = extract_definitions(&rs_file);
+        assert!(defs.contains(&"Foo".to_string()), "Foo: {defs:?}");
+        assert!(defs.contains(&"bar".to_string()), "bar: {defs:?}");
+    }
+
+    #[test]
+    fn t_extract_references() {
+        let content = "let x = Foo::new();\nbar(x);\nlet y = baz + 1;\n";
+        let refs = extract_identifiers(content);
+        assert!(refs.contains("Foo"), "Foo ref: {refs:?}");
+        assert!(refs.contains("bar"), "bar ref: {refs:?}");
+        assert!(refs.contains("baz"), "baz ref: {refs:?}");
+    }
+
+    #[test]
+    fn t_build_dep_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        std::fs::write(&a, "pub struct Foo;\n").unwrap();
+        std::fs::write(&b, "use crate::a::Foo;\nlet x = Foo::new();\n").unwrap();
+        let files = vec![a.clone(), b.clone()];
+        let graph = build_dep_graph(&files);
+        let b_deps = &graph[&b];
+        assert!(b_deps.contains(&a), "b depends on a: {graph:?}");
+    }
+
+    #[test]
+    fn t_gen_map_ranked() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("core.rs");
+        let b = dir.path().join("util.rs");
+        let c = dir.path().join("main.rs");
+        std::fs::write(&a, "pub struct Engine;\npub fn run() {}\n").unwrap();
+        std::fs::write(&b, "pub fn helper() { Engine::start(); run(); }\n").unwrap();
+        std::fs::write(&c, "fn main() { Engine::new(); helper(); run(); }\n").unwrap();
+        let result = gen_map_ranked(dir.path(), 3).unwrap();
+        assert!(!result.is_empty());
+        let lines: Vec<&str> = result.lines().collect();
+        let core_pos = lines.iter().position(|l: &&str| l.contains("core.rs"));
+        let main_pos = lines.iter().position(|l: &&str| l.contains("main.rs"));
+        assert!(core_pos.is_some(), "core.rs in output: {result}");
+        assert!(main_pos.is_some(), "main.rs in output: {result}");
+        assert!(core_pos.unwrap() < main_pos.unwrap(),
+            "core.rs should rank above main.rs: {result}");
     }
 }
