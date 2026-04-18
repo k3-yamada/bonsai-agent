@@ -1,5 +1,6 @@
 use crate::agent::conversation::{Message, Role};
 use crate::memory::store::MemoryStore;
+use std::collections::HashMap;
 pub struct CompactionConfig {
     pub large_output_threshold: usize,
     pub placeholder_keep_recent: usize,
@@ -30,6 +31,114 @@ pub fn find_ai_tool_pairs(messages: &[Message]) -> Vec<(usize, usize)> {
         }
     }
     pairs
+}
+
+/// Assistantメッセージ内の<tool_call>からツール名を抽出し、使用回数を集計
+///
+/// tool_callのJSONから"name"フィールドを正規表現で取得するため、
+/// parse.rsへの依存を避けつつ正確なツール名統計を提供する。
+pub fn summarize_tool_usage(messages: &[Message]) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for msg in messages {
+        if matches!(msg.role, Role::Assistant) {
+            // <tool_call>ブロック内の"name":"xxx"を抽出
+            let mut remaining = msg.content.as_str();
+            while let Some(start) = remaining.find("<tool_call>") {
+                let after_tag = &remaining[start + 11..];
+                if let Some(end) = after_tag.find("</tool_call>") {
+                    let block = &after_tag[..end];
+                    // "name" : "tool_name" パターンを検索
+                    if let Some(name) = extract_name_from_json(block) {
+                        *counts.entry(name).or_insert(0) += 1;
+                    }
+                    remaining = &after_tag[end + 12..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    counts
+}
+
+/// JSONブロックから"name"フィールドの値を抽出するヘルパー
+fn extract_name_from_json(json_str: &str) -> Option<String> {
+    // "name" の位置を検索（空白許容）
+    let name_key = json_str.find("\"name\"")?;
+    let after_key = &json_str[name_key + 6..];
+    // コロンを探す
+    let colon = after_key.find(':')?;
+    let after_colon = after_key[colon + 1..].trim_start();
+    // 値の開始引用符
+    if !after_colon.starts_with('"') {
+        return None;
+    }
+    let value_start = &after_colon[1..];
+    let end_quote = value_start.find('"')?;
+    Some(value_start[..end_quote].to_string())
+}
+
+/// 最後のAssistant/Toolメッセージからタスクの成果を200文字以内で抽出
+///
+/// 最後のAssistantメッセージの内容を優先し、<think>タグは除外する。
+/// Assistantメッセージがない場合は最後のToolメッセージから抽出。
+pub fn extract_last_outcome(messages: &[Message]) -> Option<String> {
+    // 最後のAssistantメッセージを探す（<think>を除外）
+    let last_assistant = messages.iter().rev().find(|m| matches!(m.role, Role::Assistant));
+    if let Some(msg) = last_assistant {
+        let cleaned = strip_think_tags(&msg.content);
+        let trimmed = cleaned.trim();
+        if !trimmed.is_empty() {
+            let outcome: String = trimmed.chars().take(200).collect();
+            return Some(outcome);
+        }
+    }
+    // フォールバック: 最後のToolメッセージ
+    let last_tool = messages.iter().rev().find(|m| matches!(m.role, Role::Tool));
+    if let Some(msg) = last_tool {
+        let trimmed = msg.content.trim();
+        if !trimmed.is_empty() {
+            let outcome: String = trimmed.chars().take(200).collect();
+            return Some(outcome);
+        }
+    }
+    None
+}
+
+/// <think>...</think> タグとその中身を除去
+fn strip_think_tags(s: &str) -> String {
+    let mut result = String::new();
+    let mut remaining = s;
+    while let Some(start) = remaining.find("<think>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</think>") {
+            remaining = &remaining[start + end + 8..];
+        } else {
+            // 閉じタグなし: <think>以降を全て除去
+            return result;
+        }
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Toolメッセージからエラー（未解決事項）を検出
+fn collect_unresolved(messages: &[Message], boundary: usize) -> Vec<String> {
+    let mut errors = Vec::new();
+    // 圧縮対象の末尾付近のエラーを優先的に収集
+    for msg in messages[..boundary].iter().rev().take(boundary) {
+        if matches!(msg.role, Role::Tool) && msg.content.contains("エラー") {
+            let preview: String = msg.content.chars().take(100).collect();
+            if !errors.contains(&preview) {
+                errors.push(preview);
+            }
+            if errors.len() >= 3 {
+                break;
+            }
+        }
+    }
+    errors.reverse();
+    errors
 }
 
 pub fn compact_level0(messages: &mut [Message], config: &CompactionConfig) -> Vec<String> {
@@ -118,43 +227,73 @@ pub fn compact_level3(messages: &mut Vec<Message>, config: &CompactionConfig) {
 /// Handoff framing: 圧縮対象から要約を構築（hermes-agent/macOS26パターン）
 ///
 /// 「別のアシスタントが引き継ぎ」として、解決済み/未解決を整理。
+/// ツール使用統計・最終成果・未解決事項を含む高品質な引継ぎサマリーを生成。
 /// 1bitモデルが指示と混同しないよう「Remaining Work」命名を使用。
 fn build_handoff_summary(messages: &[Message], config: &CompactionConfig) -> Option<Message> {
     let boundary = messages.len().saturating_sub(config.emergency_keep);
     if boundary < 2 {
         return None;
     }
-    // 圧縮対象のAssistantメッセージから要約を構築
+    let compressed = &messages[..boundary];
+
+    // 圧縮対象のAssistantメッセージから解決済みタスクの要約を構築
     let mut resolved = Vec::new();
-    let mut tools_used = Vec::new();
-    for msg in &messages[..boundary] {
+    for msg in compressed {
         if matches!(msg.role, Role::Assistant) && msg.content.len() > 20 {
             let preview: String = msg.content.chars().take(80).collect();
             resolved.push(preview);
-        }
-        if matches!(msg.role, Role::Tool)
-            && let Some(id) = &msg.tool_call_id
-            && !tools_used.contains(id)
-        {
-            tools_used.push(id.clone());
         }
     }
     if resolved.is_empty() {
         return None;
     }
+
     let resolved_text = resolved
         .iter()
         .take(3)
         .map(|r| format!("- {r}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let tools_text = if tools_used.is_empty() {
+
+    // ツール使用統計: どのツールを何回使ったか
+    let tool_stats = summarize_tool_usage(compressed);
+    let tool_stats_text = if tool_stats.is_empty() {
         String::new()
     } else {
-        format!("\nUsed tools: {}", tools_used.iter().take(5).cloned().collect::<Vec<_>>().join(", "))
+        let mut entries: Vec<_> = tool_stats.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1));
+        let stats_str = entries
+            .iter()
+            .take(8)
+            .map(|(name, count)| format!("{name}:{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("\nTool stats: {stats_str}")
     };
+
+    // 最終成果の要約
+    let outcome_text = match extract_last_outcome(compressed) {
+        Some(outcome) => format!("\nLast outcome: {outcome}"),
+        None => String::new(),
+    };
+
+    // 未解決事項（エラー）の検出
+    let unresolved = collect_unresolved(messages, boundary);
+    let unresolved_text = if unresolved.is_empty() {
+        String::new()
+    } else {
+        let items = unresolved
+            .iter()
+            .map(|e| format!("- {e}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\nUnresolved issues:\n{items}")
+    };
+
     Some(Message::system(format!(
-        "[Context handoff] 前のアシスタントの作業を引き継ぎます。\n         Resolved:\n{resolved_text}{tools_text}\n         Remaining Work: 直近のメッセージに基づいて作業を続行してください。"
+        "[Context handoff] 前のアシスタントの作業を引き継ぎます。\n\
+         Resolved:\n{resolved_text}{tool_stats_text}{outcome_text}{unresolved_text}\n\
+         Remaining Work: 直近のメッセージに基づいて作業を続行してください。"
     )))
 }
 
@@ -212,6 +351,20 @@ mod tests {
         }
         v
     }
+
+    /// ツール呼び出しを含むAssistantメッセージを持つテスト用メッセージ列を生成
+    fn mk_with_tool_calls(calls: &[(&str, &str)]) -> Vec<Message> {
+        let mut v = vec![Message::system("s")];
+        for (tool_name, result) in calls {
+            v.push(Message::user("q"));
+            v.push(Message::assistant(format!(
+                "<think>plan</think>\n<tool_call>{{\"name\":\"{tool_name}\",\"arguments\":{{}}}}</tool_call>"
+            )));
+            v.push(Message::tool(result.to_string(), format!("call_{tool_name}")));
+        }
+        v
+    }
+
     #[test]
     fn t_tok() {
         assert_eq!(estimate_tokens(&[Message::user("hello world")]), 3);
@@ -360,5 +513,153 @@ mod tests {
         // 短すぎてhandoff不要
         let has_handoff = msgs.iter().any(|m| m.content.contains("handoff"));
         assert!(!has_handoff);
+    }
+
+    // --- 新規テスト: summarize_tool_usage ---
+
+    #[test]
+    fn t_summarize_tool_usage_basic() {
+        let msgs = mk_with_tool_calls(&[
+            ("shell", "ok"),
+            ("file_read", "content"),
+            ("shell", "done"),
+            ("file_write", "written"),
+        ]);
+        let stats = summarize_tool_usage(&msgs);
+        assert_eq!(stats.get("shell"), Some(&2), "shellは2回使用");
+        assert_eq!(stats.get("file_read"), Some(&1), "file_readは1回使用");
+        assert_eq!(stats.get("file_write"), Some(&1), "file_writeは1回使用");
+    }
+
+    #[test]
+    fn t_summarize_tool_usage_empty() {
+        let msgs = vec![Message::system("s"), Message::user("q"), Message::assistant("no tools")];
+        let stats = summarize_tool_usage(&msgs);
+        assert!(stats.is_empty(), "ツール呼び出しがなければ空");
+    }
+
+    #[test]
+    fn t_summarize_tool_usage_multiple_in_one_message() {
+        let msgs = vec![
+            Message::assistant(
+                "<tool_call>{\"name\":\"shell\",\"arguments\":{}}</tool_call>\n\
+                 <tool_call>{\"name\":\"git\",\"arguments\":{}}</tool_call>"
+                    .to_string(),
+            ),
+        ];
+        let stats = summarize_tool_usage(&msgs);
+        assert_eq!(stats.get("shell"), Some(&1));
+        assert_eq!(stats.get("git"), Some(&1));
+    }
+
+    // --- 新規テスト: extract_last_outcome ---
+
+    #[test]
+    fn t_extract_last_outcome_assistant() {
+        let msgs = vec![
+            Message::system("s"),
+            Message::user("q"),
+            Message::assistant("ファイルの修正が完了しました。テストも全件パスしています。"),
+        ];
+        let outcome = extract_last_outcome(&msgs);
+        assert!(outcome.is_some());
+        assert!(outcome.unwrap().contains("修正が完了"));
+    }
+
+    #[test]
+    fn t_extract_last_outcome_strips_think() {
+        let msgs = vec![
+            Message::assistant("<think>内部思考</think>タスク完了: 3ファイル修正済み"),
+        ];
+        let outcome = extract_last_outcome(&msgs).unwrap();
+        assert!(!outcome.contains("内部思考"), "thinkタグの中身は除外");
+        assert!(outcome.contains("タスク完了"), "thinkタグ外の内容は保持");
+    }
+
+    #[test]
+    fn t_extract_last_outcome_fallback_to_tool() {
+        let msgs = vec![
+            Message::system("s"),
+            Message::assistant(""),  // 空のAssistantメッセージ
+            Message::tool("ビルド成功: 0 errors, 0 warnings", "build"),
+        ];
+        let outcome = extract_last_outcome(&msgs).unwrap();
+        assert!(outcome.contains("ビルド成功"), "Toolメッセージにフォールバック");
+    }
+
+    #[test]
+    fn t_extract_last_outcome_truncates() {
+        let long_msg = "a".repeat(300);
+        let msgs = vec![Message::assistant(long_msg)];
+        let outcome = extract_last_outcome(&msgs).unwrap();
+        assert_eq!(outcome.chars().count(), 200, "200文字に切り詰め");
+    }
+
+    #[test]
+    fn t_extract_last_outcome_empty() {
+        let msgs = vec![Message::system("s"), Message::user("q")];
+        assert!(extract_last_outcome(&msgs).is_none());
+    }
+
+    // --- 新規テスト: level3にツール統計と成果が含まれる ---
+
+    #[test]
+    fn t_l3_handoff_includes_tool_stats() {
+        let mut msgs = mk_with_tool_calls(&[
+            ("shell", "ok"),
+            ("shell", "ok"),
+            ("file_read", "content"),
+            ("shell", "ok"),
+            ("file_write", "done"),
+            ("git", "committed"),
+            ("shell", "final"),
+        ]);
+        let config = CompactionConfig {
+            emergency_keep: 3,
+            ..Default::default()
+        };
+        compact_level3(&mut msgs, &config);
+        let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
+        assert!(handoff.content.contains("Tool stats:"), "ツール統計が含まれるべき");
+        assert!(handoff.content.contains("shell:"), "shellの統計が含まれるべき");
+    }
+
+    #[test]
+    fn t_l3_handoff_includes_outcome() {
+        let mut msgs = vec![Message::system("s")];
+        for i in 0..8 {
+            msgs.push(Message::user(format!("q{i}")));
+            msgs.push(Message::assistant(format!("作業ステップ{i}を完了しました。次に進みます。")));
+            msgs.push(Message::tool(format!("result{i}"), format!("t{i}")));
+        }
+        let config = CompactionConfig {
+            emergency_keep: 3,
+            ..Default::default()
+        };
+        compact_level3(&mut msgs, &config);
+        let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
+        assert!(handoff.content.contains("Last outcome:"), "最終成果が含まれるべき");
+    }
+
+    #[test]
+    fn t_l3_handoff_includes_unresolved() {
+        let mut msgs = vec![Message::system("s")];
+        for i in 0..8 {
+            msgs.push(Message::user(format!("q{i}")));
+            msgs.push(Message::assistant(format!("ステップ{i}を実行します。長い文章にするため追加テキスト。")));
+            if i == 3 {
+                msgs.push(Message::tool("ツール実行エラー: ファイルが見つかりません".to_string(), format!("t{i}")));
+            } else {
+                msgs.push(Message::tool(format!("ok{i}"), format!("t{i}")));
+            }
+        }
+        let config = CompactionConfig {
+            emergency_keep: 3,
+            ..Default::default()
+        };
+        compact_level3(&mut msgs, &config);
+        let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
+        assert!(handoff.content.contains("Unresolved"), "未解決事項が含まれるべき");
+        assert!(handoff.content.contains("エラー"), "エラー内容が含まれるべき");
     }
 }
