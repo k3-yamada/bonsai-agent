@@ -22,7 +22,13 @@ use crate::tools::{Tool, ToolResult};
 pub struct PluginToolConfig {
     pub name: String,
     pub command: String,
+    /// 短い1行説明（Deferred Schema / Progressive Disclosure用）
+    #[serde(default)]
+    pub summary: String,
     pub description: String,
+    /// タスクマッチング用タグ（Agent Skills段階的開示）
+    #[serde(default)]
+    pub tags: Vec<String>,
     #[serde(default = "default_permission")]
     pub permission: String,
     #[serde(default)]
@@ -57,6 +63,30 @@ impl PluginTool {
             config,
             sandbox: Box::new(DirectSandbox),
         }
+    }
+
+    /// 段階的開示用の短い説明を返す（未設定ならdescriptionの先頭40文字）
+    pub fn summary(&self) -> &str {
+        if self.config.summary.is_empty() {
+            // summaryが未設定の場合、descriptionから自動生成
+            let desc = &self.config.description;
+            if desc.len() <= 40 {
+                desc
+            } else {
+                // UTF-8境界を考慮して40文字以内で切る
+                match desc.char_indices().nth(40) {
+                    Some((idx, _)) => &desc[..idx],
+                    None => desc,
+                }
+            }
+        } else {
+            &self.config.summary
+        }
+    }
+
+    /// タスクマッチング用タグを返す
+    pub fn tags(&self) -> &[String] {
+        &self.config.tags
     }
 
     /// コマンドテンプレート内の {param_name} を引数値で置換
@@ -147,7 +177,9 @@ mod tests {
         PluginToolConfig {
             name: "echo_plugin".to_string(),
             command: "echo {message}".to_string(),
+            summary: "エコー".to_string(),
             description: "メッセージをエコーする".to_string(),
+            tags: vec!["echo".to_string(), "utility".to_string()],
             permission: "auto".to_string(),
             parameters: {
                 let mut m = HashMap::new();
@@ -182,7 +214,9 @@ mod tests {
         let config = PluginToolConfig {
             name: "test".to_string(),
             command: "curl {url} -o {output}".to_string(),
+            summary: String::new(),
             description: "test".to_string(),
+            tags: Vec::new(),
             permission: "auto".to_string(),
             parameters: HashMap::new(),
         };
@@ -250,4 +284,75 @@ location = { type = "string", description = "都市名" }
         assert_eq!(config.name, "weather");
         assert_eq!(config.parameters.len(), 1);
     }
+
+    #[test]
+    fn test_plugin_summary_explicit() {
+        let tool = PluginTool::from_config(test_config());
+        assert_eq!(tool.summary(), "エコー");
+    }
+
+    #[test]
+    fn test_plugin_summary_fallback_from_description() {
+        let mut config = test_config();
+        config.summary = String::new();
+        config.description = "短い説明".to_string();
+        let tool = PluginTool::from_config(config);
+        // summaryが空ならdescriptionがそのまま返る
+        assert_eq!(tool.summary(), "短い説明");
+    }
+
+    #[test]
+    fn test_plugin_summary_fallback_truncates_long_description() {
+        let mut config = test_config();
+        config.summary = String::new();
+        config.description = "これは非常に長い説明文で、四十文字を超える場合は切り詰められるべきです。".to_string();
+        let tool = PluginTool::from_config(config);
+        let summary = tool.summary();
+        // 40文字以内に切り詰められる
+        assert!(summary.chars().count() <= 40);
+    }
+
+    #[test]
+    fn test_plugin_tags() {
+        let tool = PluginTool::from_config(test_config());
+        assert_eq!(tool.tags(), &["echo", "utility"]);
+    }
+
+    #[test]
+    fn test_plugin_tags_empty() {
+        let mut config = test_config();
+        config.tags = Vec::new();
+        let tool = PluginTool::from_config(config);
+        assert!(tool.tags().is_empty());
+    }
+
+    #[test]
+    fn test_toml_deserialization_with_summary_and_tags() {
+        let toml_str = r#"
+name = "custom_lint"
+summary = "コードリンター"
+description = "プロジェクトのコードをリントし、警告・エラーを報告する"
+tags = ["lint", "code", "quality"]
+command = "cargo clippy"
+permission = "auto"
+"#;
+        let config: PluginToolConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "custom_lint");
+        assert_eq!(config.summary, "コードリンター");
+        assert_eq!(config.tags, vec!["lint", "code", "quality"]);
+    }
+
+    #[test]
+    fn test_toml_deserialization_without_summary_and_tags() {
+        // summary/tagsはoptional — 省略時にデフォルト値
+        let toml_str = r#"
+name = "simple"
+command = "echo hello"
+description = "シンプルツール"
+"#;
+        let config: PluginToolConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.summary.is_empty());
+        assert!(config.tags.is_empty());
+    }
+
 }

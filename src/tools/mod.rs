@@ -666,4 +666,60 @@ mod tests {
         assert!(TaskType::Research.allowed_prefixes().is_some());
         assert!(TaskType::General.allowed_prefixes().is_none());
     }
+
+    #[test]
+    fn test_format_schemas_progressive_collapsed() {
+        // 展開対象なし — 全ツールがsummary形式（第1段階）
+        let reg = build_registry();
+        let all: Vec<&dyn Tool> = reg.tools.values().map(|t| t.as_ref()).collect();
+        let progressive = reg.format_schemas_progressive(&all, &[]);
+        // パラメータスキーマは含まれない
+        assert!(!progressive.contains("properties"));
+        // 名前は含まれる
+        assert!(progressive.contains("shell"));
+        assert!(progressive.contains("file_read"));
+    }
+
+    #[test]
+    fn test_format_schemas_progressive_expanded() {
+        // shellのみ展開 — 他はsummary形式
+        let reg = build_registry();
+        let all: Vec<&dyn Tool> = reg.tools.values().map(|t| t.as_ref()).collect();
+        let progressive = reg.format_schemas_progressive(&all, &["shell"]);
+        // shellはフルスキーマ展開（##ヘッダ + パラメータ）
+        assert!(progressive.contains("## shell"));
+        // 他のツールはsummary形式（- **name**: ...）
+        assert!(progressive.contains("- **file_read**"));
+    }
+
+    #[test]
+    fn test_format_schemas_progressive_empty() {
+        let reg = build_registry();
+        let progressive = reg.format_schemas_progressive(&[], &[]);
+        assert!(progressive.is_empty());
+    }
+
+    #[test]
+    fn test_format_schemas_progressive_shorter_than_full() {
+        // progressive（第1段階）はフル展開より短い
+        let reg = build_registry();
+        let all: Vec<&dyn Tool> = reg.tools.values().map(|t| t.as_ref()).collect();
+        let progressive = reg.format_schemas_progressive(&all, &[]);
+        let full = reg.format_schemas(&all);
+        assert!(progressive.len() < full.len());
+    }
+
+    #[test]
+    fn test_format_schemas_progressive_all_expanded() {
+        // 全ツール展開 — format_schemasと同等の情報量
+        let reg = build_registry();
+        let all: Vec<&dyn Tool> = reg.tools.values().map(|t| t.as_ref()).collect();
+        let names: Vec<&str> = all.iter().map(|t| t.name()).collect();
+        let progressive = reg.format_schemas_progressive(&all, &names);
+        // 全ツールが ## ヘッダで展開
+        assert!(progressive.contains("## shell"));
+        assert!(progressive.contains("## file_read"));
+        // summary形式（- **name**）は含まれない
+        assert!(!progressive.contains("- **shell**"));
+    }
 }
