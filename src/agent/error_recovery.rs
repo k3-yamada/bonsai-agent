@@ -29,6 +29,8 @@ pub struct RecoveryHint {
     pub should_compress: bool,
     /// 待機時間（秒、0ならすぐリトライ）
     pub backoff_secs: u64,
+    /// 環境障害による待機リトライ（GLM-5.1知見: 再計画ではなく待機が正解）
+    pub wait_and_retry: bool,
 }
 
 impl RecoveryHint {
@@ -38,41 +40,50 @@ impl RecoveryHint {
                 retryable: true,
                 should_compress: false,
                 backoff_secs: 0,
+                wait_and_retry: false,
             },
             FailureMode::ToolExecError(_) => Self {
                 retryable: true,
                 should_compress: false,
                 backoff_secs: 0,
+                wait_and_retry: false,
             },
             FailureMode::ReasoningError => Self {
                 retryable: true,
                 should_compress: false,
                 backoff_secs: 0,
+                wait_and_retry: false,
             },
             FailureMode::LoopDetected => Self {
                 retryable: false,
                 should_compress: false,
                 backoff_secs: 0,
+                wait_and_retry: false,
             },
             FailureMode::ContextOverflow => Self {
                 retryable: true,
                 should_compress: true,
                 backoff_secs: 0,
+                wait_and_retry: false,
             },
             FailureMode::RateLimited => Self {
                 retryable: true,
                 should_compress: false,
                 backoff_secs: 15,
+                wait_and_retry: true,
             },
+            // 環境障害: 再計画不要、待機リトライ（GLM-5.1知見）
             FailureMode::NetworkError => Self {
                 retryable: true,
                 should_compress: false,
                 backoff_secs: 5,
+                wait_and_retry: true,
             },
             FailureMode::ServerDisconnect => Self {
                 retryable: true,
-                should_compress: true,
+                should_compress: false,
                 backoff_secs: 10,
+                wait_and_retry: true,
             },
         }
     }
@@ -231,13 +242,129 @@ pub fn decide_recovery(mode: &FailureMode, attempt: usize, max_retries: usize) -
         FailureMode::RateLimited => RecoveryAction::RetryWithFix(
             "レート制限に達しました。少し待ってから再試行します。".to_string(),
         ),
+        // 環境障害は再計画ではなくリトライ優先（GLM-5.1知見: 環境障害フィルタ）
         FailureMode::NetworkError => RecoveryAction::RetryWithFix(
-            "ネットワークエラーが発生しました。接続を確認して再試行します。".to_string(),
+            "ネットワークエラーが発生しました。環境障害のため待機後に再試行します。".to_string(),
         ),
-        FailureMode::ServerDisconnect => RecoveryAction::Replan(
-            "推論サーバーとの接続が切れました。コンテキストを圧縮して再接続を試みます。".to_string(),
+        FailureMode::ServerDisconnect => RecoveryAction::RetryWithFix(
+            "推論サーバーとの接続が切れました。環境障害のため待機後に再接続を試みます。".to_string(),
         ),
     }
+}
+
+/// 試行サマリー: 失敗した試行の履歴を構造化して保持（GrandCode知見）
+///
+/// 再計画時に「何を試し、何が失敗したか」を注入することで
+/// モデルが同じアプローチを繰り返すのを防ぐ
+pub struct TrialSummary {
+    pub entries: Vec<TrialEntry>,
+    max_entries: usize,
+}
+
+/// 個別の試行記録
+pub struct TrialEntry {
+    pub tool_name: String,
+    /// 引数の最初の80文字
+    pub args_summary: String,
+    /// エラーの最初の100文字
+    pub error_summary: String,
+    /// イテレーション番号
+    pub timestamp: usize,
+}
+
+impl TrialSummary {
+    pub fn new(max: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries: max,
+        }
+    }
+
+    /// 失敗した試行を記録
+    pub fn record_failure(
+        &mut self,
+        tool_name: &str,
+        args_json: &str,
+        error_output: &str,
+        iteration: usize,
+    ) {
+        let args_summary: String = args_json.chars().take(80).collect();
+        let error_summary: String = error_output.chars().take(100).collect();
+        self.entries.push(TrialEntry {
+            tool_name: tool_name.to_string(),
+            args_summary,
+            error_summary,
+            timestamp: iteration,
+        });
+        // 上限超過時は古いものを削除
+        while self.entries.len() > self.max_entries {
+            self.entries.remove(0);
+        }
+    }
+
+    /// 再計画プロンプト用のフォーマット出力
+    pub fn format_for_replan(&self) -> String {
+        if self.entries.is_empty() {
+            return String::new();
+        }
+        let mut lines = vec![
+            "以下は既に試行済みの方法です。同じアプローチを避け、別の戦略を検討してください:".to_string(),
+        ];
+        for (i, entry) in self.entries.iter().enumerate() {
+            lines.push(format!(
+                "{}. [iter {}] {}({}) \u{2192} エラー: {}",
+                i + 1,
+                entry.timestamp,
+                entry.tool_name,
+                entry.args_summary,
+                entry.error_summary,
+            ));
+        }
+        lines.join("\n")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+impl Default for TrialSummary {
+    fn default() -> Self {
+        Self::new(10)
+    }
+}
+
+/// 環境障害フィルタ: エラー出力からサーバー/ネットワーク障害を分類（GLM-5.1知見）
+///
+/// サーバー障害やネットワーク障害は「モデルの能力不足」ではなく
+/// 「環境の不安定さ」が原因。再計画ではなく待機・リトライが正解
+pub fn classify_environment_failure(error_output: &str) -> Option<FailureMode> {
+    let lower = error_output.to_lowercase();
+    // サーバー障害パターン
+    if lower.contains("connection refused")
+        || lower.contains("timeout")
+        || lower.contains("503")
+        || lower.contains("502")
+        || lower.contains("server")
+    {
+        return Some(FailureMode::ServerDisconnect);
+    }
+    // ネットワーク障害パターン
+    if lower.contains("network")
+        || lower.contains("dns")
+        || lower.contains("econnreset")
+    {
+        return Some(FailureMode::NetworkError);
+    }
+    None
 }
 
 /// サーキットブレーカー: 連続失敗するツールを一時的に無効化
@@ -818,8 +945,10 @@ mod tests {
     fn test_recovery_hint_server_disconnect() {
         let hint = RecoveryHint::for_failure(&FailureMode::ServerDisconnect);
         assert!(hint.retryable);
-        assert!(hint.should_compress);
+        // 環境障害は圧縮不要（GLM-5.1知見）
+        assert!(!hint.should_compress);
         assert_eq!(hint.backoff_secs, 10);
+        assert!(hint.wait_and_retry);
     }
 
     #[test]
@@ -845,6 +974,109 @@ mod tests {
     #[test]
     fn test_decide_recovery_server_disconnect() {
         let action = decide_recovery(&FailureMode::ServerDisconnect, 0, 3);
-        assert!(matches!(action, RecoveryAction::Replan(_)));
+        // 環境障害フィルタ改善後: リトライ優先（再計画ではない）
+        assert!(matches!(action, RecoveryAction::RetryWithFix(_)));
+    }
+
+    // --- TrialSummary テスト（GrandCode知見） ---
+
+    #[test]
+    fn t_trial_summary_record() {
+        let mut ts = TrialSummary::new(10);
+        ts.record_failure("shell", r#"{"command":"cargo build"}"#, "コンパイルエラー E0308", 3);
+        assert_eq!(ts.len(), 1);
+        let entry = &ts.entries[0];
+        assert_eq!(entry.tool_name, "shell");
+        assert_eq!(entry.timestamp, 3);
+        assert!(!entry.args_summary.is_empty());
+        assert!(!entry.error_summary.is_empty());
+    }
+
+    #[test]
+    fn t_trial_summary_max_entries() {
+        let mut ts = TrialSummary::new(3);
+        for i in 0..5 {
+            ts.record_failure("shell", &format!("arg_{i}"), &format!("error_{i}"), i);
+        }
+        assert_eq!(ts.len(), 3);
+        // 古いものが削除され、最新3件が残る
+        assert_eq!(ts.entries[0].timestamp, 2);
+        assert_eq!(ts.entries[2].timestamp, 4);
+    }
+
+    #[test]
+    fn t_trial_summary_format() {
+        let mut ts = TrialSummary::new(10);
+        ts.record_failure("shell", r#"{"command":"cargo build"}"#, "コンパイルエラー E0308", 3);
+        ts.record_failure("file_write", "src/main.rs", "権限拒否", 5);
+        let output = ts.format_for_replan();
+        assert!(output.contains("試行済み"));
+        assert!(output.contains("[iter 3]"));
+        assert!(output.contains("[iter 5]"));
+        assert!(output.contains("shell"));
+        assert!(output.contains("file_write"));
+    }
+
+    #[test]
+    fn t_trial_summary_empty() {
+        let ts = TrialSummary::new(10);
+        assert!(ts.is_empty());
+        assert_eq!(ts.len(), 0);
+        let output = ts.format_for_replan();
+        assert!(output.is_empty());
+    }
+
+    // --- 環境障害フィルタ テスト（GLM-5.1知見） ---
+
+    #[test]
+    fn t_classify_env_failure_server() {
+        assert_eq!(
+            classify_environment_failure("connection refused"),
+            Some(FailureMode::ServerDisconnect)
+        );
+        assert_eq!(
+            classify_environment_failure("HTTP 503 Service Unavailable"),
+            Some(FailureMode::ServerDisconnect)
+        );
+        assert_eq!(
+            classify_environment_failure("server error 502"),
+            Some(FailureMode::ServerDisconnect)
+        );
+        assert_eq!(
+            classify_environment_failure("request timeout after 30s"),
+            Some(FailureMode::ServerDisconnect)
+        );
+    }
+
+    #[test]
+    fn t_classify_env_failure_network() {
+        assert_eq!(
+            classify_environment_failure("network unreachable"),
+            Some(FailureMode::NetworkError)
+        );
+        assert_eq!(
+            classify_environment_failure("dns resolution failed"),
+            Some(FailureMode::NetworkError)
+        );
+        assert_eq!(
+            classify_environment_failure("ECONNRESET by peer"),
+            Some(FailureMode::NetworkError)
+        );
+    }
+
+    #[test]
+    fn t_classify_env_failure_none() {
+        assert_eq!(
+            classify_environment_failure("コンパイルエラー E0308"),
+            None
+        );
+        assert_eq!(
+            classify_environment_failure("file not found"),
+            None
+        );
+        assert_eq!(
+            classify_environment_failure("permission denied"),
+            None
+        );
     }
 }
