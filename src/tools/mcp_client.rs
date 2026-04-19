@@ -192,13 +192,9 @@ impl McpConnection {
 impl McpConnection {
     /// MCPサーバープロセスの生存チェック
     pub fn is_alive(&mut self) -> bool {
-        if let Some(ref mut child) = self.child {
-            match child.try_wait() {
-                Ok(None) => true,  // まだ実行中
-                _ => false,        // 終了済みまたはエラー
-            }
-        } else {
-            false
+        match self.child.try_wait() {
+            Ok(None) => true,  // まだ実行中
+            _ => false,        // 終了済みまたはエラー
         }
     }
 }
@@ -387,19 +383,6 @@ args = ["-y", "@modelcontextprotocol/server-git"]
         assert_eq!(config.servers.len(), 2);
         assert_eq!(config.servers[0].name, "filesystem");
         assert_eq!(config.servers[1].name, "git");
-    }
-
-    #[test]
-    fn test_is_alive_no_child() {
-        // childがNoneの場合はfalse
-        let mut conn = McpConnection {
-            child: None,
-            stdin: None,
-            reader: None,
-            config: McpServerConfig { name: "test".into(), command: "echo".into(), args: vec![] },
-            next_id: 0,
-        };
-        assert!(!conn.is_alive());
     }
 
     // 実MCPサーバーとの統合テスト
