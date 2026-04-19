@@ -601,6 +601,7 @@ mod tests {
             mutation_type: MutationType::PromptRule,
             detail: "テスト".into(),
             apply: MutationAction::RemovePromptRule("ルール1".into()),
+            theme: MutationTheme::Precision,
         };
         let modified = apply_mutation(&config, &mutation);
         assert!(!modified.system_prompt.contains("ルール1"));
@@ -614,6 +615,7 @@ mod tests {
             mutation_type: MutationType::AgentParam,
             detail: "テスト".into(),
             apply: MutationAction::SetMaxIterations(15),
+            theme: MutationTheme::Precision,
         };
         let modified = apply_mutation(&config, &mutation);
         assert_eq!(modified.max_iterations, 15);
@@ -701,6 +703,7 @@ mod tests {
             mutation_type: MutationType::PromptRule,
             detail: "テスト".into(),
             apply: MutationAction::AddPromptRule("新ルール".into()),
+            theme: MutationTheme::Precision,
         };
         let _ = apply_mutation(&config, &mutation);
         // 元のconfigは変更されていない
