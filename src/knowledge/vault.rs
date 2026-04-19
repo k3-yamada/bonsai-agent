@@ -51,6 +51,30 @@ impl Vault {
         Ok(())
     }
 
+    /// ストックエントリをKnowledgeGraphに記録（LLM Wiki相互リンク）
+    pub fn record_to_graph(
+        &self,
+        entry: &StockEntry,
+        graph: &crate::memory::graph::KnowledgeGraph,
+    ) -> Result<()> {
+        let category = entry.category.as_str();
+        let content_key = entry.content.chars().take(60).collect::<String>();
+
+        // カテゴリノード（vault_category型）
+        let cat_id = graph.add_node(category, "vault_category")?;
+        // エントリノード（vault_entry型）
+        let entry_id = graph.add_node(&content_key, "vault_entry")?;
+        // カテゴリ→エントリのcontainsエッジ
+        graph.add_edge(cat_id, entry_id, "contains", 1.0)?;
+
+        // ソース情報があればソース→エントリのextracted_fromエッジ
+        if !entry.source.is_empty() {
+            let source_id = graph.add_node(&entry.source, "source")?;
+            graph.add_edge(source_id, entry_id, "extracted_from", 1.0)?;
+        }
+        Ok(())
+    }
+
     /// 複数エントリをバッチ追記
     pub fn append_all(&self, entries: &[StockEntry]) -> Result<usize> {
         let mut count = 0;
@@ -263,5 +287,41 @@ mod tests {
         let docs3 = v.read_docs_for_context("hello world", 5).unwrap();
         assert!(docs3.is_empty(), "No docs: {docs3:?}");
         std::fs::remove_dir_all(v.root()).ok();
+    }
+
+    #[test]
+    fn test_record_to_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let graph = crate::memory::graph::KnowledgeGraph::new(store.conn());
+
+        let entry = StockEntry {
+            category: StockCategory::Decision,
+            content: "Rustを採用した".to_string(),
+            source: "session_001".to_string(),
+        };
+        vault.record_to_graph(&entry, &graph).unwrap();
+
+        let neighbors = graph.neighbors("decisions", 1).unwrap();
+        assert!(!neighbors.is_empty(), "カテゴリ→エントリのエッジが存在すべき");
+    }
+
+    #[test]
+    fn test_record_to_graph_without_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let graph = crate::memory::graph::KnowledgeGraph::new(store.conn());
+
+        let entry = StockEntry {
+            category: StockCategory::Fact,
+            content: "Rustは安全な言語".to_string(),
+            source: String::new(),
+        };
+        vault.record_to_graph(&entry, &graph).unwrap();
+
+        let neighbors = graph.neighbors("facts", 1).unwrap();
+        assert!(!neighbors.is_empty());
     }
 }
