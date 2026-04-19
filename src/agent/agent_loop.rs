@@ -365,6 +365,7 @@ pub fn execute_step(
             }
         },
         ctx.cancel,
+        &task_params,
     )?;
     // 色リセットを保証
     if in_think.load(std::sync::atomic::Ordering::Relaxed) {
