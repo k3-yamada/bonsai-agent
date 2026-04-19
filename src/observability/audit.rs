@@ -79,6 +79,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::SecurityEvent { .. } => "security_event",
             AuditAction::StepOutcome { .. } => "step_outcome",
             AuditAction::AdvisorCall { .. } => "advisor_call",
+            AuditAction::TaskComplete { .. } => "task_complete",
         };
         let action_data = serde_json::to_string(action)?;
 
