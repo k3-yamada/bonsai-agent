@@ -227,6 +227,7 @@ fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
     let backend_name = match ctx.app_config.model.backend {
         bonsai_agent::config::ServerBackend::LlamaServer => "llama-server",
         bonsai_agent::config::ServerBackend::MlxLm => "mlx-lm",
+        bonsai_agent::config::ServerBackend::BitNet => "bitnet.cpp",
     };
     let mlx_compat = ctx.app_config.model.backend == bonsai_agent::config::ServerBackend::MlxLm;
 
