@@ -152,6 +152,7 @@ fn main() -> Result<()> {
             max_tools_selected: app_config.agent.max_tools_selected,
             max_tool_output_chars: app_config.agent.max_tool_output_chars,
             max_tools_in_context: app_config.agent.max_tools_in_context,
+            base_inference: app_config.model.inference.clone(),
             advisor: app_config.advisor.to_runtime(),
             ..Default::default()
         },

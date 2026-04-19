@@ -19,7 +19,8 @@ use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
-use crate::tools::{ToolRegistry, ToolResultCache};
+use crate::tools::{ToolRegistry, ToolResultCache, TaskType, detect_task_type};
+use crate::config::InferenceParams;
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::context_inject::inject_contextual_memories;
 
@@ -37,6 +38,8 @@ pub struct AgentConfig {
     pub max_tool_output_chars: usize,
     /// コンテキストに含めるツールの最大数
     pub max_tools_in_context: usize,
+    /// ベース推論パラメータ（TaskTypeで動的調整）
+    pub base_inference: InferenceParams,
 }
 
 impl Default for AgentConfig {
@@ -50,8 +53,24 @@ impl Default for AgentConfig {
             auto_checkpoint: true,
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
+            base_inference: InferenceParams::default(),
         }
     }
+}
+
+/// タスク種別に応じた推論パラメータを導出
+pub fn inference_for_task(task_type: TaskType, base: &InferenceParams) -> InferenceParams {
+    let mut params = base.clone();
+    match task_type {
+        TaskType::FileOperation | TaskType::CodeExecution => {
+            params.temperature = 0.3; // 精密操作
+        }
+        TaskType::Research => {
+            params.temperature = 0.6; // 探索的
+        }
+        TaskType::General => {} // ベースのまま
+    }
+    params
 }
 
 /// 1ビットモデル向けに最適化されたシステムプロンプト。

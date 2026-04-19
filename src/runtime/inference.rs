@@ -37,6 +37,18 @@ pub trait LlmBackend: Send + Sync {
         on_token: &mut dyn FnMut(&str),
         cancel: &CancellationToken,
     ) -> Result<GenerateResult>;
+
+    /// タスク種別に応じた推論パラメータで生成（デフォルト実装: generate()に委譲）
+    fn generate_with_params(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        on_token: &mut dyn FnMut(&str),
+        cancel: &CancellationToken,
+        _params: &crate::config::InferenceParams,
+    ) -> Result<GenerateResult> {
+        self.generate(messages, tools, on_token, cancel)
+    }
 }
 
 /// テスト用モックバックエンド。スクリプト化されたレスポンスを順番に返す。

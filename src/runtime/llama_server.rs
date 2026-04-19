@@ -161,10 +161,10 @@ impl LlamaServerBackend {
         if self.mlx_compatible {
             let mut body = serde_json::json!({
                 "messages": msgs,
-                "temperature": self.inference.temperature,
-                "top_p": self.inference.top_p,
-                "max_tokens": self.inference.max_tokens,
-                "repetition_penalty": self.inference.repeat_penalty,
+                "temperature": inference.temperature,
+                "top_p": inference.top_p,
+                "max_tokens": inference.max_tokens,
+                "repetition_penalty": inference.repeat_penalty,
                 "stream": true,
             });
             if self.seed != 0 {
@@ -174,12 +174,12 @@ impl LlamaServerBackend {
         } else {
             let mut body = serde_json::json!({
                 "messages": msgs,
-                "temperature": self.inference.temperature,
-                "top_k": self.inference.top_k,
-                "top_p": self.inference.top_p,
-                "min_p": self.inference.min_p,
-                "max_tokens": self.inference.max_tokens,
-                "repeat_penalty": self.inference.repeat_penalty,
+                "temperature": inference.temperature,
+                "top_k": inference.top_k,
+                "top_p": inference.top_p,
+                "min_p": inference.min_p,
+                "max_tokens": inference.max_tokens,
+                "repeat_penalty": inference.repeat_penalty,
                 "stream": true,
             });
             if self.seed != 0 {
