@@ -80,6 +80,26 @@ impl<'a> ExperienceStore<'a> {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// 期限切れの経験を削除
+    pub fn purge_expired(&self) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let deleted = self.conn.execute(
+            "DELETE FROM experiences WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            params![&now],
+        )?;
+        Ok(deleted)
+    }
+
+    /// 経験にTTLを設定（日数）
+    pub fn set_ttl(&self, id: i64, ttl_days: i64) -> Result<()> {
+        let expires = chrono::Utc::now() + chrono::Duration::days(ttl_days);
+        self.conn.execute(
+            "UPDATE experiences SET expires_at = ?1 WHERE id = ?2",
+            params![&expires.to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
     /// 類似タスクの過去経験を検索（task_contextのキーワードマッチ）
     pub fn find_similar(&self, context: &str, limit: usize) -> Result<Vec<Experience>> {
         // 簡易的なLIKE検索。将来はベクトル検索に置き換え。
@@ -253,6 +273,48 @@ mod tests {
         assert_eq!(patterns.len(), 2);
         assert_eq!(patterns[0].0, "Timeout");
         assert_eq!(patterns[0].1, 3);
+    }
+
+    #[test]
+    fn t_purge_expired_removes_old() {
+        let store = test_conn();
+        let exp = ExperienceStore::new(store.conn());
+        let id = exp.record(&success_params("old task", "old action")).unwrap();
+        // 過去の日時を直接設定
+        store.conn().execute(
+            "UPDATE experiences SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?1",
+            params![id],
+        ).unwrap();
+        let deleted = exp.purge_expired().unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn t_set_ttl_updates_expires() {
+        let store = test_conn();
+        let exp = ExperienceStore::new(store.conn());
+        let id = exp.record(&success_params("ttl task", "ttl action")).unwrap();
+        exp.set_ttl(id, 30).unwrap();
+        let expires: Option<String> = store.conn().query_row(
+            "SELECT expires_at FROM experiences WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(expires.is_some());
+    }
+
+    #[test]
+    fn t_purge_keeps_valid() {
+        let store = test_conn();
+        let exp = ExperienceStore::new(store.conn());
+        let id = exp.record(&success_params("valid", "valid")).unwrap();
+        // 未来の日時を設定
+        store.conn().execute(
+            "UPDATE experiences SET expires_at = '2099-01-01T00:00:00Z' WHERE id = ?1",
+            params![id],
+        ).unwrap();
+        let deleted = exp.purge_expired().unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[test]

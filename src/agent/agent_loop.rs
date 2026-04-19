@@ -472,6 +472,14 @@ pub fn run_agent_loop_with_session(
 
     let secrets_filter = SecretsFilter::default();
 
+    // セッション開始時に期限切れ情報を自動パージ
+    if let Some(s) = store {
+        match s.purge_all_expired() {
+            Ok(n) if n > 0 => log_event(LogLevel::Info, "ttl", &format!("期限切れ{}件をパージ", n)),
+            _ => {}
+        }
+    }
+
     inject_contextual_memories(session, &task_context, store);
     inject_planning_step(session, &task_context);
 

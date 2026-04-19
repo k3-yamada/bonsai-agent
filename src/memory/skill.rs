@@ -142,6 +142,16 @@ impl<'a> SkillStore<'a> {
         Ok(())
     }
 
+    /// 期限切れのスキルを削除
+    pub fn purge_expired(&self) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let deleted = self.conn.execute(
+            "DELETE FROM skills WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            params![&now],
+        )?;
+        Ok(deleted)
+    }
+
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
     /// frequency(0.4) + recency(0.35) + diversity(0.25)
     pub fn promote_from_experiences(
@@ -332,6 +342,29 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# Skills"));
         assert!(content.contains("## test_skill"));
+    }
+
+    #[test]
+    fn t_skill_purge_expired() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        skills.save("old_skill", "古い", "[]", "[]").unwrap();
+        store.conn().execute(
+            "UPDATE skills SET expires_at = '2020-01-01T00:00:00Z' WHERE name = 'old_skill'",
+            [],
+        ).unwrap();
+        let deleted = skills.purge_expired().unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn t_skill_purge_keeps_valid() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        skills.save("new_skill", "新しい", "[]", "[]").unwrap();
+        // expires_atなし = 削除されない
+        let deleted = skills.purge_expired().unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[test]

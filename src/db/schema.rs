@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -27,6 +27,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 5,
         description: "グラフ構造連想記憶: knowledge_nodes, knowledge_edges テーブル",
         sql: SCHEMA_V5,
+    },
+    Migration {
+        version: 6,
+        description: "TTL: memories, experiences, skills に expires_at カラム追加",
+        sql: SCHEMA_V6,
     },
 ];
 
@@ -189,9 +194,25 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_edges_source ON knowledge_edges(source_
 CREATE INDEX IF NOT EXISTS idx_knowledge_edges_target ON knowledge_edges(target_id);
 "#;
 
+const SCHEMA_V6: &str = r#"
+ALTER TABLE memories ADD COLUMN expires_at TEXT;
+ALTER TABLE experiences ADD COLUMN expires_at TEXT;
+ALTER TABLE skills ADD COLUMN expires_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
+CREATE INDEX IF NOT EXISTS idx_experiences_expires ON experiences(expires_at);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_schema_v6_ttl_migration() {
+        assert!(SCHEMA_V6.contains("expires_at"));
+        assert!(SCHEMA_V6.contains("ALTER TABLE memories"));
+        assert!(SCHEMA_V6.contains("ALTER TABLE experiences"));
+        assert!(SCHEMA_V6.contains("ALTER TABLE skills"));
+    }
 
     #[test]
     fn test_schema_version_is_positive() {

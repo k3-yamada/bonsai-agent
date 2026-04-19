@@ -59,6 +59,25 @@ impl MemoryStore {
         &self.conn
     }
 
+    /// 全テーブルの期限切れレコードを一括パージ
+    pub fn purge_all_expired(&self) -> Result<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut total = 0;
+        total += self.conn.execute(
+            "DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            params![&now],
+        )?;
+        total += self.conn.execute(
+            "DELETE FROM experiences WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            params![&now],
+        )?;
+        total += self.conn.execute(
+            "DELETE FROM skills WHERE expires_at IS NOT NULL AND expires_at < ?1",
+            params![&now],
+        )?;
+        Ok(total)
+    }
+
     // --- メモリ CRUD ---
 
     /// メモリを保存
@@ -444,6 +463,26 @@ mod tests {
         store.set_profile("lang", "ja").unwrap();
         store.set_profile("lang", "en").unwrap();
         assert_eq!(store.get_profile("lang").unwrap(), Some("en".to_string()));
+    }
+
+    #[test]
+    fn t_purge_all_expired() {
+        let store = test_store();
+        store.save_memory("test", "fact", &[]).unwrap();
+        store.conn().execute(
+            "UPDATE memories SET expires_at = '2020-01-01T00:00:00Z' WHERE content = 'test'",
+            [],
+        ).unwrap();
+        let deleted = store.purge_all_expired().unwrap();
+        assert_eq!(deleted, 1);
+    }
+
+    #[test]
+    fn t_purge_all_expired_no_expired() {
+        let store = test_store();
+        store.save_memory("fresh", "fact", &[]).unwrap();
+        let deleted = store.purge_all_expired().unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[test]
