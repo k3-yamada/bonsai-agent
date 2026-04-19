@@ -19,7 +19,9 @@ use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
-use crate::tools::{ToolRegistry, ToolResultCache, TaskType, detect_task_type};
+use crate::tools::{ToolRegistry, ToolResultCache, TaskType};
+#[allow(unused_imports)]
+use crate::tools::detect_task_type;
 use crate::config::InferenceParams;
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::context_inject::inject_contextual_memories;

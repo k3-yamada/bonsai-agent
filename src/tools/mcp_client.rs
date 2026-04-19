@@ -207,6 +207,7 @@ pub struct McpToolInfo {
 /// MCPツールをTool traitにラップ（接続参照を保持し、実際のツール呼び出しを委譲）
 pub struct McpToolWrapper {
     info: McpToolInfo,
+    #[allow(dead_code)]
     server_name: String,
     /// ネームスペース付き表示名（"server:tool"形式）
     display_name: String,
