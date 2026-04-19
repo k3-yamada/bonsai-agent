@@ -295,6 +295,7 @@ impl MetaMutationGenerator {
             mutation_type: MutationType::MetaMutation,
             detail,
             apply: MutationAction::CompoundPromptRules(rules),
+            theme: MutationTheme::Precision,
         })
     }
 
@@ -588,6 +589,7 @@ mod tests {
             mutation_type: MutationType::PromptRule,
             detail: "テスト".into(),
             apply: MutationAction::AddPromptRule("3. 新ルール".into()),
+            theme: MutationTheme::Precision,
         };
         let modified = apply_mutation(&config, &mutation);
         assert!(modified.system_prompt.contains("3. 新ルール"));
@@ -629,6 +631,7 @@ mod tests {
             mutation_type: MutationType::AgentParam,
             detail: "テスト".into(),
             apply: MutationAction::SetMaxRetries(5),
+            theme: MutationTheme::Precision,
         };
         let modified = apply_mutation(&config, &mutation);
         assert_eq!(modified.max_retries, 5);
@@ -801,6 +804,7 @@ mod tests {
             mutation_type: MutationType::MetaMutation,
             detail: "compound test".into(),
             apply: MutationAction::CompoundPromptRules(vec!["rule_x".into(), "rule_y".into()]),
+            theme: MutationTheme::Precision,
         };
         let modified = apply_mutation(&config, &mutation);
         assert!(modified.system_prompt.contains("rule_x"));
