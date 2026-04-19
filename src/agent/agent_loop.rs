@@ -22,7 +22,6 @@ use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
-#[allow(unused_imports)]
 use crate::tools::detect_task_type;
 use crate::tools::{TaskType, ToolRegistry, ToolResultCache};
 
@@ -340,11 +339,15 @@ pub fn execute_step(
     );
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
-    // 2. LLM呼び出し（ストリーミング対応）
+    // 2. タスク種別に応じた推論パラメータ導出
+    let task_type = detect_task_type(last_user_msg);
+    let task_params = inference_for_task(task_type, &ctx.config.base_inference);
+
+    // 3. LLM呼び出し（ストリーミング対応、タスク別パラメータ）
     let in_think = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let in_think_clone = in_think.clone();
 
-    let result = ctx.backend.generate(
+    let result = ctx.backend.generate_with_params(
         &session.messages,
         &tool_schemas,
         &mut |token| {
