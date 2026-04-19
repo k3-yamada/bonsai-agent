@@ -11,10 +11,14 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
-- **60のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（541テスト、61ソースファイル）
+- **100のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（730テスト、66ソースファイル）
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
 - **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
 - **読取ツール並列実行** — 連続読取2件以上で自動並列化（書き込みはバリア逐次）
+- **型駆動ツール定義** — schemars JsonSchema deriveでスキーマ自動生成+型安全パース（TypedToolトレイト）
+- **TTL情報鮮度管理** — expires_atカラム+セッション開始時自動パージで陳腐化情報を防止
+- **ADR自動生成** — Replan/Advisor介入時の意思決定をMarkdownでVaultに蓄積
+- **不変条件チェック** — タスク完了時にツール成功率・回答品質を自動検証
 
 ## クイックスタート
 
@@ -97,6 +101,9 @@ cargo run -- --checkpoints             # チェックポイント一覧
 cargo run -- --rollback <id>           # チェックポイント復元
 cargo run -- --lab                     # 自律的自己改善ループ
 cargo run -- --init                    # config.tomlテンプレート生成
+cargo run -- --skills-export           # スキルをMarkdownにエクスポート
+cargo run -- --diagnose                # サーバー接続診断
+cargo run -- --evolve                  # arxiv収集+自己改善
 cargo run -- --server-url <URL>        # カスタムサーバーURL
 ```
 
@@ -111,6 +118,7 @@ cargo run -- --server-url <URL>        # カスタムサーバーURL
 | `web_search` | Auto | Web検索（DuckDuckGo API） |
 | `web_fetch` | Auto | URLからテキスト取得 |
 | `repo_map` | Auto | コード構造マップ（Rust/Python/TS/JS/Go/Java/C/C++/Kotlin/Swift対応） |
+| `arxiv_search` | Auto | arxiv論文検索 |
 | **プラグイン** | 設定可能 | TOML定義でカスタムツール追加 |
 | **MCP** | Confirm | MCPサーバーのツールを利用 |
 
@@ -242,8 +250,13 @@ arxiv論文自動収集 → 知識蓄積 ─────────────
 
 Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 
-### v6結果（最新）
-- ベースライン: **score=0.8054**
+### v8結果（最新、2026-04-19）— 全10実験REJECT、最適解収束
+- ベースライン: **score=0.8517**, pass@k=0.9167
+- 全10実験REJECT — デフォルト設定が最適解に完全収束
+- Adam's Lawリライト+6機能追加後もベースライン維持（劣化なし）
+
+### v6.2結果
+- ベースライン: score=0.8517, pass@k=0.9167
 
 ### v5結果 — 承認率40%（v3の4倍）
 - ベースライン: score=0.8429, pass@k=0.9167
@@ -259,7 +272,7 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - ベースライン: score=0.8596, pass@k=1.0
 - 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
 
-## ハーネスパターン（60項目）
+## ハーネスパターン（100項目）
 
 「Scaffolding > Model」設計原則に基づく、1ビットモデルの信頼性向上パターン:
 
@@ -279,12 +292,12 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - **構造化エラー分類12種**: FailureMode拡張 + RecoveryHint
 - **ヘルスチェック統一**: /health + /v1/modelsフォールバック（MLX対応）
 
-全60項目の詳細はCLAUDE.mdを参照。
+全100項目の詳細はCLAUDE.mdを参照。
 
 ## 開発
 
 ```bash
-cargo test                     # 541テスト
+cargo test                     # 730テスト
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマット
 cargo build --features full    # fastembed有効化ビルド
