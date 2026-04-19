@@ -61,15 +61,15 @@ impl Vault {
         let content_key = entry.content.chars().take(60).collect::<String>();
 
         // カテゴリノード（vault_category型）
-        let cat_id = graph.add_node(category, "vault_category")?;
+        let cat_id = graph.add_node("vault_category", category)?;
         // エントリノード（vault_entry型）
-        let entry_id = graph.add_node(&content_key, "vault_entry")?;
+        let entry_id = graph.add_node("vault_entry", &content_key)?;
         // カテゴリ→エントリのcontainsエッジ
         graph.add_edge(cat_id, entry_id, "contains", 1.0)?;
 
         // ソース情報があればソース→エントリのextracted_fromエッジ
         if !entry.source.is_empty() {
-            let source_id = graph.add_node(&entry.source, "source")?;
+            let source_id = graph.add_node("source", &entry.source)?;
             graph.add_edge(source_id, entry_id, "extracted_from", 1.0)?;
         }
         Ok(())
