@@ -24,9 +24,9 @@ impl MutationTheme {
     /// サイクル番号からテーマを決定（固定マッピング）
     pub fn from_cycle(cycle: usize) -> Self {
         match cycle % 10 {
-            0 | 1 | 2 => Self::Precision,
-            3 | 4 => Self::Efficiency,
-            5 | 6 => Self::Exploration,
+            0..=2 => Self::Precision,
+            3..=4 => Self::Efficiency,
+            5..=6 => Self::Exploration,
             _ => Self::Robustness, // 7, 8, 9
         }
     }
