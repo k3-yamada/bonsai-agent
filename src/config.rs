@@ -212,12 +212,14 @@ pub enum ServerBackend {
     LlamaServer,
     /// mlx-lm server (MLX, Apple Silicon最適化)
     MlxLm,
+    /// bitnet.cpp (1ビット最適化カーネル、llama-server互換API)
+    BitNet,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// 推論バックエンド（llama-server or mlx-lm）
+    /// 推論バックエンド（llama-server / mlx-lm / bitnet）
     pub backend: ServerBackend,
     pub server_url: String,
     /// モデルID（例: "bonsai-8b", "ternary-bonsai-8b", "ternary-bonsai-4b"）
