@@ -11,7 +11,7 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
-- **100のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（730テスト、66ソースファイル）
+- **100のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（739テスト、66ソースファイル）
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
 - **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
 - **読取ツール並列実行** — 連続読取2件以上で自動並列化（書き込みはバリア逐次）
@@ -272,7 +272,7 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - ベースライン: score=0.8596, pass@k=1.0
 - 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
 
-## ハーネスパターン（100項目）
+## ハーネスパターン（106項目）
 
 「Scaffolding > Model」設計原則に基づく、1ビットモデルの信頼性向上パターン:
 
@@ -292,12 +292,12 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - **構造化エラー分類12種**: FailureMode拡張 + RecoveryHint
 - **ヘルスチェック統一**: /health + /v1/modelsフォールバック（MLX対応）
 
-全100項目の詳細はCLAUDE.mdを参照。
+全106項目の詳細はCLAUDE.mdを参照。
 
 ## 開発
 
 ```bash
-cargo test                     # 730テスト
+cargo test                     # 739テスト
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマット
 cargo build --features full    # fastembed有効化ビルド
