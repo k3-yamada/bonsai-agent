@@ -372,15 +372,15 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
                 for t in mcp_tools {
                     tools.register(t);
                 }
-                crate::observability::logger::log_event(
-                    crate::observability::logger::LogLevel::Info,
+                bonsai_agent::observability::logger::log_event(
+                    bonsai_agent::observability::logger::LogLevel::Info,
                     "mcp",
                     &format!("MCPサーバー '{}' 起動: {}ツール登録", server_cfg.name, count),
                 );
             }
             Err(e) => {
-                crate::observability::logger::log_event(
-                    crate::observability::logger::LogLevel::Warn,
+                bonsai_agent::observability::logger::log_event(
+                    bonsai_agent::observability::logger::LogLevel::Warn,
                     "mcp",
                     &format!("MCPサーバー '{}' スキップ: {e}", server_cfg.name),
                 );
@@ -395,8 +395,8 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
 }
 
 /// MCPサーバーを起動しツールリストを取得
-fn setup_mcp_server(cfg: &crate::tools::mcp_client::McpServerConfig) -> anyhow::Result<Vec<Box<dyn crate::tools::Tool>>> {
-    use crate::tools::mcp_client::{McpConnection, McpToolWrapper};
+fn setup_mcp_server(cfg: &bonsai_agent::tools::mcp_client::McpServerConfig) -> anyhow::Result<Vec<Box<dyn bonsai_agent::tools::Tool>>> {
+    use bonsai_agent::tools::mcp_client::{McpConnection, McpToolWrapper};
     use std::sync::{Arc, Mutex};
 
     let mut conn = McpConnection::spawn(cfg)?;
@@ -404,7 +404,7 @@ fn setup_mcp_server(cfg: &crate::tools::mcp_client::McpServerConfig) -> anyhow::
     let connection = Arc::new(Mutex::new(conn));
     let tools: Vec<Box<dyn crate::tools::Tool>> = tool_infos
         .into_iter()
-        .map(|info| Box::new(McpToolWrapper::new(info, &cfg.name, connection.clone())) as Box<dyn crate::tools::Tool>)
+        .map(|info| Box::new(McpToolWrapper::new(info, &cfg.name, connection.clone())) as Box<dyn bonsai_agent::tools::Tool>)
         .collect();
     Ok(tools)
 }
