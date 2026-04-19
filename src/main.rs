@@ -402,7 +402,7 @@ fn setup_mcp_server(cfg: &bonsai_agent::tools::mcp_client::McpServerConfig) -> a
     let mut conn = McpConnection::spawn(cfg)?;
     let tool_infos = conn.list_tools()?;
     let connection = Arc::new(Mutex::new(conn));
-    let tools: Vec<Box<dyn crate::tools::Tool>> = tool_infos
+    let tools: Vec<Box<dyn bonsai_agent::tools::Tool>> = tool_infos
         .into_iter()
         .map(|info| Box::new(McpToolWrapper::new(info, &cfg.name, connection.clone())) as Box<dyn bonsai_agent::tools::Tool>)
         .collect();
