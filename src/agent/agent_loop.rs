@@ -33,6 +33,10 @@ pub struct AgentConfig {
     pub advisor: AdvisorConfig,
     /// タスク開始時に自動チェックポイント作成（git stash + DB永続化）
     pub auto_checkpoint: bool,
+    /// ツール出力の最大文字数（超過分は切り詰め、コンテキスト節約）
+    pub max_tool_output_chars: usize,
+    /// コンテキストに含めるツールの最大数
+    pub max_tools_in_context: usize,
 }
 
 impl Default for AgentConfig {
@@ -44,6 +48,8 @@ impl Default for AgentConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             advisor: AdvisorConfig::default(),
             auto_checkpoint: true,
+            max_tool_output_chars: 4000,
+            max_tools_in_context: 8,
         }
     }
 }
@@ -308,7 +314,7 @@ pub fn execute_step(
 
     let selected_tools = ctx
         .tools
-        .select_relevant(last_user_msg, ctx.config.max_tools_selected);
+        .select_relevant(last_user_msg, ctx.config.max_tools_selected.min(ctx.config.max_tools_in_context));
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
     // 2. LLM呼び出し（ストリーミング対応）

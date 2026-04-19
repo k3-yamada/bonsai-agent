@@ -241,6 +241,10 @@ pub struct AgentSettings {
     pub max_retries: usize,
     pub shell_timeout_secs: u64,
     pub max_tools_selected: usize,
+    /// ツール出力の最大文字数（超過分は切り詰め）
+    pub max_tool_output_chars: usize,
+    /// コンテキストに含めるツールの最大数（1bitモデルは8以下推奨）
+    pub max_tools_in_context: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +284,8 @@ impl Default for AgentSettings {
             max_retries: 3,
             shell_timeout_secs: 30,
             max_tools_selected: 5,
+            max_tool_output_chars: 4000,
+            max_tools_in_context: 8,
         }
     }
 }

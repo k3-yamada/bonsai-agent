@@ -150,6 +150,8 @@ fn main() -> Result<()> {
             max_iterations: app_config.agent.max_iterations,
             max_retries: app_config.agent.max_retries,
             max_tools_selected: app_config.agent.max_tools_selected,
+            max_tool_output_chars: app_config.agent.max_tool_output_chars,
+            max_tools_in_context: app_config.agent.max_tools_in_context,
             advisor: app_config.advisor.to_runtime(),
             ..Default::default()
         },

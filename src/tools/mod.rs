@@ -215,6 +215,17 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
+    /// 登録ツール数が上限を超えている場合に警告ログ
+    pub fn warn_if_exceeded(&self, limit: usize) {
+        if self.tools.len() > limit {
+            crate::observability::logger::log_event(
+                crate::observability::logger::LogLevel::Warn,
+                "tools",
+                &format!("登録ツール数({})が上限({})を超過。1bitモデルの精度低下リスク", self.tools.len(), limit),
+            );
+        }
+    }
+
     /// クエリに関連するツールを動的に選択（上位max件）。
     /// キーワードマッチングでスコアリングし、スコアの高い順に返す。
     pub fn select_relevant(&self, query: &str, max: usize) -> Vec<&dyn Tool> {
@@ -645,6 +656,19 @@ mod tests {
     fn test_registry_send_sync() {
         fn _assert_send_sync<T: Send + Sync>() {}
         _assert_send_sync::<ToolRegistry>();
+    }
+
+    #[test]
+    fn test_warn_if_exceeded_no_panic() {
+        let mut reg = ToolRegistry::new();
+        reg.warn_if_exceeded(8); // 空 → 警告なし
+        // パニックしないことのみ確認
+    }
+
+    #[test]
+    fn test_max_tools_in_context_default() {
+        let settings = crate::config::AgentSettings::default();
+        assert_eq!(settings.max_tools_in_context, 8);
     }
 
     #[test]

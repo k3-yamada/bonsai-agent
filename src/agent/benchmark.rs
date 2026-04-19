@@ -469,6 +469,8 @@ impl BenchmarkSuite {
                 system_prompt: config.system_prompt.clone(),
                 advisor: AdvisorConfig { max_uses: 0, ..config.advisor.clone() },
                 auto_checkpoint: false,
+                max_tool_output_chars: config.max_tool_output_chars,
+                max_tools_in_context: config.max_tools_in_context,
             };
 
             let store = MemoryStore::in_memory()?;
