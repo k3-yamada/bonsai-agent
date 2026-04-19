@@ -279,10 +279,10 @@ impl<'a> AuditLog<'a> {
             steps_sum += v["total_steps"].as_u64().unwrap_or(0);
             rate_sum += v["tool_success_rate"].as_f64().unwrap_or(0.0);
             duration_sum += v["duration_ms"].as_u64().unwrap_or(0);
-            if stats.recent_summaries.len() < 5 {
-                if let Some(s) = v["task_summary"].as_str() {
-                    stats.recent_summaries.push(s.to_string());
-                }
+            if stats.recent_summaries.len() < 5
+                && let Some(s) = v["task_summary"].as_str()
+            {
+                stats.recent_summaries.push(s.to_string());
             }
         }
 
