@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::agent::agent_loop::AgentConfig;
 use crate::agent::benchmark::{BenchmarkSuite, MultiRunConfig};
 use crate::agent::experiment_log::{
-    AcceptedMutation, Experiment, ExperimentLog, MutationType, load_accepted_archive,
+    AcceptedMutation, Experiment, ExperimentLog, MutationTheme, MutationType, load_accepted_archive,
 };
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
