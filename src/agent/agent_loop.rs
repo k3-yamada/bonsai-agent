@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use crate::observability::logger::{log_event, LogLevel};
 use anyhow::Result;
 
