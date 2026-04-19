@@ -1753,6 +1753,28 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    #[test]
+    fn test_inference_for_task_file_operation() {
+        let base = InferenceParams::default();
+        let params = inference_for_task(TaskType::FileOperation, &base);
+        assert!((params.temperature - 0.3).abs() < f64::EPSILON);
+        assert_eq!(params.max_tokens, base.max_tokens); // 他のフィールドは保持
+    }
+
+    #[test]
+    fn test_inference_for_task_research() {
+        let base = InferenceParams::default();
+        let params = inference_for_task(TaskType::Research, &base);
+        assert!((params.temperature - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_inference_for_task_general_unchanged() {
+        let base = InferenceParams::default();
+        let params = inference_for_task(TaskType::General, &base);
+        assert!((params.temperature - base.temperature).abs() < f64::EPSILON);
+    }
+
     // テスト: apply_tool_result でツール成功時にKnowledgeGraphにツール使用が記録される
     #[test]
     fn test_apply_tool_result_records_graph_tool_usage() {
