@@ -126,7 +126,10 @@ impl<'a> SkillStore<'a> {
             md.push_str(&format!("## {}\n\n", skill.name));
             md.push_str(&format!("{}\n\n", skill.description));
             md.push_str(&format!("- **ツールチェーン**: `{}`\n", skill.tool_chain));
-            md.push_str(&format!("- **トリガーパターン**: {}\n", skill.trigger_patterns));
+            md.push_str(&format!(
+                "- **トリガーパターン**: {}\n",
+                skill.trigger_patterns
+            ));
             md.push_str(&format!("- **成功回数**: {}\n", skill.success_count));
             md.push_str(&format!("- **作成日**: {}\n", skill.created_at));
             md.push('\n');
@@ -315,9 +318,25 @@ mod tests {
     fn t_export_markdown_with_skills() {
         let store = test_store();
         let skills = SkillStore::new(store.conn());
-        skills.save("list_files", "ファイル一覧を表示", "shell: ls -la", r#"[\"list\", \"files\"]"#).unwrap();
-        skills.save("read_file", "ファイルを読む", "file_read: path", "[]").unwrap();
-        skills.save("list_files", "ファイル一覧を表示", "shell: ls -la", r#"[\"list\", \"files\"]"#).unwrap();
+        skills
+            .save(
+                "list_files",
+                "ファイル一覧を表示",
+                "shell: ls -la",
+                r#"[\"list\", \"files\"]"#,
+            )
+            .unwrap();
+        skills
+            .save("read_file", "ファイルを読む", "file_read: path", "[]")
+            .unwrap();
+        skills
+            .save(
+                "list_files",
+                "ファイル一覧を表示",
+                "shell: ls -la",
+                r#"[\"list\", \"files\"]"#,
+            )
+            .unwrap();
 
         let md = skills.export_markdown().unwrap();
         assert!(md.contains("# Skills"));
@@ -333,7 +352,9 @@ mod tests {
     fn t_export_to_file() {
         let store = test_store();
         let skills = SkillStore::new(store.conn());
-        skills.save("test_skill", "テスト用", "echo hello", "[]").unwrap();
+        skills
+            .save("test_skill", "テスト用", "echo hello", "[]")
+            .unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SKILLS.md");
@@ -349,10 +370,13 @@ mod tests {
         let store = test_store();
         let skills = SkillStore::new(store.conn());
         skills.save("old_skill", "古い", "[]", "[]").unwrap();
-        store.conn().execute(
-            "UPDATE skills SET expires_at = '2020-01-01T00:00:00Z' WHERE name = 'old_skill'",
-            [],
-        ).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE skills SET expires_at = '2020-01-01T00:00:00Z' WHERE name = 'old_skill'",
+                [],
+            )
+            .unwrap();
         let deleted = skills.purge_expired().unwrap();
         assert_eq!(deleted, 1);
     }

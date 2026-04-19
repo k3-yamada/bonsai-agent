@@ -4,11 +4,11 @@ pub mod git;
 pub mod hooks;
 pub mod mcp_client;
 pub mod permission;
-pub mod typed;
 pub mod plugin;
 pub mod repomap;
 pub mod sandbox;
 pub mod shell;
+pub mod typed;
 pub mod web;
 
 use anyhow::Result;
@@ -77,12 +77,14 @@ pub fn detect_task_type(query: &str) -> TaskType {
     let q = query.to_lowercase();
 
     // ファイル操作キーワード
-    if q.contains("ファイル") || q.contains("読") || q.contains("書") || q.contains("編集") {
+    if q.contains("ファイル") || q.contains("読") || q.contains("書") || q.contains("編集")
+    {
         return TaskType::FileOperation;
     }
 
     // コード実行キーワード
-    if q.contains("実行") || q.contains("ビルド") || q.contains("テスト") || q.contains("コマンド") {
+    if q.contains("実行") || q.contains("ビルド") || q.contains("テスト") || q.contains("コマンド")
+    {
         return TaskType::CodeExecution;
     }
 
@@ -155,7 +157,8 @@ impl ToolResultCache {
     /// 特定ツール名に関連するキャッシュエントリを無効化
     /// 書き込みツール実行後に呼ぶ（file_write→file_read/repo_mapクリア等）
     pub fn invalidate(&mut self, tool_name: &str) {
-        self.cache.retain(|key, _| !key.starts_with(&format!("{}:", tool_name)));
+        self.cache
+            .retain(|key, _| !key.starts_with(&format!("{}:", tool_name)));
     }
 
     /// 全キャッシュをクリア
@@ -221,7 +224,11 @@ impl ToolRegistry {
             crate::observability::logger::log_event(
                 crate::observability::logger::LogLevel::Warn,
                 "tools",
-                &format!("登録ツール数({})が上限({})を超過。1bitモデルの精度低下リスク", self.tools.len(), limit),
+                &format!(
+                    "登録ツール数({})が上限({})を超過。1bitモデルの精度低下リスク",
+                    self.tools.len(),
+                    limit
+                ),
             );
         }
     }
@@ -243,7 +250,9 @@ impl ToolRegistry {
                     .iter()
                     .filter(|w| name.contains(*w) || desc.contains(*w))
                     .count();
-                if task_boost.iter().any(|b| name.contains(b)) { score += 2; }
+                if task_boost.iter().any(|b| name.contains(b)) {
+                    score += 2;
+                }
                 (tool.as_ref(), score)
             })
             .collect();
@@ -257,10 +266,20 @@ impl ToolRegistry {
     /// タスク種別からブーストするツール名プレフィックスを検出
     fn detect_task_boost(query: &str) -> Vec<&'static str> {
         let mut b = Vec::new();
-        if query.contains("ファイル") || query.contains("読") || query.contains("書") { b.push("file"); }
-        if query.contains("コマンド") || query.contains("実行") || query.contains("ビルド") { b.push("shell"); }
-        if query.contains("git") || query.contains("コミット") { b.push("git"); }
-        if query.contains("検索") || query.contains("探") { b.push("web"); b.push("file"); }
+        if query.contains("ファイル") || query.contains("読") || query.contains("書") {
+            b.push("file");
+        }
+        if query.contains("コマンド") || query.contains("実行") || query.contains("ビルド")
+        {
+            b.push("shell");
+        }
+        if query.contains("git") || query.contains("コミット") {
+            b.push("git");
+        }
+        if query.contains("検索") || query.contains("探") {
+            b.push("web");
+            b.push("file");
+        }
         b
     }
 
@@ -282,7 +301,6 @@ impl ToolRegistry {
         }
         output
     }
-
 
     /// 名前+説明のみのコンパクト形式（パラメータスキーマ省略でトークン節約）
     pub fn format_schemas_compact(&self, tools: &[&dyn Tool]) -> String {
@@ -322,7 +340,9 @@ impl ToolRegistry {
                     .iter()
                     .filter(|w| name.contains(*w) || desc.contains(*w))
                     .count();
-                if task_boost.iter().any(|b| name.contains(b)) { score += 2; }
+                if task_boost.iter().any(|b| name.contains(b)) {
+                    score += 2;
+                }
                 (tool.as_ref(), score)
             })
             .collect();
@@ -343,17 +363,25 @@ impl ToolRegistry {
             return String::new();
         }
 
-        let mut output = String::from("# 使用可能なツール
+        let mut output = String::from(
+            "# 使用可能なツール
 
-");
+",
+        );
 
         for tool in tools {
             if expanded_names.contains(&tool.name()) {
                 // 第2段階: 全スキーマ展開
-                output.push_str(&format!("## {}
-", tool.name()));
-                output.push_str(&format!("{}
-", tool.description()));
+                output.push_str(&format!(
+                    "## {}
+",
+                    tool.name()
+                ));
+                output.push_str(&format!(
+                    "{}
+",
+                    tool.description()
+                ));
                 output.push_str(&format!(
                     "パラメータ: {}
 
@@ -372,8 +400,12 @@ impl ToolRegistry {
                         None => desc.to_string(),
                     }
                 };
-                output.push_str(&format!("- **{}**: {}
-", tool.name(), summary));
+                output.push_str(&format!(
+                    "- **{}**: {}
+",
+                    tool.name(),
+                    summary
+                ));
             }
         }
         output
@@ -585,28 +617,41 @@ mod tests {
         assert!(names.contains(&"git"));
     }
 
-
     #[test]
     fn test_is_read_only_default_false() {
         // Tool トレイトの is_read_only() デフォルト値は false
         let tool = DummyTool::new("test", "test tool");
-        assert!(!tool.is_read_only(), "デフォルトのis_read_onlyはfalseであるべき");
+        assert!(
+            !tool.is_read_only(),
+            "デフォルトのis_read_onlyはfalseであるべき"
+        );
     }
 
     /// is_read_only を true にオーバーライドするテスト用ツール
     struct ReadOnlyTool;
 
     impl Tool for ReadOnlyTool {
-        fn name(&self) -> &str { "read_only_tool" }
-        fn description(&self) -> &str { "読取専用テストツール" }
+        fn name(&self) -> &str {
+            "read_only_tool"
+        }
+        fn description(&self) -> &str {
+            "読取専用テストツール"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object"})
         }
-        fn permission(&self) -> Permission { Permission::Auto }
-        fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
-            Ok(ToolResult { output: "ok".to_string(), success: true })
+        fn permission(&self) -> Permission {
+            Permission::Auto
         }
-        fn is_read_only(&self) -> bool { true }
+        fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
+            Ok(ToolResult {
+                output: "ok".to_string(),
+                success: true,
+            })
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -673,16 +718,31 @@ mod tests {
 
     #[test]
     fn test_detect_task_type_file_operation() {
-        assert_eq!(detect_task_type("ファイルを読みたい"), TaskType::FileOperation);
+        assert_eq!(
+            detect_task_type("ファイルを読みたい"),
+            TaskType::FileOperation
+        );
         assert_eq!(detect_task_type("設定を書き込む"), TaskType::FileOperation);
-        assert_eq!(detect_task_type("コードを編集する"), TaskType::FileOperation);
+        assert_eq!(
+            detect_task_type("コードを編集する"),
+            TaskType::FileOperation
+        );
     }
 
     #[test]
     fn test_detect_task_type_code_execution() {
-        assert_eq!(detect_task_type("コマンドを実行する"), TaskType::CodeExecution);
-        assert_eq!(detect_task_type("プロジェクトをビルドしたい"), TaskType::CodeExecution);
-        assert_eq!(detect_task_type("テストを走らせる"), TaskType::CodeExecution);
+        assert_eq!(
+            detect_task_type("コマンドを実行する"),
+            TaskType::CodeExecution
+        );
+        assert_eq!(
+            detect_task_type("プロジェクトをビルドしたい"),
+            TaskType::CodeExecution
+        );
+        assert_eq!(
+            detect_task_type("テストを走らせる"),
+            TaskType::CodeExecution
+        );
     }
 
     #[test]
@@ -825,7 +885,10 @@ mod tests {
         // 同じ引数で2回目はキャッシュから返る
         let mut cache = ToolResultCache::new();
         let args = serde_json::json!({"path": "src/main.rs"});
-        let result = ToolResult { output: "fn main()".to_string(), success: true };
+        let result = ToolResult {
+            output: "fn main()".to_string(),
+            success: true,
+        };
         cache.put("file_read", &args, result);
 
         let cached = cache.get("file_read", &args);
@@ -840,7 +903,10 @@ mod tests {
         let mut cache = ToolResultCache::new();
         let args1 = serde_json::json!({"path": "src/main.rs"});
         let args2 = serde_json::json!({"path": "src/lib.rs"});
-        let result = ToolResult { output: "content".to_string(), success: true };
+        let result = ToolResult {
+            output: "content".to_string(),
+            success: true,
+        };
         cache.put("file_read", &args1, result);
 
         let cached = cache.get("file_read", &args2);
@@ -852,8 +918,22 @@ mod tests {
         // 書き込み後にキャッシュクリアされる
         let mut cache = ToolResultCache::new();
         let args = serde_json::json!({"path": "src/main.rs"});
-        cache.put("file_read", &args, ToolResult { output: "old".to_string(), success: true });
-        cache.put("repo_map", &serde_json::json!({}), ToolResult { output: "map".to_string(), success: true });
+        cache.put(
+            "file_read",
+            &args,
+            ToolResult {
+                output: "old".to_string(),
+                success: true,
+            },
+        );
+        cache.put(
+            "repo_map",
+            &serde_json::json!({}),
+            ToolResult {
+                output: "map".to_string(),
+                success: true,
+            },
+        );
         assert_eq!(cache.len(), 2);
 
         // file_readのキャッシュだけ無効化
@@ -871,7 +951,14 @@ mod tests {
         // ヒット/ミス統計が正しい
         let mut cache = ToolResultCache::new();
         let args = serde_json::json!({"path": "test.rs"});
-        cache.put("file_read", &args, ToolResult { output: "ok".to_string(), success: true });
+        cache.put(
+            "file_read",
+            &args,
+            ToolResult {
+                output: "ok".to_string(),
+                success: true,
+            },
+        );
 
         // 1回ヒット
         let _ = cache.get("file_read", &args);
@@ -894,12 +981,18 @@ mod tests {
         let mut cache = ToolResultCache::new();
         let args = serde_json::json!({"command": "ls"});
         // 仮にshell結果をputしても…
-        cache.put("shell", &args, ToolResult { output: "files".to_string(), success: true });
+        cache.put(
+            "shell",
+            &args,
+            ToolResult {
+                output: "files".to_string(),
+                success: true,
+            },
+        );
         assert_eq!(cache.len(), 1);
         // clearで全消去される
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
     }
-
 }

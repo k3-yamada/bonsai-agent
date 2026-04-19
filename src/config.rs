@@ -214,8 +214,6 @@ pub enum ServerBackend {
     MlxLm,
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
@@ -492,7 +490,10 @@ gguf_path = "/path/to/Ternary-Bonsai-8B.gguf"
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.model.model_id, "ternary-bonsai-8b");
         assert_eq!(config.model.context_length, 65536);
-        assert_eq!(config.model.gguf_path.as_deref(), Some("/path/to/Ternary-Bonsai-8B.gguf"));
+        assert_eq!(
+            config.model.gguf_path.as_deref(),
+            Some("/path/to/Ternary-Bonsai-8B.gguf")
+        );
     }
 
     #[test]
@@ -541,8 +542,6 @@ context_length = 65536
         let config = AppConfig::default();
         assert_eq!(config.model.backend, ServerBackend::LlamaServer);
     }
-
-
 
     #[test]
     fn test_server_backend_serialize_llama() {
@@ -646,5 +645,4 @@ max_tokens = 2048
         assert_eq!(preset.max_tokens, default.max_tokens);
         assert!((preset.repeat_penalty - default.repeat_penalty).abs() < f64::EPSILON);
     }
-
 }

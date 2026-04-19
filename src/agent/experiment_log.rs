@@ -160,7 +160,11 @@ impl Experiment {
             pass_at_k: Some(experiment.composite_pass_at_k()),
             pass_consecutive_k: Some(experiment.composite_pass_consecutive_k()),
             score_variance: Some(
-                experiment.task_scores.iter().map(|s| s.variance).sum::<f64>()
+                experiment
+                    .task_scores
+                    .iter()
+                    .map(|s| s.variance)
+                    .sum::<f64>()
                     / experiment.task_scores.len().max(1) as f64,
             ),
         }
@@ -226,8 +230,10 @@ impl ExperimentLog {
             exp.accepted,
             exp.duration_secs,
             exp.pass_at_k.map_or("-".to_string(), |v| format!("{v:.4}")),
-            exp.pass_consecutive_k.map_or("-".to_string(), |v| format!("{v:.4}")),
-            exp.score_variance.map_or("-".to_string(), |v| format!("{v:.6}")),
+            exp.pass_consecutive_k
+                .map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.score_variance
+                .map_or("-".to_string(), |v| format!("{v:.6}")),
         )?;
         Ok(())
     }

@@ -182,7 +182,11 @@ impl ContinueSite {
         }
 
         // Stage 1: 通常のリカバリ
-        decide_recovery(&mode, self.consecutive_failures.saturating_sub(1), max_retries)
+        decide_recovery(
+            &mode,
+            self.consecutive_failures.saturating_sub(1),
+            max_retries,
+        )
     }
 }
 
@@ -308,9 +312,8 @@ impl TrialSummary {
         if self.entries.is_empty() {
             return String::new();
         }
-        let mut lines = vec![
-            "すでに試した方法です。同じやり方を避けて、別の方法を考えてください:".to_string(),
-        ];
+        let mut lines =
+            vec!["すでに試した方法です。同じやり方を避けて、別の方法を考えてください:".to_string()];
         for (i, entry) in self.entries.iter().enumerate() {
             lines.push(format!(
                 "{}. [iter {}] {}({}) \u{2192} エラー: {}",
@@ -359,10 +362,7 @@ pub fn classify_environment_failure(error_output: &str) -> Option<FailureMode> {
         return Some(FailureMode::ServerDisconnect);
     }
     // ネットワーク障害パターン
-    if lower.contains("network")
-        || lower.contains("dns")
-        || lower.contains("econnreset")
-    {
+    if lower.contains("network") || lower.contains("dns") || lower.contains("econnreset") {
         return Some(FailureMode::NetworkError);
     }
     None
@@ -449,7 +449,10 @@ impl FileStuckGuard {
 
     /// ファイル編集失敗を記録
     pub fn record_file_failure(&mut self, file_path: &str) {
-        *self.failure_counts.entry(file_path.to_string()).or_insert(0) += 1;
+        *self
+            .failure_counts
+            .entry(file_path.to_string())
+            .or_insert(0) += 1;
     }
 
     /// ファイル編集成功を記録（カウンタリセット）
@@ -984,7 +987,12 @@ mod tests {
     #[test]
     fn t_trial_summary_record() {
         let mut ts = TrialSummary::new(10);
-        ts.record_failure("shell", r#"{"command":"cargo build"}"#, "コンパイルエラー E0308", 3);
+        ts.record_failure(
+            "shell",
+            r#"{"command":"cargo build"}"#,
+            "コンパイルエラー E0308",
+            3,
+        );
         assert_eq!(ts.len(), 1);
         let entry = &ts.entries[0];
         assert_eq!(entry.tool_name, "shell");
@@ -1008,7 +1016,12 @@ mod tests {
     #[test]
     fn t_trial_summary_format() {
         let mut ts = TrialSummary::new(10);
-        ts.record_failure("shell", r#"{"command":"cargo build"}"#, "コンパイルエラー E0308", 3);
+        ts.record_failure(
+            "shell",
+            r#"{"command":"cargo build"}"#,
+            "コンパイルエラー E0308",
+            3,
+        );
         ts.record_failure("file_write", "src/main.rs", "権限拒否", 5);
         let output = ts.format_for_replan();
         assert!(output.contains("試した方法"));
@@ -1067,17 +1080,8 @@ mod tests {
 
     #[test]
     fn t_classify_env_failure_none() {
-        assert_eq!(
-            classify_environment_failure("コンパイルエラー E0308"),
-            None
-        );
-        assert_eq!(
-            classify_environment_failure("file not found"),
-            None
-        );
-        assert_eq!(
-            classify_environment_failure("permission denied"),
-            None
-        );
+        assert_eq!(classify_environment_failure("コンパイルエラー E0308"), None);
+        assert_eq!(classify_environment_failure("file not found"), None);
+        assert_eq!(classify_environment_failure("permission denied"), None);
     }
 }

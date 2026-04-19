@@ -18,8 +18,8 @@ use bonsai_agent::tools::ToolRegistry;
 use bonsai_agent::tools::arxiv::ArxivTool;
 use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
 use bonsai_agent::tools::git::GitTool;
-use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::repomap::RepoMapTool;
+use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
 
 #[derive(Parser)]
@@ -315,7 +315,10 @@ fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
                 let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
                 println!("  応答: {}", answer.trim());
                 println!("  応答時間: {:.1}ms", elapsed.as_secs_f64() * 1000.0);
-                println!("  トークン数: prompt={}, completion={}", prompt_tokens, completion_tokens);
+                println!(
+                    "  トークン数: prompt={}, completion={}",
+                    prompt_tokens, completion_tokens
+                );
             } else {
                 println!("  応答パースエラー");
             }
@@ -375,7 +378,10 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
                 bonsai_agent::observability::logger::log_event(
                     bonsai_agent::observability::logger::LogLevel::Info,
                     "mcp",
-                    &format!("MCPサーバー '{}' 起動: {}ツール登録", server_cfg.name, count),
+                    &format!(
+                        "MCPサーバー '{}' 起動: {}ツール登録",
+                        server_cfg.name, count
+                    ),
                 );
             }
             Err(e) => {
@@ -395,7 +401,9 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
 }
 
 /// MCPサーバーを起動しツールリストを取得
-fn setup_mcp_server(cfg: &bonsai_agent::tools::mcp_client::McpServerConfig) -> anyhow::Result<Vec<Box<dyn bonsai_agent::tools::Tool>>> {
+fn setup_mcp_server(
+    cfg: &bonsai_agent::tools::mcp_client::McpServerConfig,
+) -> anyhow::Result<Vec<Box<dyn bonsai_agent::tools::Tool>>> {
     use bonsai_agent::tools::mcp_client::{McpConnection, McpToolWrapper};
     use std::sync::{Arc, Mutex};
 
@@ -404,7 +412,10 @@ fn setup_mcp_server(cfg: &bonsai_agent::tools::mcp_client::McpServerConfig) -> a
     let connection = Arc::new(Mutex::new(conn));
     let tools: Vec<Box<dyn bonsai_agent::tools::Tool>> = tool_infos
         .into_iter()
-        .map(|info| Box::new(McpToolWrapper::new(info, &cfg.name, connection.clone())) as Box<dyn bonsai_agent::tools::Tool>)
+        .map(|info| {
+            Box::new(McpToolWrapper::new(info, &cfg.name, connection.clone()))
+                as Box<dyn bonsai_agent::tools::Tool>
+        })
         .collect();
     Ok(tools)
 }
@@ -418,8 +429,12 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
                 .collect(),
         ))
     } else {
-        let b = LlamaServerBackend::connect_with_params(&ctx.server_url, &ctx.app_config.model.model_id, ctx.app_config.model.inference.clone())
-                .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm);
+        let b = LlamaServerBackend::connect_with_params(
+            &ctx.server_url,
+            &ctx.app_config.model.model_id,
+            ctx.app_config.model.inference.clone(),
+        )
+        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm);
         if !b.is_healthy() {
             eprintln!(
                 "エラー: llama-server ({}) に接続できません。",
@@ -443,8 +458,12 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
             (0..10000).map(|_| "1024".to_string()).collect(),
         ))
     } else {
-        let b = LlamaServerBackend::connect_with_params(&ctx.server_url, &ctx.app_config.model.model_id, ctx.app_config.model.inference.clone())
-                .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm);
+        let b = LlamaServerBackend::connect_with_params(
+            &ctx.server_url,
+            &ctx.app_config.model.model_id,
+            ctx.app_config.model.inference.clone(),
+        )
+        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm);
         if !b.is_healthy() {
             eprintln!(
                 "エラー: llama-server ({}) に接続できません。",
@@ -578,8 +597,8 @@ fn handle_tasks_mode(store: &MemoryStore) -> Result<()> {
 }
 
 fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
-    use bonsai_agent::observability::audit::AuditLog;
     use bonsai_agent::agent::experiment_log::ExperimentLog;
+    use bonsai_agent::observability::audit::AuditLog;
 
     println!("╔══════════════════════════════════════════╗");
     println!("║         bonsai-agent ダッシュボード        ║");
@@ -592,9 +611,18 @@ fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
     if advisor.total_calls == 0 {
         println!("  (呼出なし)");
     } else {
-        println!("  総呼出: {}  検証: {}  再計画: {}", advisor.total_calls, advisor.verification_calls, advisor.replan_calls);
-        println!("  remote: {}  local: {}", advisor.remote_calls, advisor.local_calls);
-        println!("  平均プロンプト長: {} 文字  平均remote所要: {} ms", advisor.avg_prompt_len, advisor.avg_remote_duration_ms);
+        println!(
+            "  総呼出: {}  検証: {}  再計画: {}",
+            advisor.total_calls, advisor.verification_calls, advisor.replan_calls
+        );
+        println!(
+            "  remote: {}  local: {}",
+            advisor.remote_calls, advisor.local_calls
+        );
+        println!(
+            "  平均プロンプト長: {} 文字  平均remote所要: {} ms",
+            advisor.avg_prompt_len, advisor.avg_remote_duration_ms
+        );
     }
 
     // --- Checkpoint 統計 ---
@@ -603,10 +631,13 @@ fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
     if cp_stats.total == 0 {
         println!("  (チェックポイントなし)");
     } else {
-        println!("  総CP: {}  ロールバック済: {} ({:.0}%)  git保存: {} ({:.0}%)",
+        println!(
+            "  総CP: {}  ロールバック済: {} ({:.0}%)  git保存: {} ({:.0}%)",
             cp_stats.total,
-            cp_stats.rolled_back, cp_stats.rollback_rate() * 100.0,
-            cp_stats.with_git_ref, cp_stats.git_capture_rate() * 100.0,
+            cp_stats.rolled_back,
+            cp_stats.rollback_rate() * 100.0,
+            cp_stats.with_git_ref,
+            cp_stats.git_capture_rate() * 100.0,
         );
     }
 
@@ -618,15 +649,35 @@ fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
     } else {
         let accepted = experiments.iter().filter(|e| e.accepted).count();
         let rejected = experiments.len() - accepted;
-        let best_delta = experiments.iter().map(|e| e.delta).fold(f64::NEG_INFINITY, f64::max);
-        let worst_delta = experiments.iter().map(|e| e.delta).fold(f64::INFINITY, f64::min);
-        println!("  承認: {} / 却下: {} (承認率 {:.0}%)", accepted, rejected, accepted as f64 / experiments.len() as f64 * 100.0);
-        println!("  最良delta: {:+.4}  最悪delta: {:+.4}", best_delta, worst_delta);
+        let best_delta = experiments
+            .iter()
+            .map(|e| e.delta)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let worst_delta = experiments
+            .iter()
+            .map(|e| e.delta)
+            .fold(f64::INFINITY, f64::min);
+        println!(
+            "  承認: {} / 却下: {} (承認率 {:.0}%)",
+            accepted,
+            rejected,
+            accepted as f64 / experiments.len() as f64 * 100.0
+        );
+        println!(
+            "  最良delta: {:+.4}  最悪delta: {:+.4}",
+            best_delta, worst_delta
+        );
         // 直近3件を表示
         println!("  ─── 直近3件 ───");
         for exp in experiments.iter().take(3) {
             let status = if exp.accepted { "✓" } else { "✗" };
-            println!("  {} {:+.4} | {} | {}", status, exp.delta, exp.mutation_detail.chars().take(40).collect::<String>(), exp.experiment_id.chars().take(8).collect::<String>());
+            println!(
+                "  {} {:+.4} | {} | {}",
+                status,
+                exp.delta,
+                exp.mutation_detail.chars().take(40).collect::<String>(),
+                exp.experiment_id.chars().take(8).collect::<String>()
+            );
         }
     }
 
@@ -644,11 +695,18 @@ fn handle_checkpoints_mode(store: &MemoryStore) -> Result<()> {
         return Ok(());
     }
     let stats = CheckpointManager::stats(store.conn(), None)?;
-    println!("=== チェックポイント一覧 ({} 件, ロールバック率 {:.0}%) ===", stats.total, stats.rollback_rate() * 100.0);
+    println!(
+        "=== チェックポイント一覧 ({} 件, ロールバック率 {:.0}%) ===",
+        stats.total,
+        stats.rollback_rate() * 100.0
+    );
     for cp in &all {
         let rb = cp.rolled_back_at.as_deref().unwrap_or("-");
         let git = cp.git_ref.as_deref().unwrap_or("(変更なし)");
-        println!("  [{}] {} | git:{} | rb:{} | {}", cp.id, cp.description, git, rb, cp.timestamp);
+        println!(
+            "  [{}] {} | git:{} | rb:{} | {}",
+            cp.id, cp.description, git, rb, cp.timestamp
+        );
     }
     Ok(())
 }
@@ -660,12 +718,17 @@ fn handle_rollback_mode(store: &MemoryStore, cp_id: i64) -> Result<()> {
         .find(|c| c.id == cp_id)
         .ok_or_else(|| anyhow::anyhow!("チェックポイント {} が見つかりません", cp_id))?;
     if cp.git_ref.is_none() {
-        println!("チェックポイント {} にはgit stashがありません（変更なしでした）", cp_id);
+        println!(
+            "チェックポイント {} にはgit stashがありません（変更なしでした）",
+            cp_id
+        );
         return Ok(());
     }
     // DB+gitで直接ロールバック実行
     let git_ref = cp.git_ref.as_ref().unwrap();
-    let _ = std::process::Command::new("git").args(["checkout", "."]).output();
+    let _ = std::process::Command::new("git")
+        .args(["checkout", "."])
+        .output();
     let success = std::process::Command::new("git")
         .args(["stash", "apply", git_ref])
         .output()
@@ -678,7 +741,10 @@ fn handle_rollback_mode(store: &MemoryStore, cp_id: i64) -> Result<()> {
         rusqlite::params![&now, cp_id],
     )?;
     if success {
-        println!("チェックポイント {} にロールバックしました: {}", cp_id, cp.description);
+        println!(
+            "チェックポイント {} にロールバックしました: {}",
+            cp_id, cp.description
+        );
     } else {
         println!("ロールバック失敗: git stash apply {} がエラー", git_ref);
     }

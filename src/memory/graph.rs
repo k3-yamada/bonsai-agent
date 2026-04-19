@@ -32,7 +32,13 @@ impl<'a> KnowledgeGraph<'a> {
     }
 
     /// エッジを追加（UPSERT: 既存ならweight加算）
-    pub fn add_edge(&self, source_id: i64, target_id: i64, relation: &str, weight: f64) -> Result<()> {
+    pub fn add_edge(
+        &self,
+        source_id: i64,
+        target_id: i64,
+        relation: &str,
+        weight: f64,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO knowledge_edges (source_id, target_id, relation, weight) \
              VALUES (?1, ?2, ?3, ?4) \
@@ -143,7 +149,12 @@ impl<'a> KnowledgeGraph<'a> {
     }
 
     /// エラー→ファイル→ツール関係を記録（エラー発生時に呼ぶ）
-    pub fn record_error_pattern(&self, error_type: &str, file_path: &str, tool_name: &str) -> Result<()> {
+    pub fn record_error_pattern(
+        &self,
+        error_type: &str,
+        file_path: &str,
+        tool_name: &str,
+    ) -> Result<()> {
         let error_id = self.add_node("error", error_type)?;
         let file_id = self.add_node("file", file_path)?;
         let tool_id = self.add_node("tool", tool_name)?;
@@ -224,7 +235,10 @@ mod tests {
 
         let neighbors = graph.neighbors("shell", 1).unwrap();
         assert_eq!(neighbors.len(), 1);
-        assert!((neighbors[0].2 - 3.5).abs() < f64::EPSILON, "weightが加算されるべき");
+        assert!(
+            (neighbors[0].2 - 3.5).abs() < f64::EPSILON,
+            "weightが加算されるべき"
+        );
     }
 
     #[test]
@@ -306,15 +320,25 @@ mod tests {
     fn test_record_error_pattern() {
         let conn = setup_db();
         let graph = KnowledgeGraph::new(&conn);
-        graph.record_error_pattern("borrow_error", "src/agent.rs", "shell").unwrap();
+        graph
+            .record_error_pattern("borrow_error", "src/agent.rs", "shell")
+            .unwrap();
 
         // エラーからファイルへのcaused_byエッジ
         let error_neighbors = graph.neighbors("borrow_error", 1).unwrap();
-        assert!(error_neighbors.iter().any(|(name, rel, _)| name == "src/agent.rs" && rel == "caused_by"));
+        assert!(
+            error_neighbors
+                .iter()
+                .any(|(name, rel, _)| name == "src/agent.rs" && rel == "caused_by")
+        );
 
         // ツールからファイルへのfixesエッジ
         let tool_neighbors = graph.neighbors("shell", 1).unwrap();
-        assert!(tool_neighbors.iter().any(|(name, rel, _)| name == "src/agent.rs" && rel == "fixes"));
+        assert!(
+            tool_neighbors
+                .iter()
+                .any(|(name, rel, _)| name == "src/agent.rs" && rel == "fixes")
+        );
     }
 
     #[test]
@@ -327,7 +351,10 @@ mod tests {
 
         let neighbors = graph.neighbors("shell", 1).unwrap();
         assert_eq!(neighbors.len(), 1);
-        assert!((neighbors[0].2 - 3.0).abs() < f64::EPSILON, "3回呼び出しでweight=3.0");
+        assert!(
+            (neighbors[0].2 - 3.0).abs() < f64::EPSILON,
+            "3回呼び出しでweight=3.0"
+        );
     }
 
     #[test]

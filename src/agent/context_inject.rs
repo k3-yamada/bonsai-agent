@@ -80,15 +80,13 @@ pub(crate) fn inject_experience_context(
 }
 
 /// Vault知識を選択的にセッションに注入（関連カテゴリのみ）
-pub(crate) fn inject_vault_knowledge(
-    session: &mut Session,
-    task_context: &str,
-    vault: &Vault,
-) {
+pub(crate) fn inject_vault_knowledge(session: &mut Session, task_context: &str, vault: &Vault) {
     // Rules（Decision/Pattern）は常時注入 — 判断基準として常に必要
     let rules = vault.read_rules(3).unwrap_or_default();
     // Docs（Fact/Insight/Preference/Todo）はタスクコンテキストに応じて選択的注入
-    let docs = vault.read_docs_for_context(task_context, 2).unwrap_or_default();
+    let docs = vault
+        .read_docs_for_context(task_context, 2)
+        .unwrap_or_default();
 
     if rules.is_empty() && docs.is_empty() {
         return;
@@ -166,7 +164,9 @@ pub(crate) fn inject_contextual_memories(
             .map(|r| format!("- {}", r.memory.content))
             .collect::<Vec<_>>()
             .join("\n");
-        session.add_message(Message::system(format!("<context type=\"memory\">\n関連する過去のメモ:\n{ctx}\n</context>")));
+        session.add_message(Message::system(format!(
+            "<context type=\"memory\">\n関連する過去のメモ:\n{ctx}\n</context>"
+        )));
     }
 
     // 類似経験（成功/失敗分離フォーマットで注入）
@@ -206,7 +206,6 @@ pub(crate) fn inject_contextual_memories(
         )));
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -256,16 +255,21 @@ mod tests {
         use crate::knowledge::extractor::{StockCategory, StockEntry};
         let dir = tempfile::tempdir().unwrap();
         let vault = Vault::new(dir.path()).unwrap();
-        vault.append(&StockEntry {
-            category: StockCategory::Decision,
-            content: "Rustを採用した".into(),
-            source: "test".into(),
-        }).unwrap();
+        vault
+            .append(&StockEntry {
+                category: StockCategory::Decision,
+                content: "Rustを採用した".into(),
+                source: "test".into(),
+            })
+            .unwrap();
         let mut session = Session::new();
         inject_vault_knowledge(&mut session, "hello", &vault);
         // Decision(Rule)があるのでメッセージ追加される
         assert!(session.messages.len() > 0);
-        let has_rules = session.messages.iter().any(|m| m.content.contains("vault-rules"));
+        let has_rules = session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("vault-rules"));
         assert!(has_rules, "vault-rulesタグが含まれる");
     }
 

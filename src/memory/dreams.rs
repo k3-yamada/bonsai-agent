@@ -80,7 +80,6 @@ impl<'a> Dreamer<'a> {
         })
     }
 
-
     /// Light Dreaming: 高速な統計収集（毎回実行可能）
     pub fn dream_light(&self, days: i64) -> Result<DreamReport> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
@@ -365,7 +364,10 @@ mod tests {
         let dreamer = Dreamer::new(store.conn());
         let report = dreamer.dream_light(7).unwrap();
         assert_eq!(report.phase, DreamPhase::Light);
-        assert!(report.failure_patterns.is_empty(), "Lightはfailure_patternsを収集しない");
+        assert!(
+            report.failure_patterns.is_empty(),
+            "Lightはfailure_patternsを収集しない"
+        );
         assert!(!report.tool_usage.is_empty());
     }
 

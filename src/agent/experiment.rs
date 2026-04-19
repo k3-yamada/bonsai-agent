@@ -1,4 +1,4 @@
-use crate::observability::logger::{log_event, LogLevel};
+use crate::observability::logger::{LogLevel, log_event};
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -292,9 +292,7 @@ impl MetaMutationGenerator {
     pub fn priority_score(&self, mutation_detail: &str) -> f64 {
         self.archive
             .iter()
-            .filter(|m| {
-                mutation_detail.contains(&m.detail) || m.detail.contains(mutation_detail)
-            })
+            .filter(|m| mutation_detail.contains(&m.detail) || m.detail.contains(mutation_detail))
             .map(|m| m.delta)
             .sum::<f64>()
     }
@@ -314,7 +312,9 @@ pub fn estimate_mutation_effect(
     // 推定用: タスク半分（最大4件）のみで1回実行
     let sample_size = (suite.tasks.len() / 2).min(4);
     let sample_tasks: Vec<_> = suite.tasks.into_iter().take(sample_size).collect();
-    let sample_suite = BenchmarkSuite { tasks: sample_tasks };
+    let sample_suite = BenchmarkSuite {
+        tasks: sample_tasks,
+    };
 
     let quick_multi = MultiRunConfig {
         k: 1,
@@ -390,12 +390,27 @@ pub fn run_experiment_loop(
     let suite = BenchmarkSuite::default_tasks();
     let mut generator = HypothesisGenerator::default();
     let mut experiments: Vec<Experiment> = Vec::new();
-    let multi = MultiRunConfig { k: 3, jitter_seed: true };
+    let multi = MultiRunConfig {
+        k: 3,
+        jitter_seed: true,
+    };
     let pass_threshold = 0.5;
 
     // 1. ベースライン計測（pass^k版）
-    log_event(LogLevel::Info, "lab", &format!("ベースライン計測中（k={}）...", multi.k));
-    let mut baseline = suite.run_k(base_config, backend, tools, path_guard, cancel, &multi, pass_threshold)?;
+    log_event(
+        LogLevel::Info,
+        "lab",
+        &format!("ベースライン計測中（k={}）...", multi.k),
+    );
+    let mut baseline = suite.run_k(
+        base_config,
+        backend,
+        tools,
+        path_guard,
+        cancel,
+        &multi,
+        pass_threshold,
+    )?;
     eprintln!(
         "[lab] ベースライン: score={:.4} pass@k={:.4} pass_consec={:.4} ({:.1}s)",
         baseline.composite_score(),
@@ -405,9 +420,8 @@ pub fn run_experiment_loop(
     );
 
     // メタ変異生成器の初期化（過去のACCEPTアーカイブから）
-    let mut meta_gen = MetaMutationGenerator::from_db(store.conn()).unwrap_or_else(|_| {
-        MetaMutationGenerator::from_archive(Vec::new())
-    });
+    let mut meta_gen = MetaMutationGenerator::from_db(store.conn())
+        .unwrap_or_else(|_| MetaMutationGenerator::from_archive(Vec::new()));
     if meta_gen.archive_len() > 0 {
         log_event(
             LogLevel::Info,
@@ -460,7 +474,15 @@ pub fn run_experiment_loop(
         let modified_config = apply_mutation(base_config, &mutation);
 
         // c. ベンチマーク実行（pass^k版）
-        let result = suite.run_k(&modified_config, backend, tools, path_guard, cancel, &multi, pass_threshold)?;
+        let result = suite.run_k(
+            &modified_config,
+            backend,
+            tools,
+            path_guard,
+            cancel,
+            &multi,
+            pass_threshold,
+        )?;
         let snapshot = config_snapshot(&modified_config);
 
         // d. 評価（pass^k指標を含む）
@@ -486,8 +508,7 @@ pub fn run_experiment_loop(
         if exp.accepted {
             baseline = result;
             // 新しいACCEPTをメタ変異アーカイブに追加
-            meta_gen =
-                MetaMutationGenerator::from_db(store.conn()).unwrap_or(meta_gen);
+            meta_gen = MetaMutationGenerator::from_db(store.conn()).unwrap_or(meta_gen);
         }
 
         // f. ログ記録
@@ -501,11 +522,16 @@ pub fn run_experiment_loop(
 
         // g. Dreamer統合（N実験ごと）
         if experiment_count % loop_config.dreamer_interval == 0
-            && let Ok(report) = crate::memory::evolution::EvolutionEngine::new(store).analyze_deep(7)
+            && let Ok(report) =
+                crate::memory::evolution::EvolutionEngine::new(store).analyze_deep(7)
         {
             for insight in &report.insights {
                 generator.add_insight_mutation(insight);
-                log_event(LogLevel::Info, "lab", &format!("Dreamer insight追加: {insight}"));
+                log_event(
+                    LogLevel::Info,
+                    "lab",
+                    &format!("Dreamer insight追加: {insight}"),
+                );
             }
             for skill in &report.skill_promotions {
                 log_event(LogLevel::Info, "lab", &format!("スキル自動昇格: {skill}"));
@@ -692,9 +718,7 @@ mod tests {
 
     #[test]
     fn test_meta_generator_cannot_generate_with_one() {
-        let mg = MetaMutationGenerator::from_archive(vec![make_accepted_mutation(
-            "rule_a", 0.05,
-        )]);
+        let mg = MetaMutationGenerator::from_archive(vec![make_accepted_mutation("rule_a", 0.05)]);
         assert!(!mg.can_generate());
     }
 
@@ -763,10 +787,7 @@ mod tests {
         let mutation = Mutation {
             mutation_type: MutationType::MetaMutation,
             detail: "compound test".into(),
-            apply: MutationAction::CompoundPromptRules(vec![
-                "rule_x".into(),
-                "rule_y".into(),
-            ]),
+            apply: MutationAction::CompoundPromptRules(vec!["rule_x".into(), "rule_y".into()]),
         };
         let modified = apply_mutation(&config, &mutation);
         assert!(modified.system_prompt.contains("rule_x"));
@@ -812,9 +833,7 @@ mod tests {
         assert!(mg.can_generate());
         let compound = mg.generate_compound(0).unwrap();
         assert!(
-            compound.detail.contains("insight rule")
-                || compound.detail.contains("normal rule")
+            compound.detail.contains("insight rule") || compound.detail.contains("normal rule")
         );
     }
-
 }

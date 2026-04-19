@@ -58,11 +58,7 @@ impl AdrWriter {
     pub fn count(&self) -> Result<usize> {
         let count = std::fs::read_dir(&self.adr_dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "md")
-            })
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .count();
         Ok(count)
     }
@@ -109,10 +105,19 @@ mod tests {
         let path = writer.record(&entry).unwrap();
         assert!(path.exists(), "ADRファイルが作成されること");
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("# Replan: ループ検出"), "タイトルが含まれること");
-        assert!(content.contains("ループ検出で停滞を検知"), "コンテキストが含まれること");
+        assert!(
+            content.contains("# Replan: ループ検出"),
+            "タイトルが含まれること"
+        );
+        assert!(
+            content.contains("ループ検出で停滞を検知"),
+            "コンテキストが含まれること"
+        );
         assert!(content.contains("再計画を実行"), "判断が含まれること");
-        assert!(content.contains("同一ツール3回連続失敗のため"), "根拠が含まれること");
+        assert!(
+            content.contains("同一ツール3回連続失敗のため"),
+            "根拠が含まれること"
+        );
     }
 
     #[test]

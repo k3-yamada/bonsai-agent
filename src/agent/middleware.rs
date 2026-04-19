@@ -8,7 +8,7 @@ use crate::agent::compaction::{CompactionConfig, compact_if_needed};
 use crate::agent::conversation::{Message, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
-use crate::observability::logger::{log_event, LogLevel};
+use crate::observability::logger::{LogLevel, log_event};
 
 /// ステップ実行結果のコンテキスト（ミドルウェアに渡す）
 pub struct StepResult {
@@ -40,7 +40,9 @@ pub struct MiddlewareChain {
 
 impl MiddlewareChain {
     pub fn new() -> Self {
-        Self { middlewares: Vec::new() }
+        Self {
+            middlewares: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, mw: Box<dyn Middleware>) {
@@ -97,7 +99,9 @@ impl AuditMiddleware {
 }
 
 impl Middleware for AuditMiddleware {
-    fn name(&self) -> &str { "audit" }
+    fn name(&self) -> &str {
+        "audit"
+    }
 
     fn after_step(&mut self, _session: &mut Session, result: &StepResult) -> MiddlewareSignal {
         if let Some(ptr) = self.store {
@@ -124,15 +128,23 @@ pub struct ToolTrackingMiddleware {
 }
 
 impl ToolTrackingMiddleware {
-    pub fn new() -> Self { Self { all_tools: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            all_tools: Vec::new(),
+        }
+    }
 }
 
 impl Default for ToolTrackingMiddleware {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Middleware for ToolTrackingMiddleware {
-    fn name(&self) -> &str { "tool_tracking" }
+    fn name(&self) -> &str {
+        "tool_tracking"
+    }
 
     fn after_step(&mut self, _session: &mut Session, result: &StepResult) -> MiddlewareSignal {
         self.all_tools.extend(result.tools_used.clone());
@@ -147,22 +159,31 @@ pub struct StallMiddleware {
 
 impl StallMiddleware {
     pub fn new(threshold: usize) -> Self {
-        Self { detector: StallDetector::new(threshold) }
+        Self {
+            detector: StallDetector::new(threshold),
+        }
     }
 }
 
 impl Default for StallMiddleware {
-    fn default() -> Self { Self::new(3) }
+    fn default() -> Self {
+        Self::new(3)
+    }
 }
 
 impl Middleware for StallMiddleware {
-    fn name(&self) -> &str { "stall" }
+    fn name(&self) -> &str {
+        "stall"
+    }
 
     fn after_step(&mut self, _session: &mut Session, result: &StepResult) -> MiddlewareSignal {
         if result.outcome_type != "continue" {
             return MiddlewareSignal::Ok;
         }
-        if self.detector.record_step(result.tools_succeeded, result.output_hash) {
+        if self
+            .detector
+            .record_step(result.tools_succeeded, result.output_hash)
+        {
             self.detector.reset();
             log_event(LogLevel::Warn, "middleware:stall", "停滞検出 → 再計画促進");
             MiddlewareSignal::Inject(
@@ -183,15 +204,21 @@ pub struct CompactionMiddleware {
 }
 
 impl CompactionMiddleware {
-    pub fn new(config: CompactionConfig) -> Self { Self { config } }
+    pub fn new(config: CompactionConfig) -> Self {
+        Self { config }
+    }
 }
 
 impl Default for CompactionMiddleware {
-    fn default() -> Self { Self::new(CompactionConfig::default()) }
+    fn default() -> Self {
+        Self::new(CompactionConfig::default())
+    }
 }
 
 impl Middleware for CompactionMiddleware {
-    fn name(&self) -> &str { "compaction" }
+    fn name(&self) -> &str {
+        "compaction"
+    }
 
     fn after_step(&mut self, session: &mut Session, result: &StepResult) -> MiddlewareSignal {
         if result.outcome_type != "continue" {
@@ -216,16 +243,22 @@ pub struct TokenBudgetMiddleware {
 
 impl TokenBudgetMiddleware {
     pub fn new(budget: usize) -> Self {
-        Self { tracker: TokenBudgetTracker::new(budget) }
+        Self {
+            tracker: TokenBudgetTracker::new(budget),
+        }
     }
 }
 
 impl Default for TokenBudgetMiddleware {
-    fn default() -> Self { Self::new(8000) }
+    fn default() -> Self {
+        Self::new(8000)
+    }
 }
 
 impl Middleware for TokenBudgetMiddleware {
-    fn name(&self) -> &str { "token_budget" }
+    fn name(&self) -> &str {
+        "token_budget"
+    }
 
     fn after_step(&mut self, _session: &mut Session, result: &StepResult) -> MiddlewareSignal {
         if result.outcome_type != "continue" {
@@ -249,7 +282,9 @@ pub unsafe fn build_default_chain(
     store: Option<&MemoryStore>,
 ) -> MiddlewareChain {
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(unsafe { AuditMiddleware::new(session_id.to_string(), store) }));
+    chain.add(Box::new(unsafe {
+        AuditMiddleware::new(session_id.to_string(), store)
+    }));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
     // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
     chain.add(Box::new(CompactionMiddleware::default()));
@@ -329,9 +364,18 @@ mod tests {
             output_hash: 42,
             consecutive_failures: 1,
         };
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Inject(_)
+        ));
     }
 
     #[test]
@@ -339,7 +383,10 @@ mod tests {
         let mut mw = StallMiddleware::new(1);
         let mut session = Session::new();
         let r = make_final_result();
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
     }
 
     #[test]
@@ -347,7 +394,10 @@ mod tests {
         let mut mw = CompactionMiddleware::default();
         let mut session = Session::new();
         let r = make_continue_result(0, vec![]);
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
     }
 
     #[test]
@@ -355,7 +405,10 @@ mod tests {
         let mut mw = TokenBudgetMiddleware::new(100_000);
         let mut session = Session::new();
         let r = make_continue_result(0, vec!["echo".to_string()]);
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
     }
 
     #[test]
@@ -363,7 +416,8 @@ mod tests {
         let mut mw = TokenBudgetMiddleware::new(500);
         let mut session = Session::new();
         for i in 0..10 {
-            let r = make_continue_result(i, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            let r =
+                make_continue_result(i, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
             let _ = mw.after_step(&mut session, &r);
         }
         let r = make_continue_result(10, vec!["d".to_string()]);
@@ -376,7 +430,10 @@ mod tests {
         let mut mw = unsafe { AuditMiddleware::new("test-session".to_string(), None) };
         let mut session = Session::new();
         let r = make_continue_result(0, vec![]);
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
     }
 
     #[test]
@@ -395,9 +452,11 @@ mod tests {
     fn test_build_default_chain_has_5_middlewares() {
         let chain = unsafe { build_default_chain("test", None) };
         assert_eq!(chain.len(), 4);
-        assert_eq!(chain.names(), vec!["audit", "tool_tracking", "compaction", "token_budget"]);
+        assert_eq!(
+            chain.names(),
+            vec!["audit", "tool_tracking", "compaction", "token_budget"]
+        );
     }
-
 
     #[test]
     fn test_stall_default_threshold_is_3() {
@@ -414,10 +473,19 @@ mod tests {
             consecutive_failures: 1,
         };
         // 1回目・2回目はOk
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
         // 3回目でInject（閾値3）
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Inject(_)
+        ));
     }
 
     #[test]
@@ -435,11 +503,23 @@ mod tests {
             consecutive_failures: 1,
         };
         // 2回で検出
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Inject(_)
+        ));
         // リセット後、再度2回必要
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Ok));
-        assert!(matches!(mw.after_step(&mut session, &r), MiddlewareSignal::Inject(_)));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Ok
+        ));
+        assert!(matches!(
+            mw.after_step(&mut session, &r),
+            MiddlewareSignal::Inject(_)
+        ));
     }
     #[test]
     fn test_chain_integration_run() {

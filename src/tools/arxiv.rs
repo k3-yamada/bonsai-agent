@@ -1,6 +1,6 @@
+use crate::tools::ToolResult;
 use crate::tools::permission::Permission;
 use crate::tools::typed::TypedTool;
-use crate::tools::ToolResult;
 use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;

@@ -2,9 +2,9 @@ use std::process::Command;
 
 use anyhow::Result;
 
+use crate::tools::ToolResult;
 use crate::tools::permission::Permission;
 use crate::tools::typed::TypedTool;
-use crate::tools::ToolResult;
 use schemars::JsonSchema;
 use serde::Deserialize;
 

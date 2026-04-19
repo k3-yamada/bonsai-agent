@@ -559,8 +559,7 @@ mod tests {
         }
         let entries = audit.for_session("s1").unwrap();
         assert_eq!(entries.len(), 3);
-        let last_data: serde_json::Value =
-            serde_json::from_str(&entries[2].action_data).unwrap();
+        let last_data: serde_json::Value = serde_json::from_str(&entries[2].action_data).unwrap();
         assert_eq!(last_data["consecutive_failures"], 3);
     }
 }

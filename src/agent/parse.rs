@@ -75,7 +75,6 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
     })
 }
 
-
 /// ツール引数の型強制（hermes-agent知見: LLMが数値を文字列で返す問題）
 ///
 /// JSON値を走査し、数値文字列を数値に、bool文字列をboolに変換。

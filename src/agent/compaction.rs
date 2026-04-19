@@ -26,7 +26,8 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
 pub fn find_ai_tool_pairs(messages: &[Message]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for i in 0..messages.len().saturating_sub(1) {
-        if matches!(messages[i].role, Role::Assistant) && matches!(messages[i + 1].role, Role::Tool) {
+        if matches!(messages[i].role, Role::Assistant) && matches!(messages[i + 1].role, Role::Tool)
+        {
             pairs.push((i, i + 1));
         }
     }
@@ -128,7 +129,10 @@ fn extract_last_sentence(block: &str) -> String {
 /// Assistantメッセージがない場合は最後のToolメッセージから抽出。
 pub fn extract_last_outcome(messages: &[Message]) -> Option<String> {
     // 最後のAssistantメッセージを探す（<think>を除外）
-    let last_assistant = messages.iter().rev().find(|m| matches!(m.role, Role::Assistant));
+    let last_assistant = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::Assistant));
     if let Some(msg) = last_assistant {
         let cleaned = strip_think_tags(&msg.content);
         let trimmed = cleaned.trim();
@@ -187,8 +191,10 @@ pub fn score_message_importance(msg: &Message) -> f64 {
             }
         }
         Role::Tool => {
-            if msg.content.contains("error") || msg.content.contains("Error")
-                || msg.content.contains("エラー") || msg.content.contains("failed")
+            if msg.content.contains("error")
+                || msg.content.contains("Error")
+                || msg.content.contains("エラー")
+                || msg.content.contains("failed")
                 || msg.content.contains("Failed")
             {
                 0.2
@@ -250,7 +256,11 @@ pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
     let protected: std::collections::HashSet<usize> = pairs
         .iter()
         .flat_map(|&(a, b)| {
-            if a >= boundary || b >= boundary { vec![a, b] } else { vec![] }
+            if a >= boundary || b >= boundary {
+                vec![a, b]
+            } else {
+                vec![]
+            }
         })
         .collect();
 
@@ -266,9 +276,7 @@ pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
     // 重要度スコアが低い順にソートした削除候補
     let mut candidates: Vec<(usize, f64)> = (0..boundary)
         .filter(|&i| {
-            !protected.contains(&i)
-                && Some(i) != first_user_idx
-                && Some(i) != last_user_idx
+            !protected.contains(&i) && Some(i) != first_user_idx && Some(i) != last_user_idx
         })
         .map(|i| (i, score_message_importance(&messages[i])))
         .collect();
@@ -308,9 +316,9 @@ pub fn compact_level2(messages: &mut [Message], config: &CompactionConfig) {
             .rev()
             .find(|m| matches!(m.role, Role::Assistant))
         {
-            last_assistant.content.push_str(&format!(
-                "\n[Preserved Thinking]\n{thinking_text}"
-            ));
+            last_assistant
+                .content
+                .push_str(&format!("\n[Preserved Thinking]\n{thinking_text}"));
         }
     }
 }
@@ -426,13 +434,11 @@ pub fn flush_before_compaction(messages: &[Message], store: Option<&MemoryStore>
             flushed.push(summary);
         }
     }
-    if flushed.is_empty() { return; }
+    if flushed.is_empty() {
+        return;
+    }
     let combined = flushed.join("\n---\n");
-    if let Err(e) = store.save_memory(
-        &combined,
-        "context_flush",
-        &["compaction".to_string()],
-    ) {
+    if let Err(e) = store.save_memory(&combined, "context_flush", &["compaction".to_string()]) {
         eprintln!("[flush] メモリ保存失敗: {e}");
     }
 }
@@ -478,7 +484,10 @@ mod tests {
             v.push(Message::assistant(format!(
                 "<think>plan</think>\n<tool_call>{{\"name\":\"{tool_name}\",\"arguments\":{{}}}}</tool_call>"
             )));
-            v.push(Message::tool(result.to_string(), format!("call_{tool_name}")));
+            v.push(Message::tool(
+                result.to_string(),
+                format!("call_{tool_name}"),
+            ));
         }
         v
     }
@@ -548,42 +557,75 @@ mod tests {
 
     #[test]
     fn t_find_pairs() {
-        let m = vec![Message::system("s"), Message::user("q"), Message::assistant("a"), Message::tool("r", "t1")];
+        let m = vec![
+            Message::system("s"),
+            Message::user("q"),
+            Message::assistant("a"),
+            Message::tool("r", "t1"),
+        ];
         assert_eq!(find_ai_tool_pairs(&m), vec![(2, 3)]);
     }
     #[test]
     fn t_pair_multiple() {
-        let m = vec![Message::assistant("a1"), Message::tool("r1", "t1"), Message::assistant("a2"), Message::tool("r2", "t2")];
+        let m = vec![
+            Message::assistant("a1"),
+            Message::tool("r1", "t1"),
+            Message::assistant("a2"),
+            Message::tool("r2", "t2"),
+        ];
         assert_eq!(find_ai_tool_pairs(&m).len(), 2);
     }
     #[test]
     fn t_pair_none() {
-        let m = vec![Message::user("q"), Message::assistant("a"), Message::user("q2")];
+        let m = vec![
+            Message::user("q"),
+            Message::assistant("a"),
+            Message::user("q2"),
+        ];
         assert!(find_ai_tool_pairs(&m).is_empty());
     }
     #[test]
     fn t_l1_no_orphan() {
         let mut m = vec![
-            Message::system("s"), Message::user("q0"),
+            Message::system("s"),
+            Message::user("q0"),
             Message::assistant("assistant output here"),
-            Message::tool("tool result with enough content to compress and it must be over fifty characters long for testing", "t0"),
-            Message::user("q1"), Message::assistant("a1"), Message::tool("r1 short", "t1"),
+            Message::tool(
+                "tool result with enough content to compress and it must be over fifty characters long for testing",
+                "t0",
+            ),
+            Message::user("q1"),
+            Message::assistant("a1"),
+            Message::tool("r1 short", "t1"),
         ];
-        compact_level1(&mut m, &CompactionConfig { placeholder_keep_recent: 3, ..Default::default() });
+        compact_level1(
+            &mut m,
+            &CompactionConfig {
+                placeholder_keep_recent: 3,
+                ..Default::default()
+            },
+        );
         // idx3はペア(2,3)の一部だが、境界=4なのでidx3<4→圧縮対象
         assert!(m[3].content.contains("[prev:"));
     }
     #[test]
     fn t_l1_protect_boundary_pair() {
         let mut m = vec![
-            Message::system("s"), Message::user("q0"),
+            Message::system("s"),
+            Message::user("q0"),
             Message::assistant("old assistant content long"),
             Message::tool("old tool content long enough", "old"),
             Message::assistant("boundary assistant"),
             Message::tool("boundary tool content long enough", "bnd"),
         ];
         // keep_recent=2 → boundary=4, pair(4,5) both >= 4 → protected
-        compact_level1(&mut m, &CompactionConfig { placeholder_keep_recent: 2, ..Default::default() });
+        compact_level1(
+            &mut m,
+            &CompactionConfig {
+                placeholder_keep_recent: 2,
+                ..Default::default()
+            },
+        );
         assert!(!m[5].content.contains("[prev:"));
     }
 
@@ -597,7 +639,10 @@ mod tests {
         }
         flush_before_compaction(&msgs, Some(&store));
         let results = store.search_memories("important", 10).unwrap();
-        assert!(!results.is_empty(), "フラッシュされたメモリが検索可能であること");
+        assert!(
+            !results.is_empty(),
+            "フラッシュされたメモリが検索可能であること"
+        );
     }
     #[test]
     fn t_flush_no_store() {
@@ -622,7 +667,11 @@ mod tests {
 
     #[test]
     fn t_handoff_short_session_skipped() {
-        let mut msgs = vec![Message::system("s"), Message::user("q"), Message::assistant("a")];
+        let mut msgs = vec![
+            Message::system("s"),
+            Message::user("q"),
+            Message::assistant("a"),
+        ];
         let config = CompactionConfig {
             emergency_keep: 4,
             ..Default::default()
@@ -651,20 +700,22 @@ mod tests {
 
     #[test]
     fn t_summarize_tool_usage_empty() {
-        let msgs = vec![Message::system("s"), Message::user("q"), Message::assistant("no tools")];
+        let msgs = vec![
+            Message::system("s"),
+            Message::user("q"),
+            Message::assistant("no tools"),
+        ];
         let stats = summarize_tool_usage(&msgs);
         assert!(stats.is_empty(), "ツール呼び出しがなければ空");
     }
 
     #[test]
     fn t_summarize_tool_usage_multiple_in_one_message() {
-        let msgs = vec![
-            Message::assistant(
-                "<tool_call>{\"name\":\"shell\",\"arguments\":{}}</tool_call>\n\
+        let msgs = vec![Message::assistant(
+            "<tool_call>{\"name\":\"shell\",\"arguments\":{}}</tool_call>\n\
                  <tool_call>{\"name\":\"git\",\"arguments\":{}}</tool_call>"
-                    .to_string(),
-            ),
-        ];
+                .to_string(),
+        )];
         let stats = summarize_tool_usage(&msgs);
         assert_eq!(stats.get("shell"), Some(&1));
         assert_eq!(stats.get("git"), Some(&1));
@@ -686,9 +737,9 @@ mod tests {
 
     #[test]
     fn t_extract_last_outcome_strips_think() {
-        let msgs = vec![
-            Message::assistant("<think>内部思考</think>タスク完了: 3ファイル修正済み"),
-        ];
+        let msgs = vec![Message::assistant(
+            "<think>内部思考</think>タスク完了: 3ファイル修正済み",
+        )];
         let outcome = extract_last_outcome(&msgs).unwrap();
         assert!(!outcome.contains("内部思考"), "thinkタグの中身は除外");
         assert!(outcome.contains("タスク完了"), "thinkタグ外の内容は保持");
@@ -698,11 +749,14 @@ mod tests {
     fn t_extract_last_outcome_fallback_to_tool() {
         let msgs = vec![
             Message::system("s"),
-            Message::assistant(""),  // 空のAssistantメッセージ
+            Message::assistant(""), // 空のAssistantメッセージ
             Message::tool("ビルド成功: 0 errors, 0 warnings", "build"),
         ];
         let outcome = extract_last_outcome(&msgs).unwrap();
-        assert!(outcome.contains("ビルド成功"), "Toolメッセージにフォールバック");
+        assert!(
+            outcome.contains("ビルド成功"),
+            "Toolメッセージにフォールバック"
+        );
     }
 
     #[test]
@@ -738,8 +792,14 @@ mod tests {
         };
         compact_level3(&mut msgs, &config);
         let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
-        assert!(handoff.content.contains("Tool stats:"), "ツール統計が含まれるべき");
-        assert!(handoff.content.contains("shell:"), "shellの統計が含まれるべき");
+        assert!(
+            handoff.content.contains("Tool stats:"),
+            "ツール統計が含まれるべき"
+        );
+        assert!(
+            handoff.content.contains("shell:"),
+            "shellの統計が含まれるべき"
+        );
     }
 
     #[test]
@@ -747,7 +807,9 @@ mod tests {
         let mut msgs = vec![Message::system("s")];
         for i in 0..8 {
             msgs.push(Message::user(format!("q{i}")));
-            msgs.push(Message::assistant(format!("作業ステップ{i}を完了しました。次に進みます。")));
+            msgs.push(Message::assistant(format!(
+                "作業ステップ{i}を完了しました。次に進みます。"
+            )));
             msgs.push(Message::tool(format!("result{i}"), format!("t{i}")));
         }
         let config = CompactionConfig {
@@ -756,7 +818,10 @@ mod tests {
         };
         compact_level3(&mut msgs, &config);
         let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
-        assert!(handoff.content.contains("Last outcome:"), "最終成果が含まれるべき");
+        assert!(
+            handoff.content.contains("Last outcome:"),
+            "最終成果が含まれるべき"
+        );
     }
 
     #[test]
@@ -764,9 +829,14 @@ mod tests {
         let mut msgs = vec![Message::system("s")];
         for i in 0..8 {
             msgs.push(Message::user(format!("q{i}")));
-            msgs.push(Message::assistant(format!("ステップ{i}を実行します。長い文章にするため追加テキスト。")));
+            msgs.push(Message::assistant(format!(
+                "ステップ{i}を実行します。長い文章にするため追加テキスト。"
+            )));
             if i == 3 {
-                msgs.push(Message::tool("ツール実行エラー: ファイルが見つかりません".to_string(), format!("t{i}")));
+                msgs.push(Message::tool(
+                    "ツール実行エラー: ファイルが見つかりません".to_string(),
+                    format!("t{i}"),
+                ));
             } else {
                 msgs.push(Message::tool(format!("ok{i}"), format!("t{i}")));
             }
@@ -777,8 +847,14 @@ mod tests {
         };
         compact_level3(&mut msgs, &config);
         let handoff = msgs.iter().find(|m| m.content.contains("handoff")).unwrap();
-        assert!(handoff.content.contains("Unresolved"), "未解決事項が含まれるべき");
-        assert!(handoff.content.contains("エラー"), "エラー内容が含まれるべき");
+        assert!(
+            handoff.content.contains("Unresolved"),
+            "未解決事項が含まれるべき"
+        );
+        assert!(
+            handoff.content.contains("エラー"),
+            "エラー内容が含まれるべき"
+        );
     }
 
     // --- Preserved Thinking テスト ---
@@ -814,7 +890,11 @@ mod tests {
     #[test]
     fn t_score_importance_user() {
         let msg = Message::user("タスクの定義");
-        assert_eq!(score_message_importance(&msg), 1.0, "Userメッセージは最高スコア");
+        assert_eq!(
+            score_message_importance(&msg),
+            1.0,
+            "Userメッセージは最高スコア"
+        );
     }
 
     #[test]
@@ -841,7 +921,9 @@ mod tests {
             ..Default::default()
         };
         compact_level2(&mut msgs, &config);
-        let has_preserved = msgs.iter().any(|m| m.content.contains("[Preserved Thinking]"));
+        let has_preserved = msgs
+            .iter()
+            .any(|m| m.content.contains("[Preserved Thinking]"));
         assert!(has_preserved, "level2後に思考サマリーが残るべき");
     }
 
@@ -850,13 +932,21 @@ mod tests {
     #[test]
     fn t_score_importance_tool_call() {
         let msg = Message::assistant(r#"<tool_call>{"name":"shell"}</tool_call>"#);
-        assert_eq!(score_message_importance(&msg), 0.7, "tool_call含むAssistantは0.7");
+        assert_eq!(
+            score_message_importance(&msg),
+            0.7,
+            "tool_call含むAssistantは0.7"
+        );
     }
 
     #[test]
     fn t_score_importance_system_context() {
         let msg = Message::system("<context>injected</context>");
-        assert_eq!(score_message_importance(&msg), 0.3, "注入コンテキストSystemは0.3");
+        assert_eq!(
+            score_message_importance(&msg),
+            0.3,
+            "注入コンテキストSystemは0.3"
+        );
     }
 
     #[test]
@@ -864,5 +954,4 @@ mod tests {
         let msg = Message::system("通常のシステムプロンプト");
         assert_eq!(score_message_importance(&msg), 0.9, "通常Systemは0.9");
     }
-
 }

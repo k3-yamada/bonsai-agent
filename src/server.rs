@@ -1,5 +1,5 @@
-use crate::observability::logger::{log_event, LogLevel};
 use crate::memory::store::MemoryStore;
+use crate::observability::logger::{LogLevel, log_event};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 pub fn start_api_server(store: &MemoryStore, port: u16) {

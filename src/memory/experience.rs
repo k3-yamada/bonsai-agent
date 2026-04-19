@@ -279,12 +279,17 @@ mod tests {
     fn t_purge_expired_removes_old() {
         let store = test_conn();
         let exp = ExperienceStore::new(store.conn());
-        let id = exp.record(&success_params("old task", "old action")).unwrap();
+        let id = exp
+            .record(&success_params("old task", "old action"))
+            .unwrap();
         // 過去の日時を直接設定
-        store.conn().execute(
-            "UPDATE experiences SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?1",
-            params![id],
-        ).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE experiences SET expires_at = '2020-01-01T00:00:00Z' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
         let deleted = exp.purge_expired().unwrap();
         assert_eq!(deleted, 1);
     }
@@ -293,13 +298,18 @@ mod tests {
     fn t_set_ttl_updates_expires() {
         let store = test_conn();
         let exp = ExperienceStore::new(store.conn());
-        let id = exp.record(&success_params("ttl task", "ttl action")).unwrap();
+        let id = exp
+            .record(&success_params("ttl task", "ttl action"))
+            .unwrap();
         exp.set_ttl(id, 30).unwrap();
-        let expires: Option<String> = store.conn().query_row(
-            "SELECT expires_at FROM experiences WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        ).unwrap();
+        let expires: Option<String> = store
+            .conn()
+            .query_row(
+                "SELECT expires_at FROM experiences WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(expires.is_some());
     }
 
@@ -309,10 +319,13 @@ mod tests {
         let exp = ExperienceStore::new(store.conn());
         let id = exp.record(&success_params("valid", "valid")).unwrap();
         // 未来の日時を設定
-        store.conn().execute(
-            "UPDATE experiences SET expires_at = '2099-01-01T00:00:00Z' WHERE id = ?1",
-            params![id],
-        ).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE experiences SET expires_at = '2099-01-01T00:00:00Z' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
         let deleted = exp.purge_expired().unwrap();
         assert_eq!(deleted, 0);
     }

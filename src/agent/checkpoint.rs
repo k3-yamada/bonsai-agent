@@ -131,7 +131,8 @@ impl<'a> CheckpointManager<'a> {
                     "--include-untracked",
                 ])
                 .output()?;
-            if o.status.success() && !String::from_utf8_lossy(&o.stdout).contains("No local changes")
+            if o.status.success()
+                && !String::from_utf8_lossy(&o.stdout).contains("No local changes")
             {
                 Some(format!("stash@{{{}}}", self.cps.len()))
             } else {

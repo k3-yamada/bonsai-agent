@@ -89,7 +89,10 @@ impl LlamaServerBackend {
         while start.elapsed() < max_wait {
             std::thread::sleep(std::time::Duration::from_secs(2));
             if self.is_healthy() {
-                eprintln!("[{backend_label}] 復帰確認 ({}秒)", start.elapsed().as_secs());
+                eprintln!(
+                    "[{backend_label}] 復帰確認 ({}秒)",
+                    start.elapsed().as_secs()
+                );
                 return Ok(());
             }
         }
@@ -427,10 +430,7 @@ impl LlamaServerProcess {
 
         loop {
             if start.elapsed() > timeout {
-                anyhow::bail!(
-                    "サーバーの起動がタイムアウト（{}秒）",
-                    timeout.as_secs()
-                );
+                anyhow::bail!("サーバーの起動がタイムアウト（{}秒）", timeout.as_secs());
             }
             // /health → /v1/models フォールバック（MLX対応）
             if ureq::get(&health_url).call().is_ok() || ureq::get(&models_url).call().is_ok() {
@@ -687,7 +687,11 @@ mod tests {
             top_k: 10,
             ..Default::default()
         };
-        let b = LlamaServerBackend::connect_with_params("http://localhost:8000", "ternary-bonsai-8b", params);
+        let b = LlamaServerBackend::connect_with_params(
+            "http://localhost:8000",
+            "ternary-bonsai-8b",
+            params,
+        );
         assert_eq!(b.model_id(), "ternary-bonsai-8b");
         assert!((b.inference.temperature - 0.3).abs() < f64::EPSILON);
         assert_eq!(b.inference.top_k, 10);
@@ -740,8 +744,8 @@ mod tests {
     #[test]
     fn test_estimate_tokens_from_messages() {
         let messages = vec![
-            Message::system("You are an AI"),   // 14 bytes
-            Message::user("Hello"),             // 5 bytes
+            Message::system("You are an AI"), // 14 bytes
+            Message::user("Hello"),           // 5 bytes
         ];
         let estimate = estimate_tokens_from_messages(&messages);
         // (14 + 5) * 0.4 = 7.6 → ceil → 8
@@ -761,5 +765,4 @@ mod tests {
         let estimate = estimate_tokens_from_text("こんにちは");
         assert_eq!(estimate, 6);
     }
-
 }

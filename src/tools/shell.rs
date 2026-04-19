@@ -1,9 +1,9 @@
 use anyhow::Result;
 
+use crate::tools::ToolResult;
 use crate::tools::permission::Permission;
 use crate::tools::sandbox::{DirectSandbox, ResourceLimits, Sandbox};
 use crate::tools::typed::TypedTool;
-use crate::tools::ToolResult;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -42,7 +42,8 @@ pub struct ShellArgs {
 impl TypedTool for ShellTool {
     type Args = ShellArgs;
     const NAME: &'static str = "shell";
-    const DESCRIPTION: &'static str = "シェルコマンドを実行する。commandパラメータにコマンド文字列を指定。";
+    const DESCRIPTION: &'static str =
+        "シェルコマンドを実行する。commandパラメータにコマンド文字列を指定。";
     const PERMISSION: Permission = Permission::Confirm;
 
     fn execute(&self, args: ShellArgs) -> Result<ToolResult> {

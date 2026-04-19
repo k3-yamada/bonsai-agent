@@ -1,10 +1,10 @@
+use crate::tools::ToolResult;
 use crate::tools::permission::Permission;
 use crate::tools::typed::TypedTool;
-use crate::tools::ToolResult;
-use schemars::JsonSchema;
-use serde::Deserialize;
 use anyhow::Result;
 use regex::Regex;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub struct RepoMapTool;
@@ -53,7 +53,6 @@ pub fn gen_map(root: &Path, depth: usize) -> Result<String> {
     }
     Ok(out)
 }
-
 
 /// PageRankでファイルを重要度順にソートしたRepoMap
 pub fn gen_map_ranked(root: &Path, depth: usize) -> Result<String> {
@@ -106,8 +105,7 @@ pub fn gen_map_ranked(root: &Path, depth: usize) -> Result<String> {
 
 /// 対応拡張子一覧
 const SUPPORTED_EXTS: &[&str] = &[
-    "rs", "py", "ts", "tsx", "js", "go", "java", "c", "cpp", "h",
-    "kt", "swift",
+    "rs", "py", "ts", "tsx", "js", "go", "java", "c", "cpp", "h", "kt", "swift",
 ];
 
 fn collect(dir: &Path, mx: usize, cur: usize, files: &mut Vec<PathBuf>) {
@@ -143,7 +141,6 @@ fn collect(dir: &Path, mx: usize, cur: usize, files: &mut Vec<PathBuf>) {
     }
 }
 
-
 // ============================================================
 // PageRank — ファイル依存グラフから重要度を計算
 // ============================================================
@@ -164,8 +161,10 @@ fn pagerank(
         nodes.iter().map(|&k| (k.clone(), init)).collect();
 
     for _ in 0..iterations {
-        let mut new_ranks: std::collections::HashMap<String, f64> =
-            nodes.iter().map(|&k| (k.clone(), (1.0 - damping) / n as f64)).collect();
+        let mut new_ranks: std::collections::HashMap<String, f64> = nodes
+            .iter()
+            .map(|&k| (k.clone(), (1.0 - damping) / n as f64))
+            .collect();
 
         for (node, edges) in graph {
             if edges.is_empty() {
@@ -273,11 +272,7 @@ mod ast {
     }
 
     /// ASTからシンボルを抽出（行番号付き）
-    pub fn extract_from_tree(
-        tree: &tree_sitter::Tree,
-        source: &str,
-        ext: &str,
-    ) -> Vec<String> {
+    pub fn extract_from_tree(tree: &tree_sitter::Tree, source: &str, ext: &str) -> Vec<String> {
         let mut syms = Vec::new();
         let mut seen = std::collections::HashSet::new();
         walk_node(&tree.root_node(), source, ext, &mut syms, &mut seen);
@@ -416,7 +411,11 @@ mod ast {
             "function_declaration" => {
                 let name = field_text(node, "name", source)?;
                 let is_async = has_child_kind(node, "async");
-                let prefix = if is_async { "async function" } else { "function" };
+                let prefix = if is_async {
+                    "async function"
+                } else {
+                    "function"
+                };
                 Some(format!("L{line}: {prefix} {name}"))
             }
             "class_declaration" => {
@@ -478,11 +477,7 @@ mod ast {
 
     // --- ヘルパー ---
 
-    fn field_text<'a>(
-        node: &tree_sitter::Node,
-        field: &str,
-        source: &'a str,
-    ) -> Option<&'a str> {
+    fn field_text<'a>(node: &tree_sitter::Node, field: &str, source: &'a str) -> Option<&'a str> {
         let child = node.child_by_field_name(field)?;
         Some(&source[child.byte_range()])
     }
@@ -540,10 +535,7 @@ fn symbol_patterns(ext: &str) -> Vec<&'static str> {
             r"pub\s+mod\s+\w+",
             r"impl(<[^>]+>)?\s+\w+",
         ],
-        "py" => vec![
-            r"(async\s+)?def\s+\w+\s*\(",
-            r"class\s+\w+",
-        ],
+        "py" => vec![r"(async\s+)?def\s+\w+\s*\(", r"class\s+\w+"],
         "ts" | "tsx" | "js" => vec![
             r"(export\s+)?(async\s+)?function\s+\w+",
             r"(export\s+)?class\s+\w+",
@@ -666,39 +658,76 @@ mod tests {
     fn t_go_syms() {
         let dir = tempfile::tempdir().unwrap();
         let go_file = dir.path().join("main.go");
-        std::fs::write(&go_file, "package main\n\nfunc main() {\n}\n\ntype Server struct {\n}\n").unwrap();
+        std::fs::write(
+            &go_file,
+            "package main\n\nfunc main() {\n}\n\ntype Server struct {\n}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&go_file);
-        assert!(syms.iter().any(|s| s.contains("func main")), "Go func: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("type Server")), "Go type: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("func main")),
+            "Go func: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("type Server")),
+            "Go type: {syms:?}"
+        );
     }
 
     #[test]
     fn t_java_syms() {
         let dir = tempfile::tempdir().unwrap();
         let java_file = dir.path().join("App.java");
-        std::fs::write(&java_file, "public class App {\n  public void run() {}\n}\n").unwrap();
+        std::fs::write(
+            &java_file,
+            "public class App {\n  public void run() {}\n}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&java_file);
-        assert!(syms.iter().any(|s| s.contains("class App")), "Java class: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("class App")),
+            "Java class: {syms:?}"
+        );
     }
 
     #[test]
     fn t_c_syms() {
         let dir = tempfile::tempdir().unwrap();
         let c_file = dir.path().join("util.h");
-        std::fs::write(&c_file, "typedef struct Node {\n  int val;\n} Node;\n\nvoid init_node(Node *n);\n").unwrap();
+        std::fs::write(
+            &c_file,
+            "typedef struct Node {\n  int val;\n} Node;\n\nvoid init_node(Node *n);\n",
+        )
+        .unwrap();
         let syms = extract_syms(&c_file);
-        assert!(syms.iter().any(|s| s.contains("struct Node")), "C struct: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("struct Node")),
+            "C struct: {syms:?}"
+        );
     }
 
     #[test]
     fn t_kotlin_syms() {
         let dir = tempfile::tempdir().unwrap();
         let kt_file = dir.path().join("App.kt");
-        std::fs::write(&kt_file, "data class User(val name: String)\n\nfun main() {\n}\n\ninterface Repository {\n}\n").unwrap();
+        std::fs::write(
+            &kt_file,
+            "data class User(val name: String)\n\nfun main() {\n}\n\ninterface Repository {\n}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&kt_file);
-        assert!(syms.iter().any(|s| s.contains("class User")), "Kotlin data class: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("fun main")), "Kotlin fun: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("interface Repository")), "Kotlin interface: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("class User")),
+            "Kotlin data class: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("fun main")),
+            "Kotlin fun: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("interface Repository")),
+            "Kotlin interface: {syms:?}"
+        );
     }
 
     #[test]
@@ -707,10 +736,22 @@ mod tests {
         let swift_file = dir.path().join("App.swift");
         std::fs::write(&swift_file, "class ViewController {\n  func viewDidLoad() {}\n}\n\nstruct Config {\n}\n\nprotocol Serviceable {\n}\n").unwrap();
         let syms = extract_syms(&swift_file);
-        assert!(syms.iter().any(|s| s.contains("class ViewController")), "Swift class: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("func viewDidLoad")), "Swift func: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("struct Config")), "Swift struct: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("protocol Serviceable")), "Swift protocol: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("class ViewController")),
+            "Swift class: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("func viewDidLoad")),
+            "Swift func: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("struct Config")),
+            "Swift struct: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("protocol Serviceable")),
+            "Swift protocol: {syms:?}"
+        );
     }
 
     #[test]
@@ -719,48 +760,97 @@ mod tests {
         let rs_file = dir.path().join("lib.rs");
         std::fs::write(&rs_file, "pub(crate) fn internal_fn() {}\npub(crate) struct InternalStruct;\npub mod utils;\npub type Alias = String;\npub const MAX: usize = 100;\n").unwrap();
         let syms = extract_syms(&rs_file);
-        assert!(syms.iter().any(|s| s.contains("fn internal_fn")), "pub(crate) fn: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("struct InternalStruct")), "pub(crate) struct: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("mod utils")), "pub mod: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("type Alias")), "pub type: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("const MAX")), "pub const: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("fn internal_fn")),
+            "pub(crate) fn: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("struct InternalStruct")),
+            "pub(crate) struct: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("mod utils")),
+            "pub mod: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("type Alias")),
+            "pub type: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("const MAX")),
+            "pub const: {syms:?}"
+        );
     }
 
     #[test]
     fn t_ts_interface() {
         let dir = tempfile::tempdir().unwrap();
         let ts_file = dir.path().join("api.ts");
-        std::fs::write(&ts_file, "export interface ApiResponse {\n  data: any;\n}\nexport type UserId = string;\n").unwrap();
+        std::fs::write(
+            &ts_file,
+            "export interface ApiResponse {\n  data: any;\n}\nexport type UserId = string;\n",
+        )
+        .unwrap();
         let syms = extract_syms(&ts_file);
-        assert!(syms.iter().any(|s| s.contains("interface ApiResponse")), "TS interface: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("type UserId")), "TS type: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("interface ApiResponse")),
+            "TS interface: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("type UserId")),
+            "TS type: {syms:?}"
+        );
     }
 
     #[test]
     fn t_python_async_def() {
         let dir = tempfile::tempdir().unwrap();
         let py_file = dir.path().join("handler.py");
-        std::fs::write(&py_file, "async def handle_request(req):\n    pass\n\ndef sync_helper():\n    pass\n").unwrap();
+        std::fs::write(
+            &py_file,
+            "async def handle_request(req):\n    pass\n\ndef sync_helper():\n    pass\n",
+        )
+        .unwrap();
         let syms = extract_syms(&py_file);
-        assert!(syms.iter().any(|s| s.contains("async def handle_request")), "async def: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("def sync_helper")), "sync def: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("async def handle_request")),
+            "async def: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("def sync_helper")),
+            "sync def: {syms:?}"
+        );
     }
 
     #[test]
     fn t_line_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let rs_file = dir.path().join("lines.rs");
-        std::fs::write(&rs_file, "// comment\n\npub fn foo() {}\n\npub fn bar() {}\n").unwrap();
+        std::fs::write(
+            &rs_file,
+            "// comment\n\npub fn foo() {}\n\npub fn bar() {}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&rs_file);
-        assert!(syms.iter().any(|s| s.starts_with("L3:")), "foo at L3: {syms:?}");
-        assert!(syms.iter().any(|s| s.starts_with("L5:")), "bar at L5: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.starts_with("L3:")),
+            "foo at L3: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.starts_with("L5:")),
+            "bar at L5: {syms:?}"
+        );
     }
 
     #[test]
     fn t_dedup_via_hashset() {
         let dir = tempfile::tempdir().unwrap();
         let rs_file = dir.path().join("dup.rs");
-        std::fs::write(&rs_file, "impl Foo {\n  pub fn a() {}\n}\nimpl Foo {\n  pub fn b() {}\n}\n").unwrap();
+        std::fs::write(
+            &rs_file,
+            "impl Foo {\n  pub fn a() {}\n}\nimpl Foo {\n  pub fn b() {}\n}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&rs_file);
         let impl_count = syms.iter().filter(|s| s.contains("impl Foo")).count();
         assert_eq!(impl_count, 2, "異なる行のimplは両方表示: {syms:?}");
@@ -785,8 +875,14 @@ mod tests {
             "pub trait Drawable {\n    fn draw(&self);\n}\n\nimpl Drawable for Circle {\n    fn draw(&self) {}\n}\n",
         ).unwrap();
         let syms = extract_syms(&rs_file);
-        assert!(syms.iter().any(|s| s.contains("trait Drawable")), "trait: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("impl Drawable for Circle")), "impl for: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("trait Drawable")),
+            "trait: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("impl Drawable for Circle")),
+            "impl for: {syms:?}"
+        );
     }
 
     #[test]
@@ -795,17 +891,31 @@ mod tests {
         let rs_file = dir.path().join("async.rs");
         std::fs::write(&rs_file, "pub async fn fetch_data() {}\n").unwrap();
         let syms = extract_syms(&rs_file);
-        assert!(syms.iter().any(|s| s.contains("async") && s.contains("fn fetch_data")), "async fn: {syms:?}");
+        assert!(
+            syms.iter()
+                .any(|s| s.contains("async") && s.contains("fn fetch_data")),
+            "async fn: {syms:?}"
+        );
     }
 
     #[test]
     fn t_go_method() {
         let dir = tempfile::tempdir().unwrap();
         let go_file = dir.path().join("server.go");
-        std::fs::write(&go_file, "package main\n\ntype Server struct{}\n\nfunc (s *Server) Run() {}\n").unwrap();
+        std::fs::write(
+            &go_file,
+            "package main\n\ntype Server struct{}\n\nfunc (s *Server) Run() {}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&go_file);
-        assert!(syms.iter().any(|s| s.contains("type Server")), "Go type: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("func") && s.contains("Run")), "Go method: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("type Server")),
+            "Go type: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("func") && s.contains("Run")),
+            "Go method: {syms:?}"
+        );
     }
 
     #[test]
@@ -814,35 +924,63 @@ mod tests {
         let ts_file = dir.path().join("handler.ts");
         std::fs::write(&ts_file, "export async function handleRequest() {}\n").unwrap();
         let syms = extract_syms(&ts_file);
-        assert!(syms.iter().any(|s| s.contains("async function handleRequest")), "TS async fn: {syms:?}");
+        assert!(
+            syms.iter()
+                .any(|s| s.contains("async function handleRequest")),
+            "TS async fn: {syms:?}"
+        );
     }
 
     #[test]
     fn t_python_class_method() {
         let dir = tempfile::tempdir().unwrap();
         let py_file = dir.path().join("model.py");
-        std::fs::write(&py_file, "class Model:\n    def forward(self, x):\n        pass\n").unwrap();
+        std::fs::write(
+            &py_file,
+            "class Model:\n    def forward(self, x):\n        pass\n",
+        )
+        .unwrap();
         let syms = extract_syms(&py_file);
-        assert!(syms.iter().any(|s| s.contains("class Model")), "Python class: {syms:?}");
-        assert!(syms.iter().any(|s| s.contains("def forward")), "Python method: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("class Model")),
+            "Python class: {syms:?}"
+        );
+        assert!(
+            syms.iter().any(|s| s.contains("def forward")),
+            "Python method: {syms:?}"
+        );
     }
 
     #[test]
     fn t_go_interface() {
         let dir = tempfile::tempdir().unwrap();
         let go_file = dir.path().join("iface.go");
-        std::fs::write(&go_file, "package main\n\ntype Reader interface {\n\tRead(p []byte) (int, error)\n}\n").unwrap();
+        std::fs::write(
+            &go_file,
+            "package main\n\ntype Reader interface {\n\tRead(p []byte) (int, error)\n}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&go_file);
-        assert!(syms.iter().any(|s| s.contains("type Reader")), "Go interface: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("type Reader")),
+            "Go interface: {syms:?}"
+        );
     }
 
     #[test]
     fn t_rust_enum() {
         let dir = tempfile::tempdir().unwrap();
         let rs_file = dir.path().join("color.rs");
-        std::fs::write(&rs_file, "pub enum Color {\n    Red,\n    Green,\n    Blue,\n}\n").unwrap();
+        std::fs::write(
+            &rs_file,
+            "pub enum Color {\n    Red,\n    Green,\n    Blue,\n}\n",
+        )
+        .unwrap();
         let syms = extract_syms(&rs_file);
-        assert!(syms.iter().any(|s| s.contains("enum Color")), "enum: {syms:?}");
+        assert!(
+            syms.iter().any(|s| s.contains("enum Color")),
+            "enum: {syms:?}"
+        );
     }
 
     // --- PageRank テスト ---
@@ -926,7 +1064,9 @@ mod tests {
         let main_pos = lines.iter().position(|l: &&str| l.contains("main.rs"));
         assert!(core_pos.is_some(), "core.rs in output: {result}");
         assert!(main_pos.is_some(), "main.rs in output: {result}");
-        assert!(core_pos.unwrap() < main_pos.unwrap(),
-            "core.rs should rank above main.rs: {result}");
+        assert!(
+            core_pos.unwrap() < main_pos.unwrap(),
+            "core.rs should rank above main.rs: {result}"
+        );
     }
 }

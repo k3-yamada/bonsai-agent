@@ -305,7 +305,8 @@ location = { type = "string", description = "都市名" }
     fn test_plugin_summary_fallback_truncates_long_description() {
         let mut config = test_config();
         config.summary = String::new();
-        config.description = "これは非常に長い説明文で、四十文字を超える場合は切り詰められるべきです。".to_string();
+        config.description =
+            "これは非常に長い説明文で、四十文字を超える場合は切り詰められるべきです。".to_string();
         let tool = PluginTool::from_config(config);
         let summary = tool.summary();
         // 40文字以内に切り詰められる
@@ -354,5 +355,4 @@ description = "シンプルツール"
         assert!(config.summary.is_empty());
         assert!(config.tags.is_empty());
     }
-
 }

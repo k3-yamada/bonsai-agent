@@ -63,7 +63,13 @@ impl<'a> EventStore<'a> {
         self.conn.execute(
             "INSERT INTO events (session_id, event_type, event_data, step_index, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, event_type.as_str(), event_data, step_index.map(|s| s as i64), &now],
+            params![
+                session_id,
+                event_type.as_str(),
+                event_data,
+                step_index.map(|s| s as i64),
+                &now
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -84,7 +90,8 @@ impl<'a> EventStore<'a> {
                 created_at: row.get(5)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// イベント種別ごとの件数を取得（分析用）
@@ -96,7 +103,8 @@ impl<'a> EventStore<'a> {
         let rows = stmt.query_map(params![session_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 全セッションのイベント総数
@@ -121,9 +129,22 @@ mod tests {
     fn test_append_and_replay() {
         let store = test_store();
         let es = EventStore::new(store.conn());
-        es.append("s1", &EventType::SessionStart, "{}", None).unwrap();
-        es.append("s1", &EventType::UserMessage, r#"{"content":"hello"}"#, Some(0)).unwrap();
-        es.append("s1", &EventType::ToolCallStart, r#"{"tool":"shell"}"#, Some(0)).unwrap();
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::UserMessage,
+            r#"{"content":"hello"}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"shell"}"#,
+            Some(0),
+        )
+        .unwrap();
 
         let events = es.replay("s1").unwrap();
         assert_eq!(events.len(), 3);
@@ -135,12 +156,18 @@ mod tests {
     fn test_count_by_type() {
         let store = test_store();
         let es = EventStore::new(store.conn());
-        es.append("s1", &EventType::ToolCallStart, "{}", Some(0)).unwrap();
-        es.append("s1", &EventType::ToolCallStart, "{}", Some(1)).unwrap();
-        es.append("s1", &EventType::ToolCallEnd, "{}", Some(0)).unwrap();
+        es.append("s1", &EventType::ToolCallStart, "{}", Some(0))
+            .unwrap();
+        es.append("s1", &EventType::ToolCallStart, "{}", Some(1))
+            .unwrap();
+        es.append("s1", &EventType::ToolCallEnd, "{}", Some(0))
+            .unwrap();
 
         let counts = es.count_by_type("s1").unwrap();
-        let tc_count = counts.iter().find(|(t, _)| t == "tool_call_start").map(|(_, c)| *c);
+        let tc_count = counts
+            .iter()
+            .find(|(t, _)| t == "tool_call_start")
+            .map(|(_, c)| *c);
         assert_eq!(tc_count, Some(2));
     }
 
@@ -149,7 +176,8 @@ mod tests {
         let store = test_store();
         let es = EventStore::new(store.conn());
         assert_eq!(es.total_count().unwrap(), 0);
-        es.append("s1", &EventType::SessionStart, "{}", None).unwrap();
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
         assert_eq!(es.total_count().unwrap(), 1);
     }
 

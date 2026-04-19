@@ -3,11 +3,11 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
-use crate::runtime::model_router::AdvisorConfig;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
 use crate::runtime::inference::LlmBackend;
+use crate::runtime::model_router::AdvisorConfig;
 use crate::tools::ToolRegistry;
 
 /// ベンチマークタスクのカテゴリ
@@ -149,11 +149,7 @@ impl MultiRunTaskScore {
 
         let mean_score = scores.iter().sum::<f64>() / k as f64;
         let variance = if k > 1 {
-            scores
-                .iter()
-                .map(|s| (s - mean_score).powi(2))
-                .sum::<f64>()
-                / (k - 1) as f64
+            scores.iter().map(|s| (s - mean_score).powi(2)).sum::<f64>() / (k - 1) as f64
         } else {
             0.0
         };
@@ -410,7 +406,10 @@ impl BenchmarkSuite {
                     max_retries: config.max_retries,
                     max_tools_selected: config.max_tools_selected,
                     system_prompt,
-                    advisor: AdvisorConfig { max_uses: 0, ..config.advisor.clone() },
+                    advisor: AdvisorConfig {
+                        max_uses: 0,
+                        ..config.advisor.clone()
+                    },
                     auto_checkpoint: false,
                     max_tool_output_chars: config.max_tool_output_chars,
                     max_tools_in_context: config.max_tools_in_context,
@@ -470,7 +469,10 @@ impl BenchmarkSuite {
                 max_retries: config.max_retries,
                 max_tools_selected: config.max_tools_selected,
                 system_prompt: config.system_prompt.clone(),
-                advisor: AdvisorConfig { max_uses: 0, ..config.advisor.clone() },
+                advisor: AdvisorConfig {
+                    max_uses: 0,
+                    ..config.advisor.clone()
+                },
                 auto_checkpoint: false,
                 max_tool_output_chars: config.max_tool_output_chars,
                 max_tools_in_context: config.max_tools_in_context,
@@ -522,7 +524,15 @@ fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> Tas
         }
         // エラーハンドリング: エラー関連キーワードの検証
         "error_handling_nonexistent" => {
-            let error_keywords = ["エラー", "存在しない", "見つかり", "not found", "error", "Error", "失敗"];
+            let error_keywords = [
+                "エラー",
+                "存在しない",
+                "見つかり",
+                "not found",
+                "error",
+                "Error",
+                "失敗",
+            ];
             let has_error_report = error_keywords.iter().any(|kw| response.contains(kw));
             if has_error_report { 1.0 } else { 0.0 }
         }
@@ -530,7 +540,11 @@ fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> Tas
         "summarize_agent_loop" => {
             // 回答の文字数で検証（空白除外）
             let char_count = response.chars().filter(|c| !c.is_whitespace()).count();
-            if char_count >= 50 { 1.0 } else { char_count as f64 / 50.0 }
+            if char_count >= 50 {
+                1.0
+            } else {
+                char_count as f64 / 50.0
+            }
         }
         // デフォルト: キーワードマッチ
         _ => {
@@ -878,8 +892,12 @@ mod tests {
     #[test]
     fn test_new_tasks_exist_in_suite() {
         let suite = BenchmarkSuite::default_tasks();
-        let new_ids = ["code_gen_fizzbuzz", "multi_step_field_count",
-                       "error_handling_nonexistent", "summarize_agent_loop"];
+        let new_ids = [
+            "code_gen_fizzbuzz",
+            "multi_step_field_count",
+            "error_handling_nonexistent",
+            "summarize_agent_loop",
+        ];
         for id in &new_ids {
             assert!(
                 suite.tasks.iter().any(|t| t.id == *id),
@@ -900,9 +918,16 @@ mod tests {
             category: TaskCategory::CodeGeneration,
         };
         // FizzBuzz出力を含む回答 → 全キーワードヒット
-        let result = mock_result("fn fizzbuzz(n: u32) { for i in 1..=n { match (i%3, i%5) { (0,0) => fizzbuzz, (0,_) => fizz, (_,0) => buzz, _ => num } } }", vec![], 1);
+        let result = mock_result(
+            "fn fizzbuzz(n: u32) { for i in 1..=n { match (i%3, i%5) { (0,0) => fizzbuzz, (0,_) => fizz, (_,0) => buzz, _ => num } } }",
+            vec![],
+            1,
+        );
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "全キーワード一致すべき");
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "全キーワード一致すべき"
+        );
     }
 
     #[test]
@@ -919,7 +944,10 @@ mod tests {
         // fizzのみ含む回答 → 部分ヒット
         let result = mock_result("fizz only", vec![], 1);
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits - 1.0 / 3.0).abs() < 0.001, "1/3キーワードヒット");
+        assert!(
+            (score.keyword_hits - 1.0 / 3.0).abs() < 0.001,
+            "1/3キーワードヒット"
+        );
     }
 
     #[test]
@@ -934,9 +962,16 @@ mod tests {
             category: TaskCategory::MultiStep,
         };
         // 数値を含む回答 → 成功
-        let result = mock_result("ModelConfigには7つのフィールドがあります", vec!["file_read"], 2);
+        let result = mock_result(
+            "ModelConfigには7つのフィールドがあります",
+            vec!["file_read"],
+            2,
+        );
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "数値を含む回答は成功");
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "数値を含む回答は成功"
+        );
     }
 
     #[test]
@@ -953,7 +988,10 @@ mod tests {
         // 数値なし回答 → 失敗
         let result = mock_result("フィールドがいくつかあります", vec!["file_read"], 2);
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits).abs() < f64::EPSILON, "数値なし回答は失敗");
+        assert!(
+            (score.keyword_hits).abs() < f64::EPSILON,
+            "数値なし回答は失敗"
+        );
     }
 
     #[test]
@@ -968,9 +1006,16 @@ mod tests {
             category: TaskCategory::ErrorRecovery,
         };
         // エラー報告を含む回答 → 成功
-        let result = mock_result("ファイルが存在しないためエラーが発生しました", vec!["file_read"], 1);
+        let result = mock_result(
+            "ファイルが存在しないためエラーが発生しました",
+            vec!["file_read"],
+            1,
+        );
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "エラーキーワードで成功");
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "エラーキーワードで成功"
+        );
     }
 
     #[test]
@@ -987,7 +1032,10 @@ mod tests {
         // エラー報告なし → 失敗
         let result = mock_result("ファイルの内容は以下の通りです", vec!["file_read"], 1);
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits).abs() < f64::EPSILON, "エラーキーワードなしで失敗");
+        assert!(
+            (score.keyword_hits).abs() < f64::EPSILON,
+            "エラーキーワードなしで失敗"
+        );
     }
 
     #[test]
@@ -1005,7 +1053,10 @@ mod tests {
         let long_answer = "このファイルはエージェントループの主要な実装を含んでおり、Reflexionパターンを使用して自律的な推論と行動のサイクルを管理しています。";
         let result = mock_result(long_answer, vec!["file_read"], 2);
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "50文字以上で成功");
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "50文字以上で成功"
+        );
     }
 
     #[test]
@@ -1029,9 +1080,17 @@ mod tests {
     #[test]
     fn test_new_task_categories() {
         let suite = BenchmarkSuite::default_tasks();
-        let code_gen = suite.tasks.iter().find(|t| t.id == "code_gen_fizzbuzz").unwrap();
+        let code_gen = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "code_gen_fizzbuzz")
+            .unwrap();
         assert_eq!(code_gen.category, TaskCategory::CodeGeneration);
-        let summary = suite.tasks.iter().find(|t| t.id == "summarize_agent_loop").unwrap();
+        let summary = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "summarize_agent_loop")
+            .unwrap();
         assert_eq!(summary.category, TaskCategory::Summarization);
     }
 
@@ -1049,6 +1108,9 @@ mod tests {
         };
         let result = mock_result("FizzBuzz: Fizz, Buzz, FizzBuzz", vec![], 1);
         let score = evaluate_task_response(&task, &result);
-        assert!((score.keyword_hits - 1.0).abs() < f64::EPSILON, "大文字小文字を区別しない");
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "大文字小文字を区別しない"
+        );
     }
 }

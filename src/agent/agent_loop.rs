@@ -1,17 +1,20 @@
 #![allow(clippy::collapsible_if)]
-use crate::observability::logger::{log_event, LogLevel};
+use crate::observability::logger::{LogLevel, log_event};
 use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;
-use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
+use crate::agent::context_inject::inject_contextual_memories;
 use crate::agent::conversation::{Message, ParsedOutput, Role, Session};
 use crate::agent::error_recovery::TrialSummary;
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
 };
+use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
+use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::validate::{PathGuard, Severity, validate_tool_call};
 use crate::cancel::CancellationToken;
+use crate::config::InferenceParams;
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
@@ -19,12 +22,9 @@ use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 use crate::safety::secrets::SecretsFilter;
-use crate::tools::{ToolRegistry, ToolResultCache, TaskType};
 #[allow(unused_imports)]
 use crate::tools::detect_task_type;
-use crate::config::InferenceParams;
-use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
-use crate::agent::context_inject::inject_contextual_memories;
+use crate::tools::{TaskType, ToolRegistry, ToolResultCache};
 
 /// エージェント設定
 pub struct AgentConfig {
@@ -136,7 +136,6 @@ pub enum StepOutcome {
     /// エラーで中断
     Aborted(String),
 }
-
 
 /// エージェントループのミュータブル状態を集約
 ///
@@ -333,9 +332,12 @@ pub fn execute_step(
         .map(|m| m.content.as_str())
         .unwrap_or("");
 
-    let selected_tools = ctx
-        .tools
-        .select_relevant(last_user_msg, ctx.config.max_tools_selected.min(ctx.config.max_tools_in_context));
+    let selected_tools = ctx.tools.select_relevant(
+        last_user_msg,
+        ctx.config
+            .max_tools_selected
+            .min(ctx.config.max_tools_in_context),
+    );
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
     // 2. LLM呼び出し（ストリーミング対応）
@@ -411,21 +413,31 @@ pub fn execute_step(
         }
         if !circuit_breaker.is_available(&tool_call.name) {
             session.add_message(Message::tool(
-                format!("ツール '{}' は連続で失敗したため使えません。別の方法を試してください。", tool_call.name),
+                format!(
+                    "ツール '{}' は連続で失敗したため使えません。別の方法を試してください。",
+                    tool_call.name
+                ),
                 &tool_call.name,
             ));
             continue;
         }
         let validation = validate_tool_call(tool_call, &known, ctx.path_guard, None);
         if !validation.is_valid {
-            let block_issues: Vec<_> = validation.issues.iter()
-                .filter(|i| i.severity == Severity::Block).map(|i| i.message.as_str()).collect();
+            let block_issues: Vec<_> = validation
+                .issues
+                .iter()
+                .filter(|i| i.severity == Severity::Block)
+                .map(|i| i.message.as_str())
+                .collect();
             let alt = match tool_call.name.as_str() {
                 "shell" => "代わりにfile_readやgitツールを使ってください。",
                 "file_write" => "許可されたディレクトリのパスを指定してください。",
                 _ => "別のツールか、別のパラメータで試してください。",
             };
-            session.add_message(Message::tool(format!("拒否: {}。{}", block_issues.join(", "), alt), &tool_call.name));
+            session.add_message(Message::tool(
+                format!("拒否: {}。{}", block_issues.join(", "), alt),
+                &tool_call.name,
+            ));
             continue;
         }
         let tool = match ctx.tools.get(&tool_call.name) {
@@ -437,11 +449,20 @@ pub fn execute_step(
         validated.push(ValidatedCall {
             name: tool_call.name.clone(),
             args_json: serde_json::to_string(&tool_call.arguments).unwrap_or_default(),
-            coerced_args, tool, is_read_only: tool.is_read_only(),
+            coerced_args,
+            tool,
+            is_read_only: tool.is_read_only(),
         });
     }
 
-    let step_tools = execute_validated_calls(&validated, session, circuit_breaker, ctx.secrets_filter, ctx.store, tool_cache);
+    let step_tools = execute_validated_calls(
+        &validated,
+        session,
+        circuit_breaker,
+        ctx.secrets_filter,
+        ctx.store,
+        tool_cache,
+    );
     Ok(StepOutcome::Continue(step_tools))
 }
 
@@ -523,7 +544,8 @@ pub fn run_agent_loop_with_session(
 
     let mut state = LoopState::new(config.advisor.clone());
     // ミドルウェアチェーン構築（DeerFlow知見: 5段パイプライン）
-    state.middleware_chain = unsafe { crate::agent::middleware::build_default_chain(&session.id, store) };
+    state.middleware_chain =
+        unsafe { crate::agent::middleware::build_default_chain(&session.id, store) };
 
     let ctx = StepContext {
         backend,
@@ -549,10 +571,19 @@ pub fn run_agent_loop_with_session(
             &mut state.tool_cache,
         )?;
 
-
         let duration_ms = step_start.elapsed().as_millis() as u64;
 
-        match handle_outcome(outcome, session, &mut state, &task_context, store, config.max_iterations, final_iteration, iteration, duration_ms) {
+        match handle_outcome(
+            outcome,
+            session,
+            &mut state,
+            &task_context,
+            store,
+            config.max_iterations,
+            final_iteration,
+            iteration,
+            duration_ms,
+        ) {
             OutcomeAction::Return(result) => return Ok(result),
             OutcomeAction::Continue => continue,
         }
@@ -578,7 +609,10 @@ fn create_task_start_checkpoint(
     task_context: &str,
     store: Option<&MemoryStore>,
 ) -> Option<i64> {
-    let desc = format!("auto-start: {}", task_context.chars().take(60).collect::<String>());
+    let desc = format!(
+        "auto-start: {}",
+        task_context.chars().take(60).collect::<String>()
+    );
     let session_id = session.id.clone();
     let mut mgr = if let Some(s) = store {
         CheckpointManager::with_persistence(s.conn(), Some(session_id))
@@ -587,11 +621,19 @@ fn create_task_start_checkpoint(
     };
     match mgr.create(&desc) {
         Ok(id) => {
-            log_event(LogLevel::Info, "checkpoint", &format!("タスク開始時CP作成 id={id}"));
+            log_event(
+                LogLevel::Info,
+                "checkpoint",
+                &format!("タスク開始時CP作成 id={id}"),
+            );
             Some(id)
         }
         Err(e) => {
-            log_event(LogLevel::Warn, "checkpoint", &format!("CP作成失敗（無視）: {e}"));
+            log_event(
+                LogLevel::Warn,
+                "checkpoint",
+                &format!("CP作成失敗（無視）: {e}"),
+            );
             None
         }
     }
@@ -617,11 +659,24 @@ fn handle_outcome(
     match outcome {
         StepOutcome::FinalAnswer(answer) => {
             let mw_result = MwStepResult {
-                outcome_type: "final_answer", iteration, duration_ms,
-                tools_used: vec![], tools_succeeded: true, output_hash: 0, consecutive_failures: 0,
+                outcome_type: "final_answer",
+                iteration,
+                duration_ms,
+                tools_used: vec![],
+                tools_succeeded: true,
+                output_hash: 0,
+                consecutive_failures: 0,
             };
             state.middleware_chain.run_after_step(session, &mw_result);
-            if inject_verification_step(session, &mut state.advisor, task_context, &answer, iteration, max_iterations, store) {
+            if inject_verification_step(
+                session,
+                &mut state.advisor,
+                task_context,
+                &answer,
+                iteration,
+                max_iterations,
+                store,
+            ) {
                 return OutcomeAction::Continue;
             }
             // 不変条件チェック（非ブロッキング警告）
@@ -639,8 +694,12 @@ fn handle_outcome(
         StepOutcome::Aborted(reason) => {
             state.consecutive_failures += 1;
             let mw_result = MwStepResult {
-                outcome_type: "aborted", iteration, duration_ms,
-                tools_used: vec![], tools_succeeded: false, output_hash: 0,
+                outcome_type: "aborted",
+                iteration,
+                duration_ms,
+                tools_used: vec![],
+                tools_succeeded: false,
+                output_hash: 0,
                 consecutive_failures: state.consecutive_failures,
             };
             state.middleware_chain.run_after_step(session, &mw_result);
@@ -673,7 +732,16 @@ fn handle_outcome(
             // ツール追跡はミドルウェア外で保持（ReturnでのAgentLoopResult構築に必要）
             state.all_tools.extend(step_tools);
             // Advisor連携の停滞検出（ミドルウェアのStallとは別に、Advisor呼び出しが必要）
-            inject_replan_on_stall(session, &mut state.stall_detector, &mut state.advisor, task_context, tools_succeeded, output_hash, store, &state.trial_summary);
+            inject_replan_on_stall(
+                session,
+                &mut state.stall_detector,
+                &mut state.advisor,
+                task_context,
+                tools_succeeded,
+                output_hash,
+                store,
+                &state.trial_summary,
+            );
             OutcomeAction::Continue
         }
     }
@@ -682,10 +750,18 @@ fn handle_outcome(
 /// タスクの複雑さを判定（複数ステップが必要か）
 fn detect_task_complexity(input: &str) -> bool {
     let complex_signals = [
-        "作成して", "実装して", "修正して", "リファクタ",
-        "調べて", "分析して", "比較して", "設計して",
-        "テストを書", "ビルドして", "デプロイ",
-        "ファイルを.*して.*して",  // 複数動詞
+        "作成して",
+        "実装して",
+        "修正して",
+        "リファクタ",
+        "調べて",
+        "分析して",
+        "比較して",
+        "設計して",
+        "テストを書",
+        "ビルドして",
+        "デプロイ",
+        "ファイルを.*して.*して", // 複数動詞
     ];
     let signal_count = complex_signals
         .iter()
@@ -712,14 +788,32 @@ fn resolve_advisor_prompt(
     // Claude Code バックエンド優先
     if let Ok(Some(cc_advice)) = advisor.try_claude_code_advice(role, task_context) {
         let duration_ms = start.elapsed().as_millis() as u64;
-        eprintln!("[advisor] Claude Code応答取得 role={:?} ({}文字, {}ms)", role, cc_advice.len(), duration_ms);
-        return AdvisorResolution { prompt: cc_advice, source: "claude-code", duration_ms };
+        eprintln!(
+            "[advisor] Claude Code応答取得 role={:?} ({}文字, {}ms)",
+            role,
+            cc_advice.len(),
+            duration_ms
+        );
+        return AdvisorResolution {
+            prompt: cc_advice,
+            source: "claude-code",
+            duration_ms,
+        };
     }
     match advisor.try_remote_advice(role, task_context) {
         Ok(Some(remote)) => {
             let duration_ms = start.elapsed().as_millis() as u64;
-            eprintln!("[advisor] 外部アドバイザー応答取得 role={:?} ({}文字, {}ms)", role, remote.len(), duration_ms);
-            AdvisorResolution { prompt: remote, source: "remote", duration_ms }
+            eprintln!(
+                "[advisor] 外部アドバイザー応答取得 role={:?} ({}文字, {}ms)",
+                role,
+                remote.len(),
+                duration_ms
+            );
+            AdvisorResolution {
+                prompt: remote,
+                source: "remote",
+                duration_ms,
+            }
         }
         Ok(None) => AdvisorResolution {
             prompt: advisor.local_prompt_for(role, task_context),
@@ -781,7 +875,11 @@ fn inject_replan_on_stall(
         return false;
     }
     if !advisor.can_advise() {
-        log_event(LogLevel::Warn, "stall", "停滞検出だが advisor max_uses 到達");
+        log_event(
+            LogLevel::Warn,
+            "stall",
+            "停滞検出だが advisor max_uses 到達",
+        );
         stall_detector.reset();
         return false;
     }
@@ -851,7 +949,8 @@ fn inject_verification_step(
          - 見落としているケースはないか？\n\
          - ツール呼び出し成功率が80%以上か？\n\
          - ファイル変更がある場合、コンパイル/構文チェックを通過したか？\n\
-         - 元のタスクの完了条件をすべて満たしているか？".to_string(),
+         - 元のタスクの完了条件をすべて満たしているか？"
+            .to_string(),
     ));
     advisor.record_call();
     eprintln!(
@@ -881,9 +980,14 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
              - エラーなし、またはエラーを解決した\n\
              - 成果物が要件を満たしている\n\
              \n\
-             計画は100語以内、箇条書きで。調査から順に実行。".to_string(),
+             計画は100語以内、箇条書きで。調査から順に実行。"
+                .to_string(),
         ));
-        log_event(LogLevel::Info, "advisor", "複雑タスク検出 → 簡潔計画プレステップ注入");
+        log_event(
+            LogLevel::Info,
+            "advisor",
+            "複雑タスク検出 → 簡潔計画プレステップ注入",
+        );
     }
 }
 
@@ -898,11 +1002,14 @@ fn inject_planning_step(session: &mut Session, task_context: &str) {
 /// タスク完了時の不変条件チェック（PaperOrchestra知見）
 fn check_invariants(session: &Session, task_context: &str) -> Vec<String> {
     let mut violations = Vec::new();
-    let tool_msgs: Vec<_> = session.messages.iter()
+    let tool_msgs: Vec<_> = session
+        .messages
+        .iter()
         .filter(|m| m.role == Role::Tool)
         .collect();
     if !tool_msgs.is_empty() {
-        let success_count = tool_msgs.iter()
+        let success_count = tool_msgs
+            .iter()
             .filter(|m| !m.content.contains("エラー") && !m.content.contains("失敗"))
             .count();
         let rate = success_count as f64 / tool_msgs.len() as f64;
@@ -910,8 +1017,13 @@ fn check_invariants(session: &Session, task_context: &str) -> Vec<String> {
             violations.push(format!("ツール成功率が低い: {:.0}%", rate * 100.0));
         }
     }
-    if let Some(answer) = session.messages.iter().rev().find(|m| m.role == Role::Assistant)
-        && answer.content.len() < 10 && task_context.len() > 50
+    if let Some(answer) = session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant)
+        && answer.content.len() < 10
+        && task_context.len() > 50
     {
         violations.push("回答が短すぎる可能性".to_string());
     }
@@ -991,8 +1103,8 @@ fn clean_response(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tool_exec::{ToolExecResult, apply_tool_result};
     use crate::agent::context_inject::inject_experience_context;
+    use crate::agent::tool_exec::{ToolExecResult, apply_tool_result};
     use crate::memory::graph::KnowledgeGraph;
     use crate::memory::store::MemoryStore;
     use crate::runtime::inference::MockLlmBackend;
@@ -1308,7 +1420,9 @@ mod tests {
 
     #[test]
     fn test_load_soul_missing_is_none() {
-        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from("/tmp/nonexistent_soul_bonsai.md")));
+        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(
+            "/tmp/nonexistent_soul_bonsai.md",
+        )));
         assert!(result.is_none());
     }
 
@@ -1316,7 +1430,8 @@ mod tests {
     fn test_load_soul_from_explicit_path() {
         let path = format!("/tmp/bonsai-test-soul-{}.md", uuid::Uuid::new_v4());
         std::fs::write(&path, "私はテスト用ペルソナです").unwrap();
-        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
+        let result =
+            crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
         assert!(result.is_some());
         assert!(result.unwrap().contains("ペルソナ"));
         std::fs::remove_file(&path).ok();
@@ -1326,7 +1441,8 @@ mod tests {
     fn test_load_soul_empty_file_is_none() {
         let path = format!("/tmp/bonsai-test-soul-empty-{}.md", uuid::Uuid::new_v4());
         std::fs::write(&path, "   ").unwrap();
-        let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
+        let result =
+            crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
         assert!(result.is_none());
         std::fs::remove_file(&path).ok();
     }
@@ -1406,7 +1522,9 @@ mod tests {
 
     #[test]
     fn test_detect_task_complexity_complex() {
-        assert!(detect_task_complexity("テストを書いて、実装して、リファクタリングして"));
+        assert!(detect_task_complexity(
+            "テストを書いて、実装して、リファクタリングして"
+        ));
         assert!(detect_task_complexity(&"a".repeat(201)));
     }
 
@@ -1415,7 +1533,10 @@ mod tests {
     fn test_inject_planning_step_complex() {
         let mut session = Session::new();
         session.add_message(Message::user("テストを書いて実装して"));
-        inject_planning_step(&mut session, "テストを書いて、実装して、リファクタリングして");
+        inject_planning_step(
+            &mut session,
+            "テストを書いて、実装して、リファクタリングして",
+        );
         let has_plan = session.messages.iter().any(|m| m.content.contains("計画"));
         assert!(has_plan, "複雑タスクに計画プレステップが注入されるべき");
     }
@@ -1549,10 +1670,37 @@ mod tests {
         let mut stall = StallDetector::new(3);
         let mut advisor = AdvisorConfig::default();
         // 1〜2回目: 検出されない
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
+        assert!(!inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ));
+        assert!(!inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ));
         // 3回目: 停滞検出→再計画注入
-        assert!(inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
+        assert!(inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ));
         assert_eq!(advisor.calls_used, 1);
         assert!(session.messages.iter().any(|m| m.content.contains("停滞")));
     }
@@ -1567,8 +1715,26 @@ mod tests {
             calls_used: 1,
             ..Default::default()
         };
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default()));
-        let injected = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &TrialSummary::default());
+        assert!(!inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ));
+        let injected = inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default(),
+        );
         assert!(!injected, "max_uses超過時は注入しない");
         assert_eq!(advisor.calls_used, 1, "calls_usedは増えない");
     }
@@ -1579,9 +1745,36 @@ mod tests {
         let mut session = Session::new();
         let mut stall = StallDetector::new(2);
         let mut advisor = AdvisorConfig::default();
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 1, None, &TrialSummary::default()));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 2, None, &TrialSummary::default()));
-        assert!(!inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", true, 3, None, &TrialSummary::default()));
+        assert!(!inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            true,
+            1,
+            None,
+            &TrialSummary::default()
+        ));
+        assert!(!inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            true,
+            2,
+            None,
+            &TrialSummary::default()
+        ));
+        assert!(!inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            true,
+            3,
+            None,
+            &TrialSummary::default()
+        ));
         assert_eq!(advisor.calls_used, 0);
     }
 
@@ -1634,7 +1827,12 @@ mod tests {
             source: "remote",
             duration_ms: 123,
         };
-        log_advisor_call(Some(&store), &session, AdvisorRole::Verification, &resolution);
+        log_advisor_call(
+            Some(&store),
+            &session,
+            AdvisorRole::Verification,
+            &resolution,
+        );
 
         let audit = AuditLog::new(store.conn());
         let entries = audit.for_session(&session.id).unwrap();
@@ -1643,8 +1841,16 @@ mod tests {
             .filter(|e| e.action_type == "advisor_call")
             .collect();
         assert_eq!(advisor_entries.len(), 1);
-        assert!(advisor_entries[0].action_data.contains("\"role\":\"verification\""));
-        assert!(advisor_entries[0].action_data.contains("\"source\":\"remote\""));
+        assert!(
+            advisor_entries[0]
+                .action_data
+                .contains("\"role\":\"verification\"")
+        );
+        assert!(
+            advisor_entries[0]
+                .action_data
+                .contains("\"source\":\"remote\"")
+        );
     }
 
     // テスト: handle_outcome — FinalAnswer で Return
@@ -1653,7 +1859,17 @@ mod tests {
         let mut session = Session::new();
         let mut state = LoopState::new(AdvisorConfig::default());
         let outcome = StepOutcome::FinalAnswer("回答".to_string());
-        let action = handle_outcome(outcome, &mut session, &mut state, "simple", None, 10, 1, 0, 100);
+        let action = handle_outcome(
+            outcome,
+            &mut session,
+            &mut state,
+            "simple",
+            None,
+            10,
+            1,
+            0,
+            100,
+        );
         assert!(matches!(action, OutcomeAction::Return(_)));
     }
 
@@ -1663,7 +1879,17 @@ mod tests {
         let mut session = Session::new();
         let mut state = LoopState::new(AdvisorConfig::default());
         let outcome = StepOutcome::Continue(vec!["shell".to_string()]);
-        let action = handle_outcome(outcome, &mut session, &mut state, "task", None, 10, 1, 0, 100);
+        let action = handle_outcome(
+            outcome,
+            &mut session,
+            &mut state,
+            "task",
+            None,
+            10,
+            1,
+            0,
+            100,
+        );
         assert!(matches!(action, OutcomeAction::Continue));
         assert_eq!(state.all_tools.len(), 1);
     }
@@ -1674,7 +1900,17 @@ mod tests {
         let mut session = Session::new();
         let mut state = LoopState::new(AdvisorConfig::default());
         let outcome = StepOutcome::Aborted("cancelled".to_string());
-        let action = handle_outcome(outcome, &mut session, &mut state, "task", None, 10, 1, 0, 100);
+        let action = handle_outcome(
+            outcome,
+            &mut session,
+            &mut state,
+            "task",
+            None,
+            10,
+            1,
+            0,
+            100,
+        );
         assert!(matches!(action, OutcomeAction::Return(_)));
         assert_eq!(state.consecutive_failures, 1);
     }
@@ -1716,7 +1952,8 @@ mod tests {
         // git stash が成功する場合（リポ内）は Some、失敗してもエラーなし
         if let Some(id) = id_opt {
             assert!(id > 0, "永続IDは正");
-            let loaded = CheckpointManager::load_persisted(store.conn(), Some(&session.id)).unwrap();
+            let loaded =
+                CheckpointManager::load_persisted(store.conn(), Some(&session.id)).unwrap();
             assert_eq!(loaded.len(), 1);
             assert!(loaded[0].description.contains("auto-start"));
         }
@@ -1798,7 +2035,11 @@ mod tests {
         // グラフにツール使用が記録されていることを確認
         let graph = KnowledgeGraph::new(store.conn());
         let neighbors = graph.neighbors("file_read", 1).unwrap();
-        assert_eq!(neighbors.len(), 1, "ツール→ファイルのエッジが記録されるべき");
+        assert_eq!(
+            neighbors.len(),
+            1,
+            "ツール→ファイルのエッジが記録されるべき"
+        );
         assert_eq!(neighbors[0].0, "src/main.rs");
         assert_eq!(neighbors[0].1, "uses");
     }
@@ -1824,10 +2065,13 @@ mod tests {
         // グラフにエラーパターンが記録されていることを確認
         let graph = KnowledgeGraph::new(store.conn());
         let error_neighbors = graph.neighbors("tool_error", 1).unwrap();
-        assert!(error_neighbors.iter().any(|(name, rel, _)| name == "src/lib.rs" && rel == "caused_by"),
-            "エラー→ファイルのcaused_byエッジが記録されるべき");
+        assert!(
+            error_neighbors
+                .iter()
+                .any(|(name, rel, _)| name == "src/lib.rs" && rel == "caused_by"),
+            "エラー→ファイルのcaused_byエッジが記録されるべき"
+        );
     }
-
 
     // テスト: inject_experience_context — 成功/失敗を分離してフォーマット
     #[test]
@@ -1845,7 +2089,8 @@ mod tests {
             tool_name: Some("file_write"),
             error_type: None,
             error_detail: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         // 失敗経験を記録
         exp.record(&RecordParams {
@@ -1857,7 +2102,8 @@ mod tests {
             tool_name: Some("file_read"),
             error_type: Some("Timeout"),
             error_detail: Some("read timeout"),
-        }).unwrap();
+        })
+        .unwrap();
 
         let mut session = Session::new();
         inject_experience_context(&mut session, "file", &store);
@@ -1865,11 +2111,26 @@ mod tests {
         // メッセージが追加されていること
         assert_eq!(session.messages.len(), 1);
         let msg = &session.messages[0].content;
-        assert!(msg.contains("<context type=\"experience\">"), "統一コンテキストタグで囲まれるべき");
-        assert!(msg.contains("[成功パターン]"), "成功パターンセクションがあるべき");
-        assert!(msg.contains("[失敗パターン]"), "失敗パターンセクションがあるべき");
-        assert!(msg.contains("fuzzyマッチで成功"), "成功のlessonが含まれるべき");
-        assert!(msg.contains("タイムアウト、リトライで解決"), "失敗のlessonが含まれるべき");
+        assert!(
+            msg.contains("<context type=\"experience\">"),
+            "統一コンテキストタグで囲まれるべき"
+        );
+        assert!(
+            msg.contains("[成功パターン]"),
+            "成功パターンセクションがあるべき"
+        );
+        assert!(
+            msg.contains("[失敗パターン]"),
+            "失敗パターンセクションがあるべき"
+        );
+        assert!(
+            msg.contains("fuzzyマッチで成功"),
+            "成功のlessonが含まれるべき"
+        );
+        assert!(
+            msg.contains("タイムアウト、リトライで解決"),
+            "失敗のlessonが含まれるべき"
+        );
     }
 
     // テスト: inject_experience_context — 経験が空の場合にメッセージ追加しない
@@ -1896,7 +2157,8 @@ mod tests {
             tool_name: None,
             error_type: None,
             error_detail: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         let mut session = Session::new();
         inject_experience_context(&mut session, "deploy", &store);
@@ -1904,9 +2166,11 @@ mod tests {
         assert_eq!(session.messages.len(), 1);
         let msg = &session.messages[0].content;
         assert!(msg.contains("[学び]"), "学びセクションがあるべき");
-        assert!(msg.contains("デプロイ前にテスト必須"), "Insightのlessonが含まれるべき");
+        assert!(
+            msg.contains("デプロイ前にテスト必須"),
+            "Insightのlessonが含まれるべき"
+        );
     }
-
 
     // テスト: 全コンテキスト注入が統一タグフォーマット <context type="xxx"> を使用する
     #[test]
@@ -1924,18 +2188,24 @@ mod tests {
             tool_name: None,
             error_type: None,
             error_detail: None,
-        }).unwrap();
+        })
+        .unwrap();
 
         let mut session = Session::new();
         inject_experience_context(&mut session, "consistency", &store);
 
         if !session.messages.is_empty() {
             let msg = &session.messages[0].content;
-            assert!(msg.starts_with("<context type="), "経験注入は<context type=で始まるべき");
-            assert!(msg.ends_with("</context>"), "経験注入は</context>で終わるべき");
+            assert!(
+                msg.starts_with("<context type="),
+                "経験注入は<context type=で始まるべき"
+            );
+            assert!(
+                msg.ends_with("</context>"),
+                "経験注入は</context>で終わるべき"
+            );
         }
     }
-
 
     #[test]
     fn t_loop_state_has_trial_summary() {
@@ -1946,9 +2216,16 @@ mod tests {
     #[test]
     fn t_planning_step_contains_hypothesis() {
         let mut session = Session::new();
-        inject_planning_step(&mut session, "テストを書いて、実装して、リファクタリングして");
+        inject_planning_step(
+            &mut session,
+            "テストを書いて、実装して、リファクタリングして",
+        );
         let last = session.messages.last().unwrap();
-        assert!(last.content.contains("仮説"), "仮説キーワード: {}", last.content);
+        assert!(
+            last.content.contains("仮説"),
+            "仮説キーワード: {}",
+            last.content
+        );
     }
 
     #[test]
@@ -1956,12 +2233,19 @@ mod tests {
         let mut session = Session::new();
         let mut advisor = AdvisorConfig::default();
         let injected = inject_verification_step(
-            &mut session, &mut advisor,
+            &mut session,
+            &mut advisor,
             "テストを書いて、実装して、リファクタリングして",
-            "完了しました", 1, 10, None,
+            "完了しました",
+            1,
+            10,
+            None,
         );
         if injected {
-            let has_checklist = session.messages.iter().any(|m| m.content.contains("チェックリスト"));
+            let has_checklist = session
+                .messages
+                .iter()
+                .any(|m| m.content.contains("チェックリスト"));
             assert!(has_checklist, "検証チェックリストが注入される");
         }
     }
@@ -1974,23 +2258,56 @@ mod tests {
         let mut ts = TrialSummary::default();
         ts.record_failure("shell", r#"{"command":"cargo build"}"#, "compile error", 1);
         // 閾値到達させる
-        inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
-        inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
-        let triggered = inject_replan_on_stall(&mut session, &mut stall, &mut advisor, "task", false, 0, None, &ts);
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &ts,
+        );
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &ts,
+        );
+        let triggered = inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &ts,
+        );
         if triggered {
-            let has_trial = session.messages.iter().any(|m| m.content.contains("試した方法"));
+            let has_trial = session
+                .messages
+                .iter()
+                .any(|m| m.content.contains("試した方法"));
             assert!(has_trial, "試行サマリーがreplanに含まれる");
         }
     }
-
 
     // テスト: check_invariants — 正常セッションで違反なし
     #[test]
     fn t_check_invariants_no_violations() {
         use crate::agent::conversation::Role;
         let mut session = Session::new();
-        session.add_message(Message::user("テストを書いて、実装して、リファクタリングして"));
-        session.add_message(Message::assistant("実装が完了しました。テスト結果: 全パス".to_string()));
+        session.add_message(Message::user(
+            "テストを書いて、実装して、リファクタリングして",
+        ));
+        session.add_message(Message::assistant(
+            "実装が完了しました。テスト結果: 全パス".to_string(),
+        ));
         session.add_message(Message {
             role: Role::Tool,
             content: "ファイルを正常に読み込みました".to_string(),
@@ -1998,7 +2315,11 @@ mod tests {
             tool_call_id: None,
         });
         let violations = check_invariants(&session, "テストを書いて実装して");
-        assert!(violations.is_empty(), "正常セッションでは違反なし: {:?}", violations);
+        assert!(
+            violations.is_empty(),
+            "正常セッションでは違反なし: {:?}",
+            violations
+        );
     }
 
     // テスト: check_invariants — ツール失敗多い場合に違反検出
@@ -2025,7 +2346,10 @@ mod tests {
         });
         let violations = check_invariants(&session, "テストを書いて");
         assert!(!violations.is_empty(), "低成功率で違反検出されるべき");
-        assert!(violations[0].contains("ツール成功率が低い"), "成功率警告: {}", violations[0]);
+        assert!(
+            violations[0].contains("ツール成功率が低い"),
+            "成功率警告: {}",
+            violations[0]
+        );
     }
-
 }

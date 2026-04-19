@@ -2,9 +2,9 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::tools::ToolResult;
 use crate::tools::permission::Permission;
 use crate::tools::typed::TypedTool;
-use crate::tools::ToolResult;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -24,7 +24,8 @@ pub struct FileReadArgs {
 impl TypedTool for FileReadTool {
     type Args = FileReadArgs;
     const NAME: &'static str = "file_read";
-    const DESCRIPTION: &'static str = "ファイルの内容を読み取る。pathパラメータにファイルパスを指定。";
+    const DESCRIPTION: &'static str =
+        "ファイルの内容を読み取る。pathパラメータにファイルパスを指定。";
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 
@@ -38,11 +39,17 @@ impl TypedTool for FileReadTool {
                 let total = lines.len();
                 let s = offset.min(total);
                 let e = (s + limit).min(total);
-                let numbered: Vec<String> = lines[s..e].iter().enumerate()
-                    .map(|(i, l)| format!("{:4}| {l}", s + i + 1)).collect();
+                let numbered: Vec<String> = lines[s..e]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{:4}| {l}", s + i + 1))
+                    .collect();
                 let hdr = format!("[{path}] ({total}行, 表示:{}-{})", s + 1, e);
-                Ok(ToolResult { output: format!("{hdr}\n{}", numbered.join("\n")), success: true })
-            },
+                Ok(ToolResult {
+                    output: format!("{hdr}\n{}", numbered.join("\n")),
+                    success: true,
+                })
+            }
             Err(e) => Ok(ToolResult {
                 output: format!("ファイル読み取りエラー: {e}"),
                 success: false,
@@ -131,10 +138,9 @@ impl TypedTool for FileWriteTool {
                     success: false,
                 }),
             }
-        } else if let (Some(old_text), Some(new_text)) = (
-            args.old_text.as_deref(),
-            args.new_text.as_deref(),
-        ) {
+        } else if let (Some(old_text), Some(new_text)) =
+            (args.old_text.as_deref(), args.new_text.as_deref())
+        {
             // search/replace差分適用
             match std::fs::read_to_string(path) {
                 Ok(current) => {
@@ -181,7 +187,6 @@ impl TypedTool for FileWriteTool {
         }
     }
 }
-
 
 /// 空白を正規化（連続空白→単一スペース、先頭末尾trim）
 fn normalize_whitespace(s: &str) -> String {
@@ -250,7 +255,13 @@ fn try_whitespace_normalized(content: &str, old_text: &str, new_text: &str) -> O
                 normalize_whitespace(content_lines[i + j]) == normalize_whitespace(ol)
             })
         {
-            return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
+            return Some(replace_lines(
+                content,
+                &content_lines,
+                i,
+                old_lines.len(),
+                new_text,
+            ));
         }
     }
     None
@@ -277,11 +288,18 @@ fn try_indent_flexible(content: &str, old_text: &str, new_text: &str) -> Option<
     for (i, cl) in content_lines.iter().enumerate() {
         if cl.trim_start() == stripped_first
             && i + old_lines.len() <= content_lines.len()
-            && old_lines.iter().enumerate().all(|(j, ol)| {
-                content_lines[i + j].trim_start() == ol.trim_start()
-            })
+            && old_lines
+                .iter()
+                .enumerate()
+                .all(|(j, ol)| content_lines[i + j].trim_start() == ol.trim_start())
         {
-            return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
+            return Some(replace_lines(
+                content,
+                &content_lines,
+                i,
+                old_lines.len(),
+                new_text,
+            ));
         }
     }
     None
@@ -305,11 +323,18 @@ fn try_unicode_normalized(content: &str, old_text: &str, new_text: &str) -> Opti
         for (i, cl) in content_lines.iter().enumerate() {
             if normalize_unicode(cl) == norm_first
                 && i + old_lines.len() <= content_lines.len()
-                && old_lines.iter().enumerate().all(|(j, ol)| {
-                    normalize_unicode(content_lines[i + j]) == normalize_unicode(ol)
-                })
+                && old_lines
+                    .iter()
+                    .enumerate()
+                    .all(|(j, ol)| normalize_unicode(content_lines[i + j]) == normalize_unicode(ol))
             {
-                return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
+                return Some(replace_lines(
+                    content,
+                    &content_lines,
+                    i,
+                    old_lines.len(),
+                    new_text,
+                ));
             }
         }
     }
@@ -319,7 +344,10 @@ fn try_unicode_normalized(content: &str, old_text: &str, new_text: &str) -> Opti
 /// 戦略5: エスケープ正規化（\n→改行、\t→タブ）
 fn try_escape_normalized(content: &str, old_text: &str, new_text: &str) -> Option<String> {
     let unescaped = old_text.replace("\\n", "\n").replace("\\t", "\t");
-    if unescaped != old_text && content.contains(&unescaped) && content.matches(&unescaped).count() == 1 {
+    if unescaped != old_text
+        && content.contains(&unescaped)
+        && content.matches(&unescaped).count() == 1
+    {
         Some(content.replacen(&unescaped, new_text, 1))
     } else {
         None
@@ -356,7 +384,13 @@ fn try_block_anchor(content: &str, old_text: &str, new_text: &str) -> Option<Str
             })
             .count();
         if matched >= threshold {
-            return Some(replace_lines(content, &content_lines, i, old_lines.len(), new_text));
+            return Some(replace_lines(
+                content,
+                &content_lines,
+                i,
+                old_lines.len(),
+                new_text,
+            ));
         }
     }
     None
@@ -395,7 +429,13 @@ fn normalize_unicode(s: &str) -> String {
 }
 
 /// 行置換ヘルパー（末尾改行を保持）
-fn replace_lines(content: &str, content_lines: &[&str], start: usize, count: usize, new_text: &str) -> String {
+fn replace_lines(
+    content: &str,
+    content_lines: &[&str],
+    start: usize,
+    count: usize,
+    new_text: &str,
+) -> String {
     let mut result_lines = Vec::new();
     result_lines.extend_from_slice(&content_lines[..start]);
     for new_line in new_text.lines() {
@@ -429,7 +469,10 @@ mod tests {
         let tool = FileReadTool;
         let result = tool.call(serde_json::json!({"path": path})).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("hello world"), "出力に内容が含まれること");
+        assert!(
+            result.output.contains("hello world"),
+            "出力に内容が含まれること"
+        );
 
         fs::remove_file(&path).ok();
     }
@@ -610,7 +653,9 @@ mod tests {
         let path = temp_path("offset");
         fs::write(&path, "a\nb\nc\nd\ne").unwrap();
         let tool = FileReadTool;
-        let result = tool.call(serde_json::json!({"path": &path, "offset": 1, "limit": 2})).unwrap();
+        let result = tool
+            .call(serde_json::json!({"path": &path, "offset": 1, "limit": 2}))
+            .unwrap();
         assert!(result.output.contains("b"), "offset=1でbから開始");
         assert!(result.output.contains("c"), "limit=2でcまで含む");
         assert!(!result.output.contains("| a"), "aは含まない");

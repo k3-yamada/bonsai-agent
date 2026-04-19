@@ -1,4 +1,4 @@
-use crate::observability::logger::{log_event, LogLevel};
+use crate::observability::logger::{LogLevel, log_event};
 use std::collections::HashMap;
 
 use crate::agent::conversation::Message;
@@ -13,7 +13,6 @@ pub enum ModelSelection {
     /// 高品質マルチモーダル（~8GB）
     Gemma4E4B,
 }
-
 
 /// パイプラインステージ（Advisor Tool パターン）
 /// 各ステージで異なるプロンプト/モデル戦略を適用
@@ -66,12 +65,10 @@ pub struct AdvisorConfig {
 }
 
 /// デフォルトの完了前自己検証プロンプト
-pub const DEFAULT_VERIFICATION_PROMPT: &str =
-    "回答前に確認: 目標を達成できていますか？不足があれば追加してください。問題なければ回答に[検証済]を含めてください。";
+pub const DEFAULT_VERIFICATION_PROMPT: &str = "回答前に確認: 目標を達成できていますか？不足があれば追加してください。問題なければ回答に[検証済]を含めてください。";
 
 /// デフォルトの停滞時再計画プロンプト
-pub const DEFAULT_REPLAN_PROMPT: &str =
-    "停滞しています。これまでの方法ではうまくいきません。\n<think>内で別の方法を計画:\n1. 失敗の原因\n2. 別のツール/手順\n3. 次にやること";
+pub const DEFAULT_REPLAN_PROMPT: &str = "停滞しています。これまでの方法ではうまくいきません。\n<think>内で別の方法を計画:\n1. 失敗の原因\n2. 別のツール/手順\n3. 次にやること";
 
 /// アドバイザー呼び出しの目的
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +78,6 @@ pub enum AdvisorRole {
     /// 停滞時の再計画
     Replan,
 }
-
 
 /// アドバイザーバックエンド選択
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -104,7 +100,6 @@ impl AdvisorBackend {
         }
     }
 }
-
 
 /// リトライポリシー（Hermes Agent/OpenClaw知見）
 #[derive(Debug, Clone)]
@@ -138,12 +133,18 @@ pub enum RetryErrorKind {
 /// エラーメッセージからリトライ可否を分類
 pub fn classify_advisor_error(error_msg: &str) -> RetryErrorKind {
     let lower = error_msg.to_lowercase();
-    if lower.contains("timeout") || lower.contains("429") || lower.contains("503")
-        || lower.contains("rate limit") || lower.contains("too many")
+    if lower.contains("timeout")
+        || lower.contains("429")
+        || lower.contains("503")
+        || lower.contains("rate limit")
+        || lower.contains("too many")
     {
         RetryErrorKind::Retryable
-    } else if lower.contains("401") || lower.contains("403") || lower.contains("auth")
-        || lower.contains("unauthorized") || lower.contains("forbidden")
+    } else if lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("auth")
+        || lower.contains("unauthorized")
+        || lower.contains("forbidden")
     {
         RetryErrorKind::AuthFailure
     } else {
@@ -166,7 +167,9 @@ impl AdvisorRole {
     fn user_prompt(self, task_context: &str) -> String {
         match self {
             Self::Verification => format!("タスク: {task_context}\n\n上記の確認事項を簡潔に。"),
-            Self::Replan => format!("タスク: {task_context}\n\n停滞しています。別の方法を提案してください。"),
+            Self::Replan => {
+                format!("タスク: {task_context}\n\n停滞しています。別の方法を提案してください。")
+            }
         }
     }
 }
@@ -229,14 +232,34 @@ impl AdvisorConfig {
     pub fn log_startup(&self) {
         if let Some(endpoint) = &self.api_endpoint {
             let model = self.api_model.as_deref().unwrap_or("gpt-4o-mini");
-            let key_status = if self.api_key.is_some() { "設定済" } else { "未設定(env検出)" };
-            log_event(LogLevel::Info, "advisor", &format!("リモートモード: endpoint={}, model={}, key={}, max_uses={}, timeout={}s",
-                endpoint, model, key_status, self.max_uses, self.timeout_secs
-            ));
+            let key_status = if self.api_key.is_some() {
+                "設定済"
+            } else {
+                "未設定(env検出)"
+            };
+            log_event(
+                LogLevel::Info,
+                "advisor",
+                &format!(
+                    "リモートモード: endpoint={}, model={}, key={}, max_uses={}, timeout={}s",
+                    endpoint, model, key_status, self.max_uses, self.timeout_secs
+                ),
+            );
         } else if self.backend == AdvisorBackend::ClaudeCode {
-            log_event(LogLevel::Info, "advisor", &format!("Claude Codeモード (max_uses={}, claude -p経由)", self.max_uses));
+            log_event(
+                LogLevel::Info,
+                "advisor",
+                &format!(
+                    "Claude Codeモード (max_uses={}, claude -p経由)",
+                    self.max_uses
+                ),
+            );
         } else {
-            log_event(LogLevel::Info, "advisor", &format!("ローカルモード (max_uses={}, 検証+再計画)", self.max_uses));
+            log_event(
+                LogLevel::Info,
+                "advisor",
+                &format!("ローカルモード (max_uses={}, 検証+再計画)", self.max_uses),
+            );
         }
     }
 
@@ -354,7 +377,6 @@ impl AdvisorConfig {
             }
         }
     }
-
 }
 
 /// タスクコンテキスト（モデル選択の入力）
@@ -624,7 +646,10 @@ mod tests {
             verification_prompt: "カスタム検証メッセージ".to_string(),
             ..Default::default()
         };
-        assert_eq!(config.build_verification_prompt(""), "カスタム検証メッセージ");
+        assert_eq!(
+            config.build_verification_prompt(""),
+            "カスタム検証メッセージ"
+        );
     }
 
     #[test]
@@ -753,9 +778,7 @@ mod tests {
     fn test_cache_clone_independence() {
         // クローン後の変更が元に影響しないこと（セッション境界の独立性）
         let mut original = AdvisorConfig::default();
-        original
-            .cache
-            .insert(0, "shared at clone time".to_string());
+        original.cache.insert(0, "shared at clone time".to_string());
         let mut cloned = original.clone();
         cloned.cache.insert(1, "only in clone".to_string());
         assert!(!original.cache.contains_key(&1));

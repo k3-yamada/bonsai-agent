@@ -267,7 +267,6 @@ impl<'a> EvolutionEngine<'a> {
         Ok(applied)
     }
 
-
     /// Deep分析: dreams.rsの統計メソッドを使い、フルレポートを生成
     /// dream_deep()の機能を吸収し、EvolutionEngine経由で統一アクセスを提供
     pub fn analyze_deep(&self, days: i64) -> Result<crate::memory::dreams::DreamReport> {

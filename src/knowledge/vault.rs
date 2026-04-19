@@ -99,10 +99,7 @@ impl Vault {
             if cat.is_rule()
                 && let Ok(content) = self.read_category(cat)
             {
-                let lines: Vec<&str> = content
-                    .lines()
-                    .filter(|l| l.starts_with("- ["))
-                    .collect();
+                let lines: Vec<&str> = content.lines().filter(|l| l.starts_with("- [")).collect();
                 // 最新N件（末尾から取得）
                 for line in lines.iter().rev().take(max_per_category) {
                     rules.push(line.to_string());
@@ -113,16 +110,17 @@ impl Vault {
     }
 
     /// タスクコンテキストに関連するDocsカテゴリのみ返す
-    pub fn read_docs_for_context(&self, task_context: &str, max_per_category: usize) -> Result<Vec<String>> {
+    pub fn read_docs_for_context(
+        &self,
+        task_context: &str,
+        max_per_category: usize,
+    ) -> Result<Vec<String>> {
         use crate::knowledge::extractor::StockCategory;
         let relevant_cats = StockCategory::docs_for_task_context(task_context);
         let mut docs = Vec::new();
         for cat in &relevant_cats {
             if let Ok(content) = self.read_category(cat) {
-                let lines: Vec<&str> = content
-                    .lines()
-                    .filter(|l| l.starts_with("- ["))
-                    .collect();
+                let lines: Vec<&str> = content.lines().filter(|l| l.starts_with("- [")).collect();
                 for line in lines.iter().rev().take(max_per_category) {
                     docs.push(line.to_string());
                 }
@@ -202,21 +200,33 @@ mod tests {
             category: StockCategory::Decision,
             content: "Rustを採用することにした".into(),
             source: "s1".into(),
-        }).unwrap();
+        })
+        .unwrap();
         v.append(&StockEntry {
             category: StockCategory::Pattern,
             content: "TDDパターンを使う".into(),
             source: "s1".into(),
-        }).unwrap();
+        })
+        .unwrap();
         v.append(&StockEntry {
             category: StockCategory::Fact,
             content: "1ビットLLMは1.28GBである".into(),
             source: "s1".into(),
-        }).unwrap();
+        })
+        .unwrap();
         let rules = v.read_rules(5).unwrap();
-        assert!(rules.iter().any(|r| r.contains("Rust")), "Decision is rule: {rules:?}");
-        assert!(rules.iter().any(|r| r.contains("TDD")), "Pattern is rule: {rules:?}");
-        assert!(!rules.iter().any(|r| r.contains("1.28GB")), "Fact is NOT rule: {rules:?}");
+        assert!(
+            rules.iter().any(|r| r.contains("Rust")),
+            "Decision is rule: {rules:?}"
+        );
+        assert!(
+            rules.iter().any(|r| r.contains("TDD")),
+            "Pattern is rule: {rules:?}"
+        );
+        assert!(
+            !rules.iter().any(|r| r.contains("1.28GB")),
+            "Fact is NOT rule: {rules:?}"
+        );
         std::fs::remove_dir_all(v.root()).ok();
     }
 
@@ -227,18 +237,28 @@ mod tests {
             category: StockCategory::Insight,
             content: "ureqではSSLが動かないとわかった".into(),
             source: "s1".into(),
-        }).unwrap();
+        })
+        .unwrap();
         v.append(&StockEntry {
             category: StockCategory::Fact,
             content: "仕様として1ビットは制約がある".into(),
             source: "s1".into(),
-        }).unwrap();
+        })
+        .unwrap();
         // エラー関連コンテキスト → Insightが含まれる
-        let docs = v.read_docs_for_context("エラーの原因を調べたい", 5).unwrap();
-        assert!(docs.iter().any(|d| d.contains("SSL")), "Insight included: {docs:?}");
+        let docs = v
+            .read_docs_for_context("エラーの原因を調べたい", 5)
+            .unwrap();
+        assert!(
+            docs.iter().any(|d| d.contains("SSL")),
+            "Insight included: {docs:?}"
+        );
         // 仕様関連コンテキスト → Factが含まれる
         let docs2 = v.read_docs_for_context("仕様を確認したい", 5).unwrap();
-        assert!(docs2.iter().any(|d| d.contains("1ビット")), "Fact included: {docs2:?}");
+        assert!(
+            docs2.iter().any(|d| d.contains("1ビット")),
+            "Fact included: {docs2:?}"
+        );
         // 無関係コンテキスト → 空
         let docs3 = v.read_docs_for_context("hello world", 5).unwrap();
         assert!(docs3.is_empty(), "No docs: {docs3:?}");

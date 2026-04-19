@@ -2,8 +2,8 @@ use anyhow::Result;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tools::permission::Permission;
 use crate::tools::ToolResult;
+use crate::tools::permission::Permission;
 
 /// 型駆動ツール定義トレイト
 /// 構造体でパラメータを定義し、スキーマ自動生成+型安全パースを実現
@@ -149,7 +149,11 @@ mod tests {
         let schema = simplify_schema::<DummyArgs>();
         let required = schema.get("required").and_then(|v| v.as_array());
         assert!(required.is_some());
-        let req_strs: Vec<&str> = required.unwrap().iter().filter_map(|v| v.as_str()).collect();
+        let req_strs: Vec<&str> = required
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
         assert!(req_strs.contains(&"query"));
     }
 

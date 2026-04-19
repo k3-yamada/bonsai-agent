@@ -55,29 +55,42 @@ impl StockCategory {
         let ctx = task_context.to_lowercase();
 
         // Fact: 技術的事実が必要な場面
-        if ctx.contains("仕様") || ctx.contains("制約") || ctx.contains("spec")
-            || ctx.contains("fact") || ctx.contains("情報")
+        if ctx.contains("仕様")
+            || ctx.contains("制約")
+            || ctx.contains("spec")
+            || ctx.contains("fact")
+            || ctx.contains("情報")
         {
             cats.push(Self::Fact);
         }
 
         // Preference: 設定・好みが関係する場面
-        if ctx.contains("設定") || ctx.contains("好") || ctx.contains("config")
-            || ctx.contains("prefer") || ctx.contains("スタイル")
+        if ctx.contains("設定")
+            || ctx.contains("好")
+            || ctx.contains("config")
+            || ctx.contains("prefer")
+            || ctx.contains("スタイル")
         {
             cats.push(Self::Preference);
         }
 
         // Insight: 学び・発見が参考になる場面
-        if ctx.contains("なぜ") || ctx.contains("原因") || ctx.contains("debug")
-            || ctx.contains("問題") || ctx.contains("エラー") || ctx.contains("学")
+        if ctx.contains("なぜ")
+            || ctx.contains("原因")
+            || ctx.contains("debug")
+            || ctx.contains("問題")
+            || ctx.contains("エラー")
+            || ctx.contains("学")
         {
             cats.push(Self::Insight);
         }
 
         // Todo: タスク管理
-        if ctx.contains("todo") || ctx.contains("やる") || ctx.contains("次")
-            || ctx.contains("残り") || ctx.contains("計画")
+        if ctx.contains("todo")
+            || ctx.contains("やる")
+            || ctx.contains("次")
+            || ctx.contains("残り")
+            || ctx.contains("計画")
         {
             cats.push(Self::Todo);
         }

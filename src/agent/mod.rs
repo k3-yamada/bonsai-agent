@@ -13,5 +13,5 @@ pub mod validate;
 pub mod event_store;
 pub mod middleware;
 
-pub mod tool_exec;
 pub mod context_inject;
+pub mod tool_exec;

@@ -278,7 +278,10 @@ mod tests {
     #[test]
     fn test_schema_v3_contains_events_table() {
         assert!(SCHEMA_V3.contains("events"), "V3にeventsテーブルが必要");
-        assert!(SCHEMA_V3.contains("idx_events_session"), "V3にセッションインデックスが必要");
+        assert!(
+            SCHEMA_V3.contains("idx_events_session"),
+            "V3にセッションインデックスが必要"
+        );
     }
 
     #[test]
@@ -295,15 +298,33 @@ mod tests {
 
     #[test]
     fn test_schema_v4_contains_checkpoints_table() {
-        assert!(SCHEMA_V4.contains("checkpoints"), "V4にcheckpointsテーブルが必要");
-        assert!(SCHEMA_V4.contains("idx_checkpoints_session"), "V4にセッションインデックスが必要");
+        assert!(
+            SCHEMA_V4.contains("checkpoints"),
+            "V4にcheckpointsテーブルが必要"
+        );
+        assert!(
+            SCHEMA_V4.contains("idx_checkpoints_session"),
+            "V4にセッションインデックスが必要"
+        );
     }
 
     #[test]
     fn test_schema_v5_contains_knowledge_graph_tables() {
-        assert!(SCHEMA_V5.contains("knowledge_nodes"), "V5にknowledge_nodesテーブルが必要");
-        assert!(SCHEMA_V5.contains("knowledge_edges"), "V5にknowledge_edgesテーブルが必要");
-        assert!(SCHEMA_V5.contains("idx_knowledge_edges_source"), "V5にソースインデックスが必要");
-        assert!(SCHEMA_V5.contains("idx_knowledge_edges_target"), "V5にターゲットインデックスが必要");
+        assert!(
+            SCHEMA_V5.contains("knowledge_nodes"),
+            "V5にknowledge_nodesテーブルが必要"
+        );
+        assert!(
+            SCHEMA_V5.contains("knowledge_edges"),
+            "V5にknowledge_edgesテーブルが必要"
+        );
+        assert!(
+            SCHEMA_V5.contains("idx_knowledge_edges_source"),
+            "V5にソースインデックスが必要"
+        );
+        assert!(
+            SCHEMA_V5.contains("idx_knowledge_edges_target"),
+            "V5にターゲットインデックスが必要"
+        );
     }
 }

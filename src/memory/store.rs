@@ -469,10 +469,13 @@ mod tests {
     fn t_purge_all_expired() {
         let store = test_store();
         store.save_memory("test", "fact", &[]).unwrap();
-        store.conn().execute(
-            "UPDATE memories SET expires_at = '2020-01-01T00:00:00Z' WHERE content = 'test'",
-            [],
-        ).unwrap();
+        store
+            .conn()
+            .execute(
+                "UPDATE memories SET expires_at = '2020-01-01T00:00:00Z' WHERE content = 'test'",
+                [],
+            )
+            .unwrap();
         let deleted = store.purge_all_expired().unwrap();
         assert_eq!(deleted, 1);
     }
