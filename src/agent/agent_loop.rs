@@ -882,10 +882,10 @@ fn check_invariants(session: &Session, task_context: &str) -> Vec<String> {
             violations.push(format!("ツール成功率が低い: {:.0}%", rate * 100.0));
         }
     }
-    if let Some(answer) = session.messages.iter().rev().find(|m| m.role == Role::Assistant) {
-        if answer.content.len() < 10 && task_context.len() > 50 {
-            violations.push("回答が短すぎる可能性".to_string());
-        }
+    if let Some(answer) = session.messages.iter().rev().find(|m| m.role == Role::Assistant)
+        && answer.content.len() < 10 && task_context.len() > 50
+    {
+        violations.push("回答が短すぎる可能性".to_string());
     }
     violations
 }
