@@ -219,7 +219,7 @@ pub struct BenchmarkSuite {
 }
 
 impl BenchmarkSuite {
-    /// デフォルトのベンチマークタスクセット（12タスク）
+    /// デフォルトのベンチマークタスクセット（16タスク）
     pub fn default_tasks() -> Self {
         Self {
             tasks: vec![
@@ -326,6 +326,42 @@ impl BenchmarkSuite {
                     id: "summarize_agent_loop".into(),
                     name: "要約".into(),
                     input: "src/agent/agent_loop.rsの最初の50行を要約して".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![],
+                    max_iterations: 4,
+                    category: TaskCategory::Summarization,
+                },
+                BenchmarkTask {
+                    id: "repo_structure".into(),
+                    name: "リポジトリ構造把握".into(),
+                    input: "このプロジェクトのsrc/ディレクトリにあるRustファイルの数を教えて".into(),
+                    expected_tools: vec!["repo_map".into()],
+                    expected_keywords: vec![],
+                    max_iterations: 3,
+                    category: TaskCategory::ToolUse,
+                },
+                BenchmarkTask {
+                    id: "multi_file_compare".into(),
+                    name: "複数ファイル比較".into(),
+                    input: "src/tools/file.rsとsrc/tools/shell.rsの行数をそれぞれ教えて".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![],
+                    max_iterations: 5,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "conditional_file_op".into(),
+                    name: "条件付きファイル操作".into(),
+                    input: "/tmp/bonsai_bench_test.txt が存在するか確認し、存在しなければ'benchmark ok'と書き込んで".into(),
+                    expected_tools: vec!["file_read".into(), "file_write".into()],
+                    expected_keywords: vec!["benchmark".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "code_review".into(),
+                    name: "コードレビュー".into(),
+                    input: "src/tools/arxiv.rsのコードを読んで、改善点があれば指摘して".into(),
                     expected_tools: vec!["file_read".into()],
                     expected_keywords: vec![],
                     max_iterations: 4,
@@ -638,7 +674,7 @@ mod tests {
     #[test]
     fn test_default_tasks_count() {
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 12);
+        assert_eq!(suite.tasks.len(), 16);
     }
 
     #[test]
