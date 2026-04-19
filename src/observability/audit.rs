@@ -225,6 +225,77 @@ pub struct AdvisorStats {
     pub avg_remote_duration_ms: u64,
 }
 
+/// タスク完了統計（プロダクトメトリクス第3層）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskCompleteStats {
+    /// 完了タスク総数
+    pub total_completed: usize,
+    /// 平均ステップ数
+    pub avg_steps: f64,
+    /// 平均ツール成功率（0.0–1.0）
+    pub avg_tool_success_rate: f64,
+    /// 平均所要時間（ms）
+    pub avg_duration_ms: f64,
+    /// 直近タスクサマリー（最大5件）
+    pub recent_summaries: Vec<String>,
+}
+
+impl<'a> AuditLog<'a> {
+    /// TaskComplete監査ログからタスク完了統計を集計
+    pub fn task_complete_stats(&self, session_id: Option<&str>) -> Result<TaskCompleteStats> {
+        let sql = match session_id {
+            Some(_) => {
+                "SELECT action_data FROM audit_log
+                 WHERE action_type = 'task_complete' AND session_id = ?1
+                 ORDER BY id DESC"
+            }
+            None => {
+                "SELECT action_data FROM audit_log
+                 WHERE action_type = 'task_complete'
+                 ORDER BY id DESC"
+            }
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows: Vec<String> = match session_id {
+            Some(sid) => stmt
+                .query_map(params![sid], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            None => stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+
+        let mut stats = TaskCompleteStats::default();
+        let mut steps_sum: u64 = 0;
+        let mut rate_sum: f64 = 0.0;
+        let mut duration_sum: u64 = 0;
+
+        for data in &rows {
+            let v: serde_json::Value = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            stats.total_completed += 1;
+            steps_sum += v["total_steps"].as_u64().unwrap_or(0);
+            rate_sum += v["tool_success_rate"].as_f64().unwrap_or(0.0);
+            duration_sum += v["duration_ms"].as_u64().unwrap_or(0);
+            if stats.recent_summaries.len() < 5 {
+                if let Some(s) = v["task_summary"].as_str() {
+                    stats.recent_summaries.push(s.to_string());
+                }
+            }
+        }
+
+        if stats.total_completed > 0 {
+            let n = stats.total_completed as f64;
+            stats.avg_steps = steps_sum as f64 / n;
+            stats.avg_tool_success_rate = rate_sum / n;
+            stats.avg_duration_ms = duration_sum as f64 / n;
+        }
+        Ok(stats)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +640,88 @@ mod tests {
         assert_eq!(entries.len(), 3);
         let last_data: serde_json::Value = serde_json::from_str(&entries[2].action_data).unwrap();
         assert_eq!(last_data["consecutive_failures"], 3);
+    }
+
+    // --- TaskComplete統計テスト ---
+
+    #[test]
+    fn test_task_complete_stats_empty() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        let stats = audit.task_complete_stats(None).unwrap();
+        assert_eq!(stats.total_completed, 0);
+        assert_eq!(stats.avg_steps, 0.0);
+        assert!(stats.recent_summaries.is_empty());
+    }
+
+    #[test]
+    fn test_task_complete_stats_aggregates() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        audit
+            .log(
+                Some("s1"),
+                &AuditAction::TaskComplete {
+                    task_summary: "FizzBuzz実装".to_string(),
+                    total_steps: 4,
+                    tool_success_rate: 0.8,
+                    duration_ms: 2000,
+                },
+            )
+            .unwrap();
+        audit
+            .log(
+                Some("s1"),
+                &AuditAction::TaskComplete {
+                    task_summary: "ファイル編集".to_string(),
+                    total_steps: 6,
+                    tool_success_rate: 1.0,
+                    duration_ms: 4000,
+                },
+            )
+            .unwrap();
+
+        let stats = audit.task_complete_stats(None).unwrap();
+        assert_eq!(stats.total_completed, 2);
+        assert!((stats.avg_steps - 5.0).abs() < 0.01);
+        assert!((stats.avg_tool_success_rate - 0.9).abs() < 0.01);
+        assert!((stats.avg_duration_ms - 3000.0).abs() < 0.01);
+        assert_eq!(stats.recent_summaries.len(), 2);
+    }
+
+    #[test]
+    fn test_task_complete_stats_filters_by_session() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        audit
+            .log(
+                Some("s-A"),
+                &AuditAction::TaskComplete {
+                    task_summary: "タスクA".to_string(),
+                    total_steps: 3,
+                    tool_success_rate: 0.9,
+                    duration_ms: 1000,
+                },
+            )
+            .unwrap();
+        audit
+            .log(
+                Some("s-B"),
+                &AuditAction::TaskComplete {
+                    task_summary: "タスクB".to_string(),
+                    total_steps: 7,
+                    tool_success_rate: 0.5,
+                    duration_ms: 5000,
+                },
+            )
+            .unwrap();
+
+        let stats_a = audit.task_complete_stats(Some("s-A")).unwrap();
+        assert_eq!(stats_a.total_completed, 1);
+        assert!((stats_a.avg_steps - 3.0).abs() < 0.01);
+
+        let stats_b = audit.task_complete_stats(Some("s-B")).unwrap();
+        assert_eq!(stats_b.total_completed, 1);
+        assert!((stats_b.avg_steps - 7.0).abs() < 0.01);
     }
 }

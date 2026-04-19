@@ -682,6 +682,27 @@ fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
         }
     }
 
+    // --- タスク完了統計 ---
+    let task_stats = audit.task_complete_stats(None)?;
+    println!("\n✅ タスク完了統計:");
+    if task_stats.total_completed == 0 {
+        println!("  (完了タスクなし)");
+    } else {
+        println!(
+            "  完了数: {}  平均ステップ: {:.1}  平均成功率: {:.0}%  平均所要: {:.0} ms",
+            task_stats.total_completed,
+            task_stats.avg_steps,
+            task_stats.avg_tool_success_rate * 100.0,
+            task_stats.avg_duration_ms,
+        );
+        if !task_stats.recent_summaries.is_empty() {
+            println!("  ─── 直近タスク ───");
+            for summary in &task_stats.recent_summaries {
+                println!("  ・{}", summary.chars().take(60).collect::<String>());
+            }
+        }
+    }
+
     // --- 監査ログ概要 ---
     let audit_count = audit.count()?;
     println!("\n📋 監査ログ: {} 件", audit_count);
