@@ -362,7 +362,50 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
     tools.register(Box::new(WebFetchTool));
     tools.register(Box::new(ArxivTool));
     tools.register(Box::new(RepoMapTool));
+
+    // MCPサーバー起動・ツール登録
+    for server_cfg in &app_config.mcp.servers {
+        match setup_mcp_server(server_cfg) {
+            Ok(mcp_tools) => {
+                let count = mcp_tools.len();
+                for t in mcp_tools {
+                    tools.register(t);
+                }
+                crate::observability::logger::log_event(
+                    crate::observability::logger::LogLevel::Info,
+                    "mcp",
+                    &format!("MCPサーバー '{}' 起動: {}ツール登録", server_cfg.name, count),
+                );
+            }
+            Err(e) => {
+                crate::observability::logger::log_event(
+                    crate::observability::logger::LogLevel::Warn,
+                    "mcp",
+                    &format!("MCPサーバー '{}' スキップ: {e}", server_cfg.name),
+                );
+            }
+        }
+    }
+
+    // ツール数上限警告
+    tools.warn_if_exceeded(app_config.agent.max_tools_in_context);
+
     tools
+}
+
+/// MCPサーバーを起動しツールリストを取得
+fn setup_mcp_server(cfg: &crate::tools::mcp_client::McpServerConfig) -> anyhow::Result<Vec<Box<dyn crate::tools::Tool>>> {
+    use crate::tools::mcp_client::{McpConnection, McpToolWrapper};
+    use std::sync::{Arc, Mutex};
+
+    let mut conn = McpConnection::spawn(cfg)?;
+    let tool_infos = conn.list_tools()?;
+    let connection = Arc::new(Mutex::new(conn));
+    let tools: Vec<Box<dyn crate::tools::Tool>> = tool_infos
+        .into_iter()
+        .map(|info| Box::new(McpToolWrapper::new(info, &cfg.name, connection.clone())) as Box<dyn crate::tools::Tool>)
+        .collect();
+    Ok(tools)
 }
 
 /// バックエンド生成（モック/実機の分岐を統合）
