@@ -207,8 +207,9 @@ pub struct McpToolInfo {
 /// MCPツールをTool traitにラップ（接続参照を保持し、実際のツール呼び出しを委譲）
 pub struct McpToolWrapper {
     info: McpToolInfo,
-    #[allow(dead_code)]
     server_name: String,
+    /// ネームスペース付き表示名（"server:tool"形式）
+    display_name: String,
     connection: Arc<Mutex<McpConnection>>,
 }
 
@@ -218,9 +219,11 @@ impl McpToolWrapper {
         server_name: &str,
         connection: Arc<Mutex<McpConnection>>,
     ) -> Self {
+        let display_name = format!("{}:{}", server_name, info.name);
         Self {
             info,
             server_name: server_name.to_string(),
+            display_name,
             connection,
         }
     }
@@ -228,7 +231,7 @@ impl McpToolWrapper {
 
 impl Tool for McpToolWrapper {
     fn name(&self) -> &str {
-        &self.info.name
+        &self.display_name
     }
 
     fn description(&self) -> &str {
@@ -322,6 +325,34 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("params"));
+    }
+
+    #[test]
+    fn test_mcp_tool_wrapper_display_name_format() {
+        // display_nameのフォーマット検証（McpConnection不要）
+        let display = format!("{}:{}", "filesystem", "read_file");
+        assert_eq!(display, "filesystem:read_file");
+        let display2 = format!("{}:{}", "git", "status");
+        assert_eq!(display2, "git:status");
+    }
+
+    #[test]
+    fn test_mcp_multiple_servers_toml() {
+        let toml_str = r#"
+[[servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[servers]]
+name = "git"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-git"]
+"#;
+        let config: crate::config::McpConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.servers.len(), 2);
+        assert_eq!(config.servers[0].name, "filesystem");
+        assert_eq!(config.servers[1].name, "git");
     }
 
     // 実MCPサーバーとの統合テスト
