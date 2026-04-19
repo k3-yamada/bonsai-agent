@@ -3,7 +3,10 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::tools::permission::Permission;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::typed::TypedTool;
+use crate::tools::ToolResult;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// Git操作ツール
 pub struct GitTool;
@@ -30,61 +33,27 @@ impl GitTool {
     }
 }
 
-impl Tool for GitTool {
-    fn name(&self) -> &str {
-        "git"
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct GitArgs {
+    /// Gitサブコマンド（status/diff/log/commit/add/branch）
+    subcommand: String,
+    /// 追加引数
+    args: Option<Vec<String>>,
+    /// コミットメッセージ（commitサブコマンド用）
+    message: Option<String>,
+}
 
-    fn description(&self) -> &str {
-        "Gitリポジトリを操作する。subcommandパラメータにstatus/diff/log/commit/add/branchを指定。commitにはmessageパラメータも必要。"
-    }
+impl TypedTool for GitTool {
+    type Args = GitArgs;
+    const NAME: &'static str = "git";
+    const DESCRIPTION: &'static str = "Gitリポジトリを操作する。subcommandパラメータにstatus/diff/log/commit/add/branchを指定。commitにはmessageパラメータも必要。";
+    const PERMISSION: Permission = Permission::Confirm;
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "subcommand": {
-                    "type": "string",
-                    "enum": ["status", "diff", "log", "commit", "add", "branch"],
-                    "description": "Gitサブコマンド"
-                },
-                "args": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "追加引数"
-                },
-                "message": {
-                    "type": "string",
-                    "description": "コミットメッセージ（commitサブコマンド用）"
-                }
-            },
-            "required": ["subcommand"]
-        })
-    }
+    fn execute(&self, args: GitArgs) -> Result<ToolResult> {
+        let subcommand = &args.subcommand;
+        let extra_args = args.args.unwrap_or_default();
 
-    fn permission(&self) -> Permission {
-        // 読み取り系はAutoだが、commit等の書き込み系はConfirm
-        // ここではConfirmをデフォルトにし、agent_loopで読み取り系はバリデーションで許可
-        Permission::Confirm
-    }
-
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let subcommand = args
-            .get("subcommand")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'subcommand' パラメータが必要です"))?;
-
-        let extra_args: Vec<String> = args
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        match subcommand {
+        match subcommand.as_str() {
             "status" => Self::run_git(&["status", "--short"]),
             "diff" => {
                 let mut git_args = vec!["diff"];
@@ -99,10 +68,7 @@ impl Tool for GitTool {
                 Self::run_git(&git_args)
             }
             "commit" => {
-                let message = args
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("bonsai: auto commit");
+                let message = args.message.as_deref().unwrap_or("bonsai: auto commit");
                 Self::run_git(&["commit", "-m", message])
             }
             "add" => {
@@ -127,6 +93,7 @@ impl Tool for GitTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
 
     #[test]
     fn test_git_status() {

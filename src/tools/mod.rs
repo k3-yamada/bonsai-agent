@@ -4,6 +4,7 @@ pub mod git;
 pub mod hooks;
 pub mod mcp_client;
 pub mod permission;
+pub mod typed;
 pub mod plugin;
 pub mod repomap;
 pub mod sandbox;

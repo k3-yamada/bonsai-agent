@@ -1,31 +1,29 @@
 use crate::tools::permission::Permission;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::typed::TypedTool;
+use crate::tools::ToolResult;
 use anyhow::Result;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ArxivArgs {
+    /// 検索クエリ
+    query: String,
+}
+
 pub struct ArxivTool;
-impl Tool for ArxivTool {
-    fn name(&self) -> &str {
-        "arxiv_search"
-    }
-    fn description(&self) -> &str {
-        "arxiv論文を検索する。queryパラメータに検索クエリを指定。"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]})
-    }
-    fn permission(&self) -> Permission {
-        Permission::Auto
-    }
-    fn is_read_only(&self) -> bool {
-        true
-    }
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'query'が必要"))?;
-        match crate::memory::evolution::search_arxiv(query, 5) {
+
+impl TypedTool for ArxivTool {
+    type Args = ArxivArgs;
+    const NAME: &'static str = "arxiv_search";
+    const DESCRIPTION: &'static str = "arxiv論文を検索する。queryパラメータに検索クエリを指定。";
+    const PERMISSION: Permission = Permission::Auto;
+    const READ_ONLY: bool = true;
+
+    fn execute(&self, args: ArxivArgs) -> Result<ToolResult> {
+        match crate::memory::evolution::search_arxiv(&args.query, 5) {
             Ok(entries) if entries.is_empty() => Ok(ToolResult {
-                output: format!("「{query}」の論文なし"),
+                output: format!("「{}」の論文なし", args.query),
                 success: true,
             }),
             Ok(entries) => {
@@ -45,17 +43,29 @@ impl Tool for ArxivTool {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
+
     #[test]
     fn t_meta() {
         assert_eq!(ArxivTool.name(), "arxiv_search");
+        assert!(ArxivTool.is_read_only());
     }
+
     #[test]
     fn t_miss() {
         assert!(ArxivTool.call(serde_json::json!({})).is_err());
     }
+
+    #[test]
+    fn t_schema_has_query() {
+        let schema = ArxivTool.parameters_schema();
+        assert!(schema.get("properties").unwrap().get("query").is_some());
+    }
+
     #[test]
     #[ignore]
     fn t_live() {

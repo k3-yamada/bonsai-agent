@@ -1,43 +1,29 @@
 use anyhow::Result;
 
 use crate::tools::permission::Permission;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::typed::TypedTool;
+use crate::tools::ToolResult;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// Web検索ツール（DuckDuckGo Instant Answer API、API鍵不要）
 pub struct WebSearchTool;
 
-impl Tool for WebSearchTool {
-    fn name(&self) -> &str {
-        "web_search"
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct WebSearchArgs {
+    /// 検索クエリ
+    query: String,
+}
 
-    fn description(&self) -> &str {
-        "Webを検索する。queryパラメータに検索クエリを指定。DuckDuckGo Instant Answer APIを使用。"
-    }
+impl TypedTool for WebSearchTool {
+    type Args = WebSearchArgs;
+    const NAME: &'static str = "web_search";
+    const DESCRIPTION: &'static str = "Webを検索する。queryパラメータに検索クエリを指定。DuckDuckGo Instant Answer APIを使用。";
+    const PERMISSION: Permission = Permission::Auto;
+    const READ_ONLY: bool = true;
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "検索クエリ" }
-            },
-            "required": ["query"]
-        })
-    }
-
-    fn permission(&self) -> Permission {
-        Permission::Auto
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'query' パラメータが必要です"))?;
+    fn execute(&self, args: WebSearchArgs) -> Result<ToolResult> {
+        let query = &args.query;
 
         let url = format!(
             "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
@@ -64,38 +50,21 @@ impl Tool for WebSearchTool {
 /// URLからテキストを取得するツール
 pub struct WebFetchTool;
 
-impl Tool for WebFetchTool {
-    fn name(&self) -> &str {
-        "web_fetch"
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct WebFetchArgs {
+    /// 取得するURL
+    url: String,
+}
 
-    fn description(&self) -> &str {
-        "URLからWebページのテキスト内容を取得する。urlパラメータにURLを指定。"
-    }
+impl TypedTool for WebFetchTool {
+    type Args = WebFetchArgs;
+    const NAME: &'static str = "web_fetch";
+    const DESCRIPTION: &'static str = "URLからWebページのテキスト内容を取得する。urlパラメータにURLを指定。";
+    const PERMISSION: Permission = Permission::Auto;
+    const READ_ONLY: bool = true;
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "取得するURL" }
-            },
-            "required": ["url"]
-        })
-    }
-
-    fn permission(&self) -> Permission {
-        Permission::Auto
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'url' パラメータが必要です"))?;
+    fn execute(&self, args: WebFetchArgs) -> Result<ToolResult> {
+        let url = &args.url;
 
         match reqwest::blocking::get(url) {
             Ok(response) => {
@@ -229,6 +198,7 @@ fn strip_html_tags(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
 
     #[test]
     fn test_urlencoding() {

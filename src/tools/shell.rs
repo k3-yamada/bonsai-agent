@@ -2,7 +2,10 @@ use anyhow::Result;
 
 use crate::tools::permission::Permission;
 use crate::tools::sandbox::{DirectSandbox, ResourceLimits, Sandbox};
-use crate::tools::{Tool, ToolResult};
+use crate::tools::typed::TypedTool;
+use crate::tools::ToolResult;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// シェルコマンド実行ツール
 pub struct ShellTool {
@@ -30,37 +33,20 @@ impl Default for ShellTool {
     }
 }
 
-impl Tool for ShellTool {
-    fn name(&self) -> &str {
-        "shell"
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct ShellArgs {
+    /// 実行するシェルコマンド
+    command: String,
+}
 
-    fn description(&self) -> &str {
-        "シェルコマンドを実行する。commandパラメータにコマンド文字列を指定。"
-    }
+impl TypedTool for ShellTool {
+    type Args = ShellArgs;
+    const NAME: &'static str = "shell";
+    const DESCRIPTION: &'static str = "シェルコマンドを実行する。commandパラメータにコマンド文字列を指定。";
+    const PERMISSION: Permission = Permission::Confirm;
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "実行するシェルコマンド"
-                }
-            },
-            "required": ["command"]
-        })
-    }
-
-    fn permission(&self) -> Permission {
-        Permission::Confirm
-    }
-
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'command' パラメータが必要です"))?;
+    fn execute(&self, args: ShellArgs) -> Result<ToolResult> {
+        let command = &args.command;
 
         let result = self.sandbox.execute("sh", &["-c", command], &self.limits)?;
 
@@ -82,6 +68,7 @@ impl Tool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
 
     #[test]
     fn test_shell_echo() {

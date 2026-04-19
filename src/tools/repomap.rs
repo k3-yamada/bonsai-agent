@@ -1,29 +1,29 @@
 use crate::tools::permission::Permission;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::typed::TypedTool;
+use crate::tools::ToolResult;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use anyhow::Result;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 
 pub struct RepoMapTool;
 
-impl Tool for RepoMapTool {
-    fn name(&self) -> &str {
-        "repo_map"
-    }
-    fn description(&self) -> &str {
-        "コード構造を要約。"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type":"object","properties":{"path":{"type":"string"}}})
-    }
-    fn permission(&self) -> Permission {
-        Permission::Auto
-    }
-    fn is_read_only(&self) -> bool {
-        true
-    }
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+#[derive(Deserialize, JsonSchema)]
+pub struct RepoMapArgs {
+    /// 対象ディレクトリのパス
+    path: Option<String>,
+}
+
+impl TypedTool for RepoMapTool {
+    type Args = RepoMapArgs;
+    const NAME: &'static str = "repo_map";
+    const DESCRIPTION: &'static str = "コード構造を要約。";
+    const PERMISSION: Permission = Permission::Auto;
+    const READ_ONLY: bool = true;
+
+    fn execute(&self, args: RepoMapArgs) -> Result<ToolResult> {
+        let p = args.path.as_deref().unwrap_or(".");
         Ok(ToolResult {
             output: gen_map_ranked(Path::new(p), 3)?,
             success: true,
@@ -640,6 +640,7 @@ fn extract_syms(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
 
     #[test]
     fn t_src() {

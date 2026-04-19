@@ -3,48 +3,35 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::tools::permission::Permission;
-use crate::tools::{Tool, ToolResult};
+use crate::tools::typed::TypedTool;
+use crate::tools::ToolResult;
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// ファイル読み取りツール
 pub struct FileReadTool;
 
-impl Tool for FileReadTool {
-    fn name(&self) -> &str {
-        "file_read"
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct FileReadArgs {
+    /// 読み取るファイルのパス
+    path: String,
+    /// 読み始める行(0始まり)
+    offset: Option<u64>,
+    /// 最大行数(省略時100)
+    limit: Option<u64>,
+}
 
-    fn description(&self) -> &str {
-        "ファイルの内容を読み取る。pathパラメータにファイルパスを指定。"
-    }
+impl TypedTool for FileReadTool {
+    type Args = FileReadArgs;
+    const NAME: &'static str = "file_read";
+    const DESCRIPTION: &'static str = "ファイルの内容を読み取る。pathパラメータにファイルパスを指定。";
+    const PERMISSION: Permission = Permission::Auto;
+    const READ_ONLY: bool = true;
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "読み取るファイルのパス" },
-                "offset": { "type": "integer", "description": "読み始める行(0始まり)" },
-                "limit": { "type": "integer", "description": "最大行数(省略時100)" }
-            },
-            "required": ["path"]
-        })
-    }
-
-    fn permission(&self) -> Permission {
-        Permission::Auto
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'path' パラメータが必要です"))?;
-
-        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    fn execute(&self, args: FileReadArgs) -> Result<ToolResult> {
+        let path = &args.path;
+        let offset = args.offset.unwrap_or(0) as usize;
+        let limit = args.limit.unwrap_or(100) as usize;
         match std::fs::read_to_string(path) {
             Ok(fc) => {
                 let lines: Vec<&str> = fc.lines().collect();
@@ -105,42 +92,31 @@ impl FileWriteTool {
     }
 }
 
-impl Tool for FileWriteTool {
-    fn name(&self) -> &str {
-        "file_write"
-    }
+#[derive(Deserialize, JsonSchema)]
+pub struct FileWriteArgs {
+    /// 書き込み先のファイルパス
+    path: String,
+    /// 全文置換する内容（old_text/new_textと排他）
+    content: Option<String>,
+    /// 置換対象のテキスト
+    old_text: Option<String>,
+    /// 置換後のテキスト
+    new_text: Option<String>,
+}
 
-    fn description(&self) -> &str {
-        "ファイルに書き込む。全文置換(content)またはsearch/replace差分適用(old_text/new_text)。git管理下では自動スナップショット。"
-    }
+impl TypedTool for FileWriteTool {
+    type Args = FileWriteArgs;
+    const NAME: &'static str = "file_write";
+    const DESCRIPTION: &'static str = "ファイルに書き込む。全文置換(content)またはsearch/replace差分適用(old_text/new_text)。git管理下では自動スナップショット。";
+    const PERMISSION: Permission = Permission::Confirm;
 
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "書き込み先のファイルパス" },
-                "content": { "type": "string", "description": "全文置換する内容（old_text/new_textと排他）" },
-                "old_text": { "type": "string", "description": "置換対象のテキスト" },
-                "new_text": { "type": "string", "description": "置換後のテキスト" }
-            },
-            "required": ["path"]
-        })
-    }
-
-    fn permission(&self) -> Permission {
-        Permission::Confirm
-    }
-
-    fn call(&self, args: serde_json::Value) -> Result<ToolResult> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("'path' パラメータが必要です"))?;
+    fn execute(&self, args: FileWriteArgs) -> Result<ToolResult> {
+        let path = &args.path;
 
         // git-first: 書き込み前にスナップショット
         Self::git_snapshot(path);
 
-        if let Some(content) = args.get("content").and_then(|v| v.as_str()) {
+        if let Some(content) = &args.content {
             // 全文置換
             if let Some(parent) = Path::new(path).parent() {
                 std::fs::create_dir_all(parent).ok();
@@ -156,8 +132,8 @@ impl Tool for FileWriteTool {
                 }),
             }
         } else if let (Some(old_text), Some(new_text)) = (
-            args.get("old_text").and_then(|v| v.as_str()),
-            args.get("new_text").and_then(|v| v.as_str()),
+            args.old_text.as_deref(),
+            args.new_text.as_deref(),
         ) {
             // search/replace差分適用
             match std::fs::read_to_string(path) {
@@ -437,6 +413,7 @@ fn replace_lines(content: &str, content_lines: &[&str], start: usize, count: usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::Tool;
     use std::fs;
 
     fn temp_path(name: &str) -> String {
