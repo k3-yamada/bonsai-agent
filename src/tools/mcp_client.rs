@@ -189,6 +189,20 @@ impl McpConnection {
     }
 }
 
+impl McpConnection {
+    /// MCPサーバープロセスの生存チェック
+    pub fn is_alive(&mut self) -> bool {
+        if let Some(ref mut child) = self.child {
+            match child.try_wait() {
+                Ok(None) => true,  // まだ実行中
+                _ => false,        // 終了済みまたはエラー
+            }
+        } else {
+            false
+        }
+    }
+}
+
 impl Drop for McpConnection {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -252,6 +266,25 @@ impl Tool for McpToolWrapper {
             .connection
             .lock()
             .map_err(|_| anyhow::anyhow!("MCP接続ロック取得失敗"))?;
+        // 自動復旧: プロセス死亡時に再接続
+        if !conn.is_alive() {
+            match McpConnection::spawn(&conn.config.clone()) {
+                Ok(new_conn) => {
+                    *conn = new_conn;
+                    crate::observability::logger::log_event(
+                        crate::observability::logger::LogLevel::Info,
+                        "mcp",
+                        &format!("MCPサーバー '{}' 自動再接続成功", self.server_name),
+                    );
+                }
+                Err(e) => {
+                    return Ok(ToolResult {
+                        output: format!("MCP再接続失敗: {e}"),
+                        success: false,
+                    });
+                }
+            }
+        }
         match conn.call_tool(&self.info.name, args) {
             Ok(output) => Ok(ToolResult {
                 output,
@@ -354,6 +387,19 @@ args = ["-y", "@modelcontextprotocol/server-git"]
         assert_eq!(config.servers.len(), 2);
         assert_eq!(config.servers[0].name, "filesystem");
         assert_eq!(config.servers[1].name, "git");
+    }
+
+    #[test]
+    fn test_is_alive_no_child() {
+        // childがNoneの場合はfalse
+        let mut conn = McpConnection {
+            child: None,
+            stdin: None,
+            reader: None,
+            config: McpServerConfig { name: "test".into(), command: "echo".into(), args: vec![] },
+            next_id: 0,
+        };
+        assert!(!conn.is_alive());
     }
 
     // 実MCPサーバーとの統合テスト

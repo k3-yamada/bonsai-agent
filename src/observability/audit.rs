@@ -41,6 +41,13 @@ pub enum AuditAction {
         consecutive_failures: usize,
     },
     /// アドバイザー呼出（コスト追跡・観測性）
+    /// タスク完了メトリクス（プロダクトメトリクス第3層）
+    TaskComplete {
+        task_summary: String,
+        total_steps: usize,
+        tool_success_rate: f64,
+        duration_ms: u64,
+    },
     AdvisorCall {
         /// "verification" or "replan"
         role: String,
