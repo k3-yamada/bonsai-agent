@@ -19,6 +19,8 @@ pub struct Mutation {
     pub mutation_type: MutationType,
     pub detail: String,
     pub apply: MutationAction,
+    /// 変異テーマ（1 iteration 1 theme）
+    pub theme: MutationTheme,
 }
 
 /// 変異の具体的な操作
@@ -70,37 +72,44 @@ impl HypothesisGenerator {
         // 7,8: max_retries変更
         // 9: プロンプトルール追加（追加枠）
         let cycle = experiment_count % 10;
+        let theme = MutationTheme::from_cycle(cycle);
 
         match cycle {
             3 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_iterations: 12 (+2)".into(),
                 apply: MutationAction::SetMaxIterations(12),
+                theme,
             },
             4 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_iterations: 8 (-2)".into(),
                 apply: MutationAction::SetMaxIterations(8),
+                theme,
             },
             5 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_tools_selected: 3 (-2)".into(),
                 apply: MutationAction::SetMaxToolsSelected(3),
+                theme,
             },
             6 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_tools_selected: 7 (+2)".into(),
                 apply: MutationAction::SetMaxToolsSelected(7),
+                theme,
             },
             7 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_retries: 1 (-2)".into(),
                 apply: MutationAction::SetMaxRetries(1),
+                theme,
             },
             8 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_retries: 5 (+2)".into(),
                 apply: MutationAction::SetMaxRetries(5),
+                theme,
             },
             _ => {
                 // サイクル 0,1,2,9 はプロンプトルール
@@ -109,6 +118,7 @@ impl HypothesisGenerator {
                     mutation_type: MutationType::PromptRule,
                     detail: rule.description.clone(),
                     apply: MutationAction::AddPromptRule(rule.rule.clone()),
+                    theme,
                 };
                 self.current_index += 1;
                 mutation

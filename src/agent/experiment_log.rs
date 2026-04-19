@@ -7,6 +7,40 @@ use std::path::Path;
 
 use crate::agent::benchmark::{BenchmarkResult, MultiRunBenchmarkResult};
 
+/// 変異テーマ（1 iteration 1 themeの原則、経験的プロンプトチューニング知見）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum MutationTheme {
+    /// 精密性: ツール使用精度・出力品質向上
+    Precision,
+    /// 探索性: 多様な解法・創造的アプローチ
+    Exploration,
+    /// 効率性: ステップ数・トークン消費削減
+    Efficiency,
+    /// 堅牢性: エラー回復・安定性向上
+    Robustness,
+}
+
+impl MutationTheme {
+    /// サイクル番号からテーマを決定（固定マッピング）
+    pub fn from_cycle(cycle: usize) -> Self {
+        match cycle % 10 {
+            0 | 1 | 2 => Self::Precision,
+            3 | 4 => Self::Efficiency,
+            5 | 6 => Self::Exploration,
+            _ => Self::Robustness, // 7, 8, 9
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Precision => "precision",
+            Self::Exploration => "exploration",
+            Self::Efficiency => "efficiency",
+            Self::Robustness => "robustness",
+        }
+    }
+}
+
 /// 変異の種類
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MutationType {
