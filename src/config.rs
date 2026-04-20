@@ -735,6 +735,34 @@ url = "http://localhost:3000/mcp"
         );
     }
 
+
+    #[test]
+    fn test_mcp_in_full_config_toml() {
+        let toml_str = r#"
+[model]
+backend = "mlx-lm"
+server_url = "http://localhost:8000"
+model_id = "ternary-bonsai-8b"
+context_length = 65536
+
+[agent]
+max_iterations = 10
+max_retries = 3
+
+[advisor]
+max_uses = 3
+backend = "claude-code"
+
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.mcp.servers.len(), 1, "MCP servers should be 1");
+        assert_eq!(config.mcp.servers[0].name, "filesystem");
+    }
+
     #[test]
     fn test_experiment_config_task_timeout_default() {
         let config = ExperimentConfig::default();
