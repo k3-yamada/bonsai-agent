@@ -214,18 +214,18 @@ pub fn format_functiongemma_declaration(schema: &crate::tools::ToolSchema) -> St
                 typ.to_uppercase()
             ));
         }
-        decl.push_str("}");
+        decl.push('}');
 
         // required
-        if let Some(req) = schema.parameters.get("required") {
-            if let Some(arr) = req.as_array() {
-                let items: Vec<String> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| format!("<escape>{s}<escape>"))
-                    .collect();
-                decl.push_str(&format!(",required:[{}]", items.join(",")));
-            }
+        if let Some(req) = schema.parameters.get("required")
+            && let Some(arr) = req.as_array()
+        {
+            let items: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| format!("<escape>{s}<escape>"))
+                .collect();
+            decl.push_str(&format!(",required:[{}]", items.join(",")));
         }
 
         decl.push_str(",type:<escape>OBJECT<escape>}");

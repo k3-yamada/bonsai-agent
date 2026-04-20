@@ -260,15 +260,16 @@ impl<'a> SubAgentExecutor<'a> {
 
     /// サブエージェント用のAgentConfigを構築
     fn build_sub_config(&self, goal: &str) -> AgentConfig {
-        let mut config = AgentConfig::default();
-        config.max_iterations = self.sub_config.max_iterations;
-        config.auto_checkpoint = false;
-        config.system_prompt = format!(
-            "あなたはサブエージェントです。以下のタスクを完了してください。\n\
-             簡潔に作業し、完了したら結果を報告してください。\n\n\
-             タスク: {goal}"
-        );
-        config
+        AgentConfig {
+            max_iterations: self.sub_config.max_iterations,
+            auto_checkpoint: false,
+            system_prompt: format!(
+                "あなたはサブエージェントです。以下のタスクを完了してください。\n\
+                 簡潔に作業し、完了したら結果を報告してください。\n\n\
+                 タスク: {goal}"
+            ),
+            ..Default::default()
+        }
     }
 
     /// 結果のサマリーを生成
