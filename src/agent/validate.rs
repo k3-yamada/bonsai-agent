@@ -87,6 +87,42 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+
+/// 編集距離ベースの類似ツール名提案（OpenCode知見: Invalidツールハンドラ）
+#[cfg_attr(not(test), allow(dead_code))]
+fn suggest_similar_tool(name: &str, known: &HashSet<String>) -> Option<String> {
+    let mut best: Option<(String, usize)> = None;
+    for tool_name in known {
+        let dist = edit_distance(name, tool_name);
+        // 距離がツール名長の半分以下なら候補
+        if dist <= name.len() / 2 + 1
+            && best.as_ref().is_none_or(|(_, d)| dist < *d)
+        {
+            best = Some((tool_name.clone(), dist));
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
+/// 簡易Levenshtein距離
+#[allow(clippy::needless_range_loop)]
+#[cfg_attr(not(test), allow(dead_code))]
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 0..=m { dp[i][0] = i; }
+    for j in 0..=n { dp[0][j] = j; }
+    for i in 1..=m {
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            dp[i][j] = (dp[i - 1][j] + 1).min(dp[i][j - 1] + 1).min(dp[i - 1][j - 1] + cost);
+        }
+    }
+    dp[m][n]
+}
+
 /// ツール呼び出しをバリデーションする
 pub fn validate_tool_call(
     call: &ToolCall,
@@ -319,4 +355,24 @@ mod tests {
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
         assert!(result.issues.iter().any(|i| i.severity == Severity::Warn));
     }
+
+    #[test]
+    fn test_suggest_similar_tool() {
+        let tools: HashSet<String> = ["file_read", "file_write", "shell", "git"]
+            .iter().map(|s| s.to_string()).collect();
+        // typo: file_rea → file_read
+        assert_eq!(suggest_similar_tool("file_rea", &tools), Some("file_read".to_string()));
+        // typo: shel → shell
+        assert_eq!(suggest_similar_tool("shel", &tools), Some("shell".to_string()));
+        // 全く違う名前 → None
+        assert_eq!(suggest_similar_tool("completely_different_very_long_name", &tools), None);
+    }
+
+    #[test]
+    fn test_edit_distance() {
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("same", "same"), 0);
+    }
+
 }
