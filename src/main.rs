@@ -16,7 +16,7 @@ use bonsai_agent::runtime::inference::{LlmBackend, MockLlmBackend};
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::ToolRegistry;
 use bonsai_agent::tools::arxiv::ArxivTool;
-use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
+use bonsai_agent::tools::file::{FileReadTool, FileWriteTool, MultiEditTool};
 use bonsai_agent::tools::git::GitTool;
 use bonsai_agent::tools::repomap::RepoMapTool;
 use bonsai_agent::tools::shell::ShellTool;
@@ -362,6 +362,7 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
     ));
     tools.register(Box::new(FileReadTool));
     tools.register(Box::new(FileWriteTool));
+    tools.register(Box::new(MultiEditTool));
     tools.register(Box::new(GitTool));
     tools.register(Box::new(WebSearchTool));
     tools.register(Box::new(WebFetchTool));

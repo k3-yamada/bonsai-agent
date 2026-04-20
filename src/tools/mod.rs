@@ -101,7 +101,7 @@ impl TaskType {
     /// GeneralはNone（フィルタなし）
     fn allowed_prefixes(&self) -> Option<&[&str]> {
         match self {
-            TaskType::FileOperation => Some(&["file_read", "file_write", "repo_map"]),
+            TaskType::FileOperation => Some(&["file_read", "file_write", "multi_edit", "repo_map"]),
             TaskType::CodeExecution => Some(&["shell", "git"]),
             TaskType::Research => Some(&["web_search", "web_fetch", "arxiv_search"]),
             TaskType::General => None,

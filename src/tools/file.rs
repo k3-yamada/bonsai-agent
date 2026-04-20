@@ -188,6 +188,105 @@ impl TypedTool for FileWriteTool {
     }
 }
 
+
+/// 複数箇所同時編集ツール（OpenCode知見: アトミック操作でp^n問題緩和）
+pub struct MultiEditTool;
+
+#[derive(Deserialize, JsonSchema)]
+pub struct EditPair {
+    /// 置換対象テキスト
+    old_text: String,
+    /// 置換後テキスト
+    new_text: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct MultiEditArgs {
+    /// 編集対象のファイルパス
+    path: String,
+    /// 編集ペアの配列（順次適用、全成功 or 全ロールバック）
+    edits: Vec<EditPair>,
+}
+
+impl TypedTool for MultiEditTool {
+    type Args = MultiEditArgs;
+    const NAME: &'static str = "multi_edit";
+    const DESCRIPTION: &'static str = "単一ファイルの複数箇所を一括編集する。全て成功するか、失敗時は元に戻す。editsに[{old_text, new_text}]の配列を指定。";
+    const PERMISSION: Permission = Permission::Confirm;
+
+    fn execute(&self, args: MultiEditArgs) -> Result<ToolResult> {
+        let path = &args.path;
+        if args.edits.is_empty() {
+            return Ok(ToolResult {
+                output: "editsが空です".to_string(),
+                success: false,
+            });
+        }
+
+        // 元のファイル内容を保存（ロールバック用）
+        let original = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolResult {
+                    output: format!("ファイル読み取りエラー: {e}"),
+                    success: false,
+                });
+            }
+        };
+
+        // git snapshot
+        FileWriteTool::git_snapshot(path);
+
+        let mut current = original.clone();
+        let mut applied = 0;
+        let mut warnings: Vec<String> = Vec::new();
+
+        for (i, edit) in args.edits.iter().enumerate() {
+            if current.contains(&edit.old_text) {
+                current = current.replacen(&edit.old_text, &edit.new_text, 1);
+                applied += 1;
+            } else if let Some((fuzzy_result, msg)) =
+                fuzzy_find_replace(&current, &edit.old_text, &edit.new_text)
+            {
+                current = fuzzy_result;
+                applied += 1;
+                warnings.push(format!("edit[{}]: {}", i, msg));
+            } else {
+                // ロールバック: 元のファイルを復元
+                let _ = std::fs::write(path, &original);
+                return Ok(ToolResult {
+                    output: format!(
+                        "edit[{}]の置換対象が見つかりません。{}件適用済みを全てロールバックしました: {}",
+                        i, applied, path
+                    ),
+                    success: false,
+                });
+            }
+        }
+
+        // 全て成功 → ファイルに書き込み
+        match std::fs::write(path, &current) {
+            Ok(()) => {
+                let warn_msg = if warnings.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", warnings.join("; "))
+                };
+                Ok(ToolResult {
+                    output: format!("{}件の編集を一括適用しました{}: {}", applied, warn_msg, path),
+                    success: true,
+                })
+            }
+            Err(e) => {
+                let _ = std::fs::write(path, &original);
+                Ok(ToolResult {
+                    output: format!("書き込みエラー（ロールバック済み）: {e}"),
+                    success: false,
+                })
+            }
+        }
+    }
+}
 /// 空白を正規化（連続空白→単一スペース、先頭末尾trim）
 fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -661,4 +760,56 @@ mod tests {
         assert!(!result.output.contains("| a"), "aは含まない");
         fs::remove_file(&path).ok();
     }
+
+    // MultiEditTool
+    #[test]
+    fn test_multi_edit_basic() {
+        let path = temp_path("multiedit");
+        fs::write(&path, "aaa\nbbb\nccc").unwrap();
+        let tool = MultiEditTool;
+        let result = tool.call(serde_json::json!({
+            "path": path,
+            "edits": [
+                {"old_text": "aaa", "new_text": "AAA"},
+                {"old_text": "ccc", "new_text": "CCC"}
+            ]
+        })).unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("2件"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "AAA\nbbb\nCCC");
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_multi_edit_rollback_on_failure() {
+        let path = temp_path("multiedit-rb");
+        fs::write(&path, "aaa\nbbb\nccc").unwrap();
+        let tool = MultiEditTool;
+        let result = tool.call(serde_json::json!({
+            "path": path,
+            "edits": [
+                {"old_text": "aaa", "new_text": "AAA"},
+                {"old_text": "NOTFOUND", "new_text": "XXX"}
+            ]
+        })).unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("ロールバック"));
+        // ロールバックされているので元のまま
+        assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nbbb\nccc");
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_multi_edit_empty_edits() {
+        let path = temp_path("multiedit-empty");
+        fs::write(&path, "hello").unwrap();
+        let tool = MultiEditTool;
+        let result = tool.call(serde_json::json!({
+            "path": path,
+            "edits": []
+        })).unwrap();
+        assert!(!result.success);
+        fs::remove_file(&path).ok();
+    }
+
 }
