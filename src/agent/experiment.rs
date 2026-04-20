@@ -38,6 +38,10 @@ pub enum MutationAction {
     SetMaxToolsSelected(usize),
     /// 複数のプロンプトルールを同時適用（メタ変異用）
     CompoundPromptRules(Vec<String>),
+    /// InferenceParamsの温度を変更
+    SetTemperature(f64),
+    /// ツール出力サイズ上限を変更
+    SetMaxToolOutputChars(usize),
 }
 
 /// 仮説生成器: ルールベースで次の変異候補を選択
@@ -63,56 +67,81 @@ impl Default for HypothesisGenerator {
 }
 
 impl HypothesisGenerator {
-    /// 次の変異候補を生成（10サイクルローテーション）
+    /// 次の変異候補を生成（14サイクルローテーション）
     pub fn next_mutation(&mut self, experiment_count: usize) -> Mutation {
-        // 10種のmutationをローテーション:
-        // 0,1,2: プロンプトルール追加
-        // 3,4: max_iterations変更
-        // 5,6: max_tools_selected変更
-        // 7,8: max_retries変更
-        // 9: プロンプトルール追加（追加枠）
-        let cycle = experiment_count % 10;
+        // 14種のmutationをローテーション:
+        // 0-3: プロンプトルール追加（8候補ローテーション）
+        // 4,5: max_iterations変更
+        // 6,7: max_tools_selected変更
+        // 8,9: max_retries変更
+        // 10,11: temperature変更（探索軸）
+        // 12,13: max_tool_output_chars変更
+        let cycle = experiment_count % 14;
         let theme = MutationTheme::from_cycle(cycle);
 
         match cycle {
-            3 => Mutation {
+            4 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_iterations: 12 (+2)".into(),
                 apply: MutationAction::SetMaxIterations(12),
                 theme,
             },
-            4 => Mutation {
+            5 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_iterations: 8 (-2)".into(),
                 apply: MutationAction::SetMaxIterations(8),
                 theme,
             },
-            5 => Mutation {
+            6 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_tools_selected: 3 (-2)".into(),
                 apply: MutationAction::SetMaxToolsSelected(3),
                 theme,
             },
-            6 => Mutation {
+            7 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_tools_selected: 7 (+2)".into(),
                 apply: MutationAction::SetMaxToolsSelected(7),
                 theme,
             },
-            7 => Mutation {
+            8 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_retries: 1 (-2)".into(),
                 apply: MutationAction::SetMaxRetries(1),
                 theme,
             },
-            8 => Mutation {
+            9 => Mutation {
                 mutation_type: MutationType::AgentParam,
                 detail: "max_retries: 5 (+2)".into(),
                 apply: MutationAction::SetMaxRetries(5),
                 theme,
             },
+            10 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "temperature: 0.5 (低め、精密操作向け)".into(),
+                apply: MutationAction::SetTemperature(0.5),
+                theme,
+            },
+            11 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "temperature: 0.9 (高め、探索向け)".into(),
+                apply: MutationAction::SetTemperature(0.9),
+                theme,
+            },
+            12 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_tool_output_chars: 2000 (コンパクト出力)".into(),
+                apply: MutationAction::SetMaxToolOutputChars(2000),
+                theme,
+            },
+            13 => Mutation {
+                mutation_type: MutationType::AgentParam,
+                detail: "max_tool_output_chars: 6000 (コンテキスト増量)".into(),
+                apply: MutationAction::SetMaxToolOutputChars(6000),
+                theme,
+            },
             _ => {
-                // サイクル 0,1,2,9 はプロンプトルール
+                // サイクル 0-3 はプロンプトルール（8候補ローテーション）
                 let rule = &self.rules[self.current_index % self.rules.len()];
                 let mutation = Mutation {
                     mutation_type: MutationType::PromptRule,
@@ -153,6 +182,22 @@ fn default_prompt_rules() -> Vec<PromptRuleCandidate> {
         PromptRuleCandidate {
             rule: "10. ファイル操作の前にパスの存在を確認する".into(),
             description: "ファイル存在確認の強制".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 回答を出す前にファイルの内容を確認する".into(),
+            description: "回答前の事実確認".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 複数のツールが使える場合、最も単純なツールを選ぶ".into(),
+            description: "最小限ツール選択".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. タスクが曖昧な場合、小さなテストで仮説を検証する".into(),
+            description: "仮説検証アプローチ".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 前のステップの結果を要約してから次のステップに進む".into(),
+            description: "段階的要約".into(),
         },
     ]
 }
@@ -198,6 +243,12 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
                 config.system_prompt.push('\n');
                 config.system_prompt.push_str(rule);
             }
+        }
+        MutationAction::SetTemperature(t) => {
+            config.base_inference.temperature = *t;
+        }
+        MutationAction::SetMaxToolOutputChars(n) => {
+            config.max_tool_output_chars = *n;
         }
     }
 
@@ -714,12 +765,12 @@ mod tests {
         let mut hyp_gen = HypothesisGenerator::default();
         let m0 = hyp_gen.next_mutation(0);
         assert_eq!(m0.mutation_type, MutationType::PromptRule);
-        let m3 = hyp_gen.next_mutation(3);
-        assert_eq!(m3.mutation_type, MutationType::AgentParam);
-        assert!(m3.detail.contains("+2"));
         let m4 = hyp_gen.next_mutation(4);
         assert_eq!(m4.mutation_type, MutationType::AgentParam);
-        assert!(m4.detail.contains("-2"));
+        assert!(m4.detail.contains("+2"));
+        let m5 = hyp_gen.next_mutation(5);
+        assert_eq!(m5.mutation_type, MutationType::AgentParam);
+        assert!(m5.detail.contains("-2"));
     }
 
     #[test]
@@ -964,5 +1015,127 @@ mod tests {
             !(estimated_delta_border < threshold),
             "閾値ちょうどは通過（<で判定するため）"
         );
+    }
+
+    // --- 新変異カテゴリテスト ---
+
+    #[test]
+    fn test_new_mutation_actions_apply() {
+        let config = make_config();
+
+        // SetTemperature: 温度変更が反映される
+        let temp_mutation = Mutation {
+            mutation_type: MutationType::AgentParam,
+            detail: "temperature変更".into(),
+            apply: MutationAction::SetTemperature(0.9),
+            theme: MutationTheme::Exploration,
+        };
+        let modified = apply_mutation(&config, &temp_mutation);
+        assert!(
+            (modified.base_inference.temperature - 0.9).abs() < f64::EPSILON,
+            "温度が0.9に設定される"
+        );
+        // 他のパラメータは変更されない
+        assert_eq!(modified.max_iterations, config.max_iterations);
+        assert_eq!(modified.max_tool_output_chars, config.max_tool_output_chars);
+
+        // SetMaxToolOutputChars: 出力サイズ上限変更が反映される
+        let output_mutation = Mutation {
+            mutation_type: MutationType::AgentParam,
+            detail: "出力サイズ変更".into(),
+            apply: MutationAction::SetMaxToolOutputChars(2000),
+            theme: MutationTheme::Efficiency,
+        };
+        let modified2 = apply_mutation(&config, &output_mutation);
+        assert_eq!(modified2.max_tool_output_chars, 2000);
+        // 他のパラメータは変更されない
+        assert_eq!(modified2.max_iterations, config.max_iterations);
+        assert!(
+            (modified2.base_inference.temperature - config.base_inference.temperature).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn test_14_cycle_rotation() {
+        let mut hyp_gen = HypothesisGenerator::default();
+
+        // サイクル0-3: プロンプトルール
+        for cycle in 0..=3 {
+            let m = hyp_gen.next_mutation(cycle);
+            assert_eq!(
+                m.mutation_type,
+                MutationType::PromptRule,
+                "サイクル{cycle}はPromptRule"
+            );
+        }
+
+        // サイクル4,5: max_iterations
+        let m4 = hyp_gen.next_mutation(4);
+        assert!(m4.detail.contains("max_iterations"));
+        assert!(m4.detail.contains("+2"));
+        let m5 = hyp_gen.next_mutation(5);
+        assert!(m5.detail.contains("max_iterations"));
+        assert!(m5.detail.contains("-2"));
+
+        // サイクル6,7: max_tools_selected
+        let m6 = hyp_gen.next_mutation(6);
+        assert!(m6.detail.contains("max_tools_selected"));
+        let m7 = hyp_gen.next_mutation(7);
+        assert!(m7.detail.contains("max_tools_selected"));
+
+        // サイクル8,9: max_retries
+        let m8 = hyp_gen.next_mutation(8);
+        assert!(m8.detail.contains("max_retries"));
+        let m9 = hyp_gen.next_mutation(9);
+        assert!(m9.detail.contains("max_retries"));
+
+        // サイクル10,11: temperature
+        let m10 = hyp_gen.next_mutation(10);
+        assert!(
+            m10.detail.contains("temperature"),
+            "サイクル10はtemperature: got {}",
+            m10.detail
+        );
+        assert!(m10.detail.contains("0.5"));
+        let m11 = hyp_gen.next_mutation(11);
+        assert!(m11.detail.contains("temperature"));
+        assert!(m11.detail.contains("0.9"));
+
+        // サイクル12,13: max_tool_output_chars
+        let m12 = hyp_gen.next_mutation(12);
+        assert!(
+            m12.detail.contains("max_tool_output_chars"),
+            "サイクル12はmax_tool_output_chars: got {}",
+            m12.detail
+        );
+        assert!(m12.detail.contains("2000"));
+        let m13 = hyp_gen.next_mutation(13);
+        assert!(m13.detail.contains("max_tool_output_chars"));
+        assert!(m13.detail.contains("6000"));
+
+        // サイクル14はラップして0と同じ（PromptRule）
+        let m14 = hyp_gen.next_mutation(14);
+        assert_eq!(m14.mutation_type, MutationType::PromptRule);
+    }
+
+    #[test]
+    fn test_default_rules_expanded() {
+        let rules = default_prompt_rules();
+        // 元の4 + 新規4 = 8候補
+        assert_eq!(rules.len(), 8, "プロンプトルール候補は8件");
+
+        // 新規ルールの存在確認
+        let descriptions: Vec<&str> = rules.iter().map(|r| r.description.as_str()).collect();
+        assert!(descriptions.contains(&"回答前の事実確認"));
+        assert!(descriptions.contains(&"最小限ツール選択"));
+        assert!(descriptions.contains(&"仮説検証アプローチ"));
+        assert!(descriptions.contains(&"段階的要約"));
+
+        // 既存ルールも保持されている
+        assert!(descriptions.contains(&"ツール使用前に思考を強制"));
+        assert!(descriptions.contains(&"エラー分析の強制"));
+        assert!(descriptions.contains(&"フォールバック戦略"));
+        assert!(descriptions.contains(&"ファイル存在確認の強制"));
     }
 }

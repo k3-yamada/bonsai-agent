@@ -216,7 +216,7 @@ pub struct BenchmarkSuite {
 }
 
 impl BenchmarkSuite {
-    /// デフォルトのベンチマークタスクセット（16タスク）
+    /// デフォルトのベンチマークタスクセット（22タスク）
     pub fn default_tasks() -> Self {
         Self {
             tasks: vec![
@@ -363,6 +363,61 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 4,
                     category: TaskCategory::Summarization,
+                },
+                // --- 追加タスク（変異評価の多様性向上） ---
+                BenchmarkTask {
+                    id: "multi_step_rename".into(),
+                    name: "変数リネーム".into(),
+                    input: "/tmp/bonsai_rename_test.rsの変数名oldをnewにリネームして。まずファイルを読んでから書き換えて".into(),
+                    expected_tools: vec!["file_read".into(), "file_write".into()],
+                    expected_keywords: vec!["rename".into(), "replaced".into(), "updated".into()],
+                    max_iterations: 6,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "git_diff_analysis".into(),
+                    name: "Git差分分析".into(),
+                    input: "最後のコミットで何が変更されたか確認して".into(),
+                    expected_tools: vec!["shell".into()],
+                    expected_keywords: vec!["diff".into(), "commit".into(), "changed".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::ToolUse,
+                },
+                BenchmarkTask {
+                    id: "error_recovery_permission".into(),
+                    name: "権限エラー回復".into(),
+                    input: "/etc/bonsai_readonly_testに'test'と書き込んで".into(),
+                    expected_tools: vec!["file_write".into()],
+                    expected_keywords: vec!["permission".into(), "denied".into(), "error".into(), "cannot".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::ErrorRecovery,
+                },
+                BenchmarkTask {
+                    id: "reasoning_json_parse".into(),
+                    name: "JSON解析推論".into(),
+                    input: r#"次のJSONから"name"フィールドの値を教えて: {"id": 1, "name": "bonsai", "version": "0.1"}"#.into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["bonsai".into()],
+                    max_iterations: 3,
+                    category: TaskCategory::Reasoning,
+                },
+                BenchmarkTask {
+                    id: "code_gen_sort".into(),
+                    name: "ソート関数生成".into(),
+                    input: "Rustでバブルソート関数を書いて。Vec<i32>を受け取ってソートするfnを定義して".into(),
+                    expected_tools: vec!["file_write".into()],
+                    expected_keywords: vec!["sort".into(), "fn".into(), "vec".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::CodeGeneration,
+                },
+                BenchmarkTask {
+                    id: "multi_file_search".into(),
+                    name: "複数ファイル検索".into(),
+                    input: "src/配下で'run_agent_loop'関数が定義されているファイルを特定して".into(),
+                    expected_tools: vec!["shell".into(), "file_read".into()],
+                    expected_keywords: vec!["found".into(), "file".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::MultiStep,
                 },
             ],
         }
@@ -522,8 +577,8 @@ fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> Tas
             let has_number = response.chars().any(|c| c.is_ascii_digit());
             if has_number { 1.0 } else { 0.0 }
         }
-        // エラーハンドリング: エラー関連キーワードの検証
-        "error_handling_nonexistent" => {
+        // エラーハンドリング: エラー関連キーワードの検証（共通ロジック）
+        "error_handling_nonexistent" | "error_recovery_permission" => {
             let error_keywords = [
                 "エラー",
                 "存在しない",
@@ -532,6 +587,11 @@ fn evaluate_task_response(task: &BenchmarkTask, result: &AgentLoopResult) -> Tas
                 "error",
                 "Error",
                 "失敗",
+                "permission",
+                "denied",
+                "cannot",
+                "権限",
+                "拒否",
             ];
             let has_error_report = error_keywords.iter().any(|kw| response.contains(kw));
             if has_error_report { 1.0 } else { 0.0 }
@@ -695,7 +755,7 @@ mod tests {
     #[test]
     fn test_default_tasks_count() {
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 16);
+        assert_eq!(suite.tasks.len(), 22);
     }
 
     #[test]
@@ -1111,6 +1171,120 @@ mod tests {
         assert!(
             (score.keyword_hits - 1.0).abs() < f64::EPSILON,
             "大文字小文字を区別しない"
+        );
+    }
+
+    // --- 追加タスク（22タスク化）テスト ---
+
+    #[test]
+    fn test_expanded_tasks_count() {
+        // 16→22タスクへの拡張を検証
+        let suite = BenchmarkSuite::default_tasks();
+        assert_eq!(suite.tasks.len(), 22, "タスク数は22であるべき");
+    }
+
+    #[test]
+    fn test_new_tasks_exist_in_expanded_suite() {
+        let suite = BenchmarkSuite::default_tasks();
+        let new_ids = [
+            "multi_step_rename",
+            "git_diff_analysis",
+            "error_recovery_permission",
+            "reasoning_json_parse",
+            "code_gen_sort",
+            "multi_file_search",
+        ];
+        for id in &new_ids {
+            assert!(
+                suite.tasks.iter().any(|t| t.id == *id),
+                "タスク '{id}' がスイートに存在しない"
+            );
+        }
+    }
+
+    #[test]
+    fn test_new_task_categories_expanded() {
+        let suite = BenchmarkSuite::default_tasks();
+        // 各追加タスクのカテゴリが正しいことを検証
+        let rename = suite.tasks.iter().find(|t| t.id == "multi_step_rename").unwrap();
+        assert_eq!(rename.category, TaskCategory::MultiStep);
+        let diff = suite.tasks.iter().find(|t| t.id == "git_diff_analysis").unwrap();
+        assert_eq!(diff.category, TaskCategory::ToolUse);
+        let perm = suite.tasks.iter().find(|t| t.id == "error_recovery_permission").unwrap();
+        assert_eq!(perm.category, TaskCategory::ErrorRecovery);
+        let json = suite.tasks.iter().find(|t| t.id == "reasoning_json_parse").unwrap();
+        assert_eq!(json.category, TaskCategory::Reasoning);
+        let sort = suite.tasks.iter().find(|t| t.id == "code_gen_sort").unwrap();
+        assert_eq!(sort.category, TaskCategory::CodeGeneration);
+        let search = suite.tasks.iter().find(|t| t.id == "multi_file_search").unwrap();
+        assert_eq!(search.category, TaskCategory::MultiStep);
+    }
+
+    #[test]
+    fn test_error_recovery_permission_with_error() {
+        // 権限エラー回復タスク: エラー関連キーワードで成功判定
+        let task = BenchmarkTask {
+            id: "error_recovery_permission".into(),
+            name: "権限エラー回復".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_write".into()],
+            expected_keywords: vec!["permission".into(), "denied".into(), "error".into(), "cannot".into()],
+            max_iterations: 4,
+            category: TaskCategory::ErrorRecovery,
+        };
+        let result = mock_result(
+            "permission deniedエラーが発生しました。書き込みできません",
+            vec!["file_write"],
+            1,
+        );
+        let score = evaluate_task_response(&task, &result);
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "権限エラーキーワードで成功"
+        );
+    }
+
+    #[test]
+    fn test_reasoning_json_parse_correct() {
+        // JSON解析: 正しいフィールド値を含む回答
+        let task = BenchmarkTask {
+            id: "reasoning_json_parse".into(),
+            name: "JSON解析推論".into(),
+            input: "test".into(),
+            expected_tools: vec![],
+            expected_keywords: vec!["bonsai".into()],
+            max_iterations: 3,
+            category: TaskCategory::Reasoning,
+        };
+        let result = mock_result("nameフィールドの値は\"bonsai\"です", vec![], 1);
+        let score = evaluate_task_response(&task, &result);
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "正しいJSON値で成功"
+        );
+    }
+
+    #[test]
+    fn test_code_gen_sort_keywords() {
+        // ソート関数生成: fn/sort/vecキーワード検証
+        let task = BenchmarkTask {
+            id: "code_gen_sort".into(),
+            name: "ソート関数生成".into(),
+            input: "test".into(),
+            expected_tools: vec!["file_write".into()],
+            expected_keywords: vec!["sort".into(), "fn".into(), "vec".into()],
+            max_iterations: 5,
+            category: TaskCategory::CodeGeneration,
+        };
+        let result = mock_result(
+            "fn bubble_sort(mut vec: Vec<i32>) -> Vec<i32> { /* sort logic */ }",
+            vec!["file_write"],
+            2,
+        );
+        let score = evaluate_task_response(&task, &result);
+        assert!(
+            (score.keyword_hits - 1.0).abs() < f64::EPSILON,
+            "ソート関数キーワード全一致"
         );
     }
 }

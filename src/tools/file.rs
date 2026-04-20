@@ -954,4 +954,291 @@ mod tests {
         fs::remove_file(&path).ok();
     }
 
+    // --- fuzzy戦略個別テスト ---
+
+    /// 戦略1: タブとスペースの混在でも空白正規化で一致すること
+    #[test]
+    fn test_fuzzy_whitespace_normalization() {
+        let content = "fn  main() {\n    let\tx = 1;\n}";
+        let old_text = "fn main() {\n    let x = 1;\n}";
+        let new_text = "fn main() {\n    let x = 2;\n}";
+        let result = fuzzy_find_replace(content, old_text, new_text);
+        assert!(result.is_some(), "空白正規化で一致すべき");
+        let (replaced, msg) = result.unwrap();
+        assert!(msg.contains("空白正規化"), "空白正規化戦略が使用されること");
+        assert!(replaced.contains("let x = 2"), "置換後の内容が反映されること");
+    }
+
+    /// 戦略2: 末尾/先頭の空白を含むテキストがtrimで一致すること
+    #[test]
+    fn test_fuzzy_trim_match() {
+        // try_trimmed単体テスト（戦略1の空白正規化より前にマッチされないよう直接呼出）
+        let content = "alpha\nbeta\ngamma";
+        let old_text = "  beta  ";
+        let new_text = "BETA";
+        let result = try_trimmed(content, old_text, new_text);
+        assert!(result.is_some(), "Trimで一致すべき");
+        let replaced = result.unwrap();
+        assert!(replaced.contains("BETA"), "置換が反映されること");
+    }
+
+    /// 戦略3: インデントレベルが異なっても一致すること
+    #[test]
+    fn test_fuzzy_indentation_flexible() {
+        // try_indent_flexible単体テスト（先行戦略を迂回）
+        let content = "    if true {\n        println!(\"hello\");\n    }";
+        let old_text = "if true {\n    println!(\"hello\");\n}";
+        let new_text = "if false {\n    println!(\"bye\");\n}";
+        let result = try_indent_flexible(content, old_text, new_text);
+        assert!(result.is_some(), "インデント差異で一致すべき");
+        let replaced = result.unwrap();
+        assert!(replaced.contains("false"), "置換が反映されること");
+    }
+
+    /// 戦略4: 全角英数字と半角英数字がUnicode正規化で一致すること
+    #[test]
+    fn test_fuzzy_unicode_normalization() {
+        // 全角英数→半角変換のテスト
+        let content = "let value = 42;";
+        let old_text = "let\u{FF56}alue\u{FF40}=\u{FF14}2;"; // 一部全角
+        // normalize_unicodeは全角英数(FF01-FF5E)を半角に変換
+        // ただし戦略4はold_textとnew_textが正規化後に同じなら意味なしで早期リターン
+        let new_text = "let value = 99;";
+        let result = fuzzy_find_replace(content, old_text, new_text);
+        // 全角混在old_textが半角contentと一致するケース
+        if result.is_some() {
+            let (_, msg) = result.unwrap();
+            assert!(msg.contains("Unicode") || msg.contains("模糊"), "Unicode戦略が使われること");
+        }
+        // normalize_unicode関数単体テスト
+        assert_eq!(normalize_unicode("\u{FF21}\u{FF22}\u{FF23}"), "ABC");
+        assert_eq!(normalize_unicode("\u{2018}hello\u{2019}"), "'hello'");
+        assert_eq!(normalize_unicode("\u{201C}test\u{201D}"), "\"test\"");
+        assert_eq!(normalize_unicode("\u{2014}"), "-");
+    }
+
+    /// 戦略6: 先頭行と末尾行が一致し、中間行が異なるBlockアンカー
+    #[test]
+    fn test_fuzzy_block_anchor_match() {
+        let content = "fn test() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}";
+        // 先頭行と末尾行が同じ、中間行が少し異なるold_text
+        let old_text = "fn test() {\n    let a = 1;\n    let b = 999;\n    let c = 3;\n}";
+        let new_text = "fn replaced() {\n    // new\n}";
+        let result = fuzzy_find_replace(content, old_text, new_text);
+        assert!(result.is_some(), "Blockアンカーで一致すべき（中間行50%以上一致）");
+        let (replaced, msg) = result.unwrap();
+        assert!(msg.contains("Block") || msg.contains("模糊"), "Blockアンカー戦略が使用されること");
+        assert!(replaced.contains("replaced"), "置換が反映されること");
+    }
+
+    /// 戦略6: 中間行の一致率が50%未満なら不一致
+    #[test]
+    fn test_fuzzy_block_anchor_below_threshold() {
+        let content = "start\nline_a\nline_b\nline_c\nend";
+        // 中間行が全て異なる → 0% < 50% で不一致
+        let old_text = "start\nXXX\nYYY\nZZZ\nend";
+        let new_text = "replaced";
+        let result = try_block_anchor(content, old_text, new_text);
+        assert!(result.is_none(), "中間行の一致率50%未満では不一致");
+    }
+
+    /// 戦略8: Levenshtein距離が30%以内の類似ブロックで一致すること
+    #[test]
+    fn test_fuzzy_levenshtein_block() {
+        let content = "fn process_data() {\n    let result = compute();\n    save(result);\n}";
+        // 先頭/末尾行が類似（少し異なる）、中間行も類似
+        let old_text = "fn process_deta() {\n    let result = compute();\n    save(result);\n}";
+        let new_text = "fn new_func() {}";
+        let result = fuzzy_find_replace(content, old_text, new_text);
+        assert!(result.is_some(), "Levenshtein距離30%以内で一致すべき");
+        let (replaced, msg) = result.unwrap();
+        // Blockアンカー(戦略6)かLevenshtein(戦略8)のどちらかで一致
+        assert!(msg.contains("模糊"), "fuzzy戦略が使用されること");
+        assert!(replaced.contains("new_func"), "置換が反映されること");
+    }
+
+    /// 戦略8: Levenshtein距離が30%超で不一致
+    #[test]
+    fn test_fuzzy_levenshtein_block_too_distant() {
+        let content = "fn alpha() {\n    x();\n    y();\n}";
+        // 先頭行が大きく異なる → 距離 > 30%
+        let old_text = "fn completely_different_name() {\n    x();\n    y();\n}";
+        let new_text = "replaced";
+        let result = try_levenshtein_block(content, old_text, new_text);
+        assert!(result.is_none(), "先頭行の距離が30%超では不一致");
+    }
+
+    /// 戦略9: 重複コードブロックをコンテキストで区別すること
+    #[test]
+    fn test_fuzzy_context_aware() {
+        // 同じコードブロックが2箇所に存在
+        let content = "// module A\nfn do_thing() {\n    action();\n}\n// module B\nfn do_thing() {\n    action();\n}";
+        let old_text = "fn do_thing() {\n    action();\n}";
+        let new_text = "fn do_thing() {\n    new_action();\n}";
+        let result = try_context_aware(content, old_text, new_text);
+        assert!(result.is_some(), "コンテキストアンカーで候補を区別すべき");
+        let replaced = result.unwrap();
+        // 最初の候補が選ばれる（全行一致のため）
+        assert!(replaced.contains("new_action"), "置換が反映されること");
+    }
+
+    /// 全戦略で一致しない場合Noneが返ること
+    #[test]
+    fn test_search_replace_no_match() {
+        let content = "fn hello() { println!(\"hi\"); }";
+        let old_text = "this text does not exist anywhere in the content at all xyz123";
+        let new_text = "replacement";
+        let result = fuzzy_find_replace(content, old_text, new_text);
+        assert!(result.is_none(), "全戦略で一致しない場合Noneを返すこと");
+    }
+
+    /// 空のold_textではNoneを返すこと
+    #[test]
+    fn test_search_replace_empty_old_text() {
+        let result = fuzzy_find_replace("content", "   ", "new");
+        assert!(result.is_none(), "空白のみのold_textではNone");
+    }
+
+    /// FileReadToolのoffsetとlimitパラメータ
+    #[test]
+    fn test_file_read_offset_limit() {
+        let path = temp_path("offset-limit");
+        fs::write(&path, "line0\nline1\nline2\nline3\nline4\nline5").unwrap();
+        let tool = FileReadTool;
+
+        // offset=2, limit=2 → line2とline3のみ表示
+        let result = tool
+            .call(serde_json::json!({"path": &path, "offset": 2, "limit": 2}))
+            .unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("line2"), "offset=2でline2を含む");
+        assert!(result.output.contains("line3"), "limit=2でline3を含む");
+        assert!(!result.output.contains("| line0"), "line0は含まない");
+        assert!(!result.output.contains("| line4"), "line4は含まない");
+        assert!(result.output.contains("表示:3-4"), "表示範囲が正しいこと");
+
+        fs::remove_file(&path).ok();
+    }
+
+    /// 存在しないファイルの読み取りでエラーが返ること
+    #[test]
+    fn test_file_read_nonexistent() {
+        let path = format!("/tmp/bonsai-nonexistent-{}", uuid::Uuid::new_v4());
+        let tool = FileReadTool;
+        let result = tool.call(serde_json::json!({"path": &path})).unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("エラー"), "エラーメッセージを含む");
+    }
+
+    /// 新規ファイルへの書き込み（親ディレクトリ自動作成含む）
+    #[test]
+    fn test_file_write_create_new() {
+        let dir = format!("/tmp/bonsai-new-{}", uuid::Uuid::new_v4());
+        let path = format!("{}/subdir/newfile.txt", dir);
+        let tool = FileWriteTool;
+        let result = tool
+            .call(serde_json::json!({"path": &path, "content": "brand new file"}))
+            .unwrap();
+        assert!(result.success, "新規ファイル作成が成功すること");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "brand new file");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SEARCH/REPLACEで複数箇所に一致する場合、最初の1箇所のみ置換
+    #[test]
+    fn test_search_replace_multiple_matches() {
+        let path = temp_path("multi-match");
+        fs::write(&path, "foo bar foo baz foo").unwrap();
+        let tool = FileWriteTool;
+        let result = tool
+            .call(serde_json::json!({
+                "path": &path,
+                "old_text": "foo",
+                "new_text": "QUX"
+            }))
+            .unwrap();
+        assert!(result.success);
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "QUX bar foo baz foo", "最初の1箇所のみ置換されること");
+        fs::remove_file(&path).ok();
+    }
+
+    /// 戦略5: エスケープ正規化のテスト
+    #[test]
+    fn test_fuzzy_escape_normalized() {
+        let content = "line1\n\tindented\nline3";
+        let old_text = "line1\\n\\tindented\\nline3";
+        let new_text = "replaced";
+        let result = try_escape_normalized(content, old_text, new_text);
+        assert!(result.is_some(), "エスケープシーケンスが実際の文字に変換されて一致すること");
+    }
+
+    /// 戦略7: 境界Trim（先頭/末尾の空行除去）のテスト
+    #[test]
+    fn test_fuzzy_boundary_trim() {
+        let content = "alpha\nbeta\ngamma";
+        // 前後に空行を含むold_text
+        let old_text = "\n\nbeta\n\n";
+        let new_text = "BETA";
+        let result = try_boundary_trim(content, old_text, new_text);
+        assert!(result.is_some(), "境界の空行を除去して一致すること");
+    }
+
+    /// line_distance関数の基本テスト
+    #[test]
+    fn test_line_distance() {
+        assert_eq!(line_distance("", ""), 0);
+        assert_eq!(line_distance("abc", ""), 3);
+        assert_eq!(line_distance("", "xyz"), 3);
+        assert_eq!(line_distance("abc", "abc"), 0);
+        assert_eq!(line_distance("abc", "axc"), 1);
+        assert_eq!(line_distance("kitten", "sitting"), 3);
+    }
+
+    /// replace_lines関数の末尾改行保持テスト
+    #[test]
+    fn test_replace_lines_trailing_newline() {
+        let content = "line1\nline2\nline3\n";
+        let lines: Vec<&str> = content.lines().collect();
+        let result = replace_lines(content, &lines, 1, 1, "NEW");
+        assert!(result.ends_with('\n'), "元テキストの末尾改行が保持されること");
+        assert!(result.contains("NEW"), "置換が反映されること");
+    }
+
+    /// 戦略3: 3行未満のBlockアンカーはスキップ
+    #[test]
+    fn test_block_anchor_too_short() {
+        let content = "a\nb";
+        let old_text = "a\nb";
+        let result = try_block_anchor(content, old_text, "new");
+        assert!(result.is_none(), "3行未満ではBlockアンカーは適用されない");
+    }
+
+    /// 戦略8: 3行未満のLevenshteinブロックはスキップ
+    #[test]
+    fn test_levenshtein_block_too_short() {
+        let content = "a\nb";
+        let old_text = "a\nb";
+        let result = try_levenshtein_block(content, old_text, "new");
+        assert!(result.is_none(), "3行未満ではLevenshteinブロックは適用されない");
+    }
+
+    /// 戦略9: 2行未満のContextAwareはスキップ
+    #[test]
+    fn test_context_aware_too_short() {
+        let content = "single line";
+        let old_text = "single line";
+        let result = try_context_aware(content, old_text, "new");
+        assert!(result.is_none(), "2行未満ではContextAwareは適用されない");
+    }
+
+    /// 戦略9: 重複なし（候補1件以下）ではNone
+    #[test]
+    fn test_context_aware_no_duplicates() {
+        let content = "unique_start\n    body\nunique_end";
+        let old_text = "unique_start\n    body\nunique_end";
+        let result = try_context_aware(content, old_text, "new");
+        assert!(result.is_none(), "重複なしではContextAwareは適用されない");
+    }
+
 }

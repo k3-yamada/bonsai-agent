@@ -131,6 +131,22 @@ impl AdvisorSettings {
 pub struct ExperimentConfig {
     pub max_experiments: usize,
     pub dreamer_interval: usize,
+    /// プリスクリーニング有効化（少数タスクで事前評価し、明らかな悪化を早期棄却）
+    #[serde(default = "default_true")]
+    pub enable_prescreening: bool,
+    /// プリスクリーニング棄却閾値（推定deltaがこの値未満なら早期棄却）
+    #[serde(default = "default_prescreening_threshold")]
+    pub prescreening_threshold: f64,
+}
+
+/// デフォルト: true
+fn default_true() -> bool {
+    true
+}
+
+/// デフォルト: -0.01（プリスクリーニング棄却閾値）
+fn default_prescreening_threshold() -> f64 {
+    -0.01
 }
 
 impl Default for ExperimentConfig {
@@ -138,6 +154,8 @@ impl Default for ExperimentConfig {
         Self {
             max_experiments: 10,
             dreamer_interval: 10,
+            enable_prescreening: default_true(),
+            prescreening_threshold: default_prescreening_threshold(),
         }
     }
 }
@@ -652,5 +670,58 @@ max_tokens = 2048
         assert!((preset.min_p - default.min_p).abs() < f64::EPSILON);
         assert_eq!(preset.max_tokens, default.max_tokens);
         assert!((preset.repeat_penalty - default.repeat_penalty).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_experiment_config_prescreening_defaults() {
+        // デフォルト値でプリスクリーニングが有効、閾値が-0.01であることを検証
+        let config = AppConfig::default();
+        assert!(config.experiment.enable_prescreening);
+        assert!((config.experiment.prescreening_threshold - (-0.01)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_experiment_config_prescreening_from_toml() {
+        // TOML設定からプリスクリーニング設定を読み込めることを検証
+        let toml_str = r#"
+[experiment]
+max_experiments = 5
+enable_prescreening = false
+prescreening_threshold = -0.05
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.experiment.max_experiments, 5);
+        assert!(!config.experiment.enable_prescreening);
+        assert!((config.experiment.prescreening_threshold - (-0.05)).abs() < f64::EPSILON);
+        // 未指定フィールドはデフォルト値
+        assert_eq!(config.experiment.dreamer_interval, 10);
+    }
+
+    #[test]
+    fn test_mcp_config_with_url_toml() {
+        // MCP HTTP transport（urlフィールド）がTOMLで正しく読み込まれることを検証
+        let toml_str = r#"
+[[mcp.servers]]
+name = "stdio-server"
+command = "node"
+args = ["server.js"]
+
+[[mcp.servers]]
+name = "http-server"
+command = ""
+args = []
+url = "http://localhost:3000/mcp"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.mcp.servers.len(), 2);
+        // stdio transport
+        assert_eq!(config.mcp.servers[0].name, "stdio-server");
+        assert!(config.mcp.servers[0].url.is_none());
+        // HTTP transport
+        assert_eq!(config.mcp.servers[1].name, "http-server");
+        assert_eq!(
+            config.mcp.servers[1].url.as_deref(),
+            Some("http://localhost:3000/mcp")
+        );
     }
 }
