@@ -1,4 +1,5 @@
 pub mod arxiv;
+pub mod descriptions;
 pub mod file;
 pub mod git;
 pub mod hooks;
