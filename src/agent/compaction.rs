@@ -7,6 +7,10 @@ pub struct CompactionConfig {
     pub summary_max_chars: usize,
     pub emergency_keep: usize,
     pub max_context_tokens: usize,
+    /// Prune最小閾値（この行数以下のToolメッセージは削除しない、OpenCode知見）
+    pub prune_minimum_chars: usize,
+    /// Prune保護範囲（直近このトークン数分のメ���セージは削除対象外、OpenCode知見）
+    pub prune_protect_tokens: usize,
 }
 impl Default for CompactionConfig {
     fn default() -> Self {
@@ -16,6 +20,8 @@ impl Default for CompactionConfig {
             summary_max_chars: 200,
             emergency_keep: 4,
             max_context_tokens: 14000,
+            prune_minimum_chars: 50,
+            prune_protect_tokens: 4000,
         }
     }
 }
@@ -251,7 +257,24 @@ pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
     if t <= config.placeholder_keep_recent {
         return;
     }
-    let boundary = t - config.placeholder_keep_recent;
+    // Prune保護範囲: 直近N件 or 直近Nトークン分のどちらか広い方を保護（OpenCode知見）
+    let keep_by_count = config.placeholder_keep_recent;
+    let keep_by_tokens = {
+        let mut acc = 0usize;
+        let mut keep = 0usize;
+        for msg in messages.iter().rev() {
+            acc += msg.content.len().div_ceil(4);
+            if acc > config.prune_protect_tokens {
+                break;
+            }
+            keep += 1;
+        }
+        keep
+    };
+    let boundary = t.saturating_sub(keep_by_count.max(keep_by_tokens));
+    if boundary == 0 {
+        return;
+    }
     let pairs = find_ai_tool_pairs(messages);
     let protected: std::collections::HashSet<usize> = pairs
         .iter()
@@ -284,7 +307,7 @@ pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
 
     for (i, _score) in &candidates {
         let msg = &mut messages[*i];
-        if matches!(msg.role, Role::Tool) && msg.content.len() > 50 {
+        if matches!(msg.role, Role::Tool) && msg.content.len() > config.prune_minimum_chars {
             let id = msg.tool_call_id.as_deref().unwrap_or("?");
             msg.content = format!("[prev:{id}]");
         }
@@ -518,6 +541,7 @@ mod tests {
             &mut m,
             &CompactionConfig {
                 placeholder_keep_recent: 4,
+                prune_protect_tokens: 0,
                 ..Default::default()
             },
         );
@@ -602,6 +626,7 @@ mod tests {
             &mut m,
             &CompactionConfig {
                 placeholder_keep_recent: 3,
+                prune_protect_tokens: 0,
                 ..Default::default()
             },
         );
