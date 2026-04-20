@@ -228,6 +228,9 @@ pub struct ModelConfig {
     pub kv_cache_type: String,
     /// GGUFファイルパス（llama-server起動時に使用、Noneならconnect専用）
     pub gguf_path: Option<String>,
+    /// SSEチャンク間タイムアウト秒数（デフォルト60秒、0で無制限）
+    #[serde(default = "default_sse_timeout")]
+    pub sse_chunk_timeout_secs: u64,
     /// 推論パラメータ（temperature等）
     #[serde(default)]
     pub inference: InferenceParams,
@@ -262,6 +265,8 @@ pub struct MemoryConfig {
     pub skill_promotion_threshold: usize,
 }
 
+fn default_sse_timeout() -> u64 { 60 }
+
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
@@ -271,6 +276,7 @@ impl Default for ModelConfig {
             context_length: 16384,
             kv_cache_type: "q8_0".to_string(),
             gguf_path: None,
+            sse_chunk_timeout_secs: 60,
             inference: InferenceParams::default(),
         }
     }

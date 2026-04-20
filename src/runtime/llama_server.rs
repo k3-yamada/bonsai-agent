@@ -21,6 +21,8 @@ pub struct LlamaServerBackend {
     mlx_compatible: bool,
     /// リクエストごとのseed（0=ランダム、非0=固定）
     seed: u64,
+    /// SSEチャンク間タイムアウト秒数（0で無制限）
+    sse_chunk_timeout_secs: u64,
 }
 
 impl LlamaServerBackend {
@@ -32,6 +34,7 @@ impl LlamaServerBackend {
             inference: InferenceParams::default(),
             mlx_compatible: false,
             seed: 0,
+            sse_chunk_timeout_secs: 60,
         }
     }
 
@@ -43,7 +46,14 @@ impl LlamaServerBackend {
             inference,
             mlx_compatible: false,
             seed: 0,
+            sse_chunk_timeout_secs: 60,
         }
+    }
+
+    /// SSEチャンクタイムアウトを設定
+    pub fn with_sse_timeout(mut self, secs: u64) -> Self {
+        self.sse_chunk_timeout_secs = secs;
+        self
     }
 
     /// MLX互換モードを設定
@@ -201,7 +211,10 @@ impl LlamaServerBackend {
         reader: impl std::io::Read,
         on_token: &mut dyn FnMut(&str),
         cancel: &CancellationToken,
+        chunk_timeout_secs: u64,
     ) -> Result<(String, usize, usize)> {
+        // OpenCode知見: SSEチャンク間タイムアウトでハング防止
+        let _ = chunk_timeout_secs; // ureqのinto_reader()はRead traitのみ、TCPタイムアウトはHTTP層で設定済み
         let buf_reader = std::io::BufReader::new(reader);
         let mut full_text = String::new();
         let mut prompt_tokens: usize = 0;
@@ -318,7 +331,15 @@ impl LlmBackend for LlamaServerBackend {
         let start = Instant::now();
 
         // ストリーミングリクエスト送信
-        let response = match ureq::post(&url)
+        // SSEチャンクタイムアウト（OpenCode知見: wrapSSE的保護）
+        let timeout = if self.sse_chunk_timeout_secs > 0 {
+            Some(std::time::Duration::from_secs(self.sse_chunk_timeout_secs))
+        } else {
+            None
+        };
+        let config = ureq::config::Config::builder().timeout_recv_body(timeout).build();
+        let agent = ureq::Agent::new_with_config(config);
+        let response = match agent.post(&url)
             .header("Content-Type", "application/json")
             .send_json(&body)
         {
@@ -340,7 +361,7 @@ impl LlmBackend for LlamaServerBackend {
 
         // SSEストリームをパース
         let reader = response.into_body().into_reader();
-        match self.parse_sse_stream(reader, on_token, cancel) {
+        match self.parse_sse_stream(reader, on_token, cancel, self.sse_chunk_timeout_secs) {
             Ok((text, prompt_tokens, completion_tokens)) => {
                 // SSEでusageが返らないサーバー（MLX等）向けの概算フォールバック
                 let final_prompt = if prompt_tokens == 0 {
@@ -563,7 +584,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, prompt, completion) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
             .unwrap();
 
         assert_eq!(text, "Hello world!");
@@ -582,7 +603,7 @@ mod tests {
                         data: [DONE]\n\n";
         let reader = std::io::Cursor::new(sse_data.as_bytes());
 
-        let result = backend.parse_sse_stream(reader, &mut |_| {}, &cancel);
+        let result = backend.parse_sse_stream(reader, &mut |_| {}, &cancel, 60);
         assert!(result.is_err());
     }
 
@@ -598,7 +619,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, _, _) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
             .unwrap();
 
         assert_eq!(text, "OK");
@@ -617,7 +638,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, _, _) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
             .unwrap();
 
         assert_eq!(text, "OK");
@@ -732,7 +753,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, prompt, completion) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
             .unwrap();
 
         assert_eq!(text, "Hello world");
