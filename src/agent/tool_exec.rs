@@ -46,7 +46,8 @@ pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         output.len().hash(&mut h);
-        output[..safe_end.min(200)].hash(&mut h);
+        let hash_end = output.floor_char_boundary(safe_end.min(200));
+        output[..hash_end].hash(&mut h);
         h.finish()
     };
     let overflow_path = format!("/tmp/bonsai-overflow-{:x}.txt", hash);
