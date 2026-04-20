@@ -71,6 +71,40 @@ pub enum TaskType {
     General,
 }
 
+/// モデル能力レベル — バックエンド種別に応じたツール制限（OpenCode知見）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCapability {
+    /// 全ツール使用可能（llama-server/mlx-lm標準モデル）
+    Full,
+    /// 編集系のみ（file_read/file_write/multi_edit/repo_map/shell）
+    EditFocused,
+    /// 読取+実行のみ（file_read/shell/git/repo_map、編集精度が低いモデル向け）
+    ReadExecute,
+}
+
+impl ModelCapability {
+    /// バックエンド種別からデフォルトのCapabilityを推定
+    pub fn from_backend(backend: &str) -> Self {
+        match backend {
+            "bitnet" => ModelCapability::ReadExecute,
+            _ => ModelCapability::Full,
+        }
+    }
+
+    /// このCapabilityで許可されるツール名を返す（Noneはフィルタなし）
+    pub fn allowed_tools(&self) -> Option<&[&str]> {
+        match self {
+            ModelCapability::Full => None,
+            ModelCapability::EditFocused => Some(&[
+                "file_read", "file_write", "multi_edit", "repo_map", "shell",
+            ]),
+            ModelCapability::ReadExecute => Some(&[
+                "file_read", "repo_map", "shell", "git",
+            ]),
+        }
+    }
+}
+
 /// クエリ文字列からタスク種別を推定する
 /// 日本語キーワードマッチングで判定（1ビットモデル向けにツール選択肢を絞る）
 pub fn detect_task_type(query: &str) -> TaskType {
@@ -202,6 +236,17 @@ impl ToolRegistry {
     /// 名前でツールを取得
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
+    }
+
+    /// モデルCapabilityに基づくツールフィルタリング（OpenCode知見）
+    pub fn select_for_capability(&self, capability: ModelCapability) -> Vec<&dyn Tool> {
+        match capability.allowed_tools() {
+            Some(allowed) => self.tools.values()
+                .filter(|t| allowed.contains(&t.name()))
+                .map(|t| t.as_ref())
+                .collect(),
+            None => self.tools.values().map(|t| t.as_ref()).collect(),
+        }
     }
 
     /// 登録済みツール名の一覧
