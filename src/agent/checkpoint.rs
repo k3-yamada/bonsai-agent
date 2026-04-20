@@ -168,6 +168,8 @@ impl<'a> CheckpointManager<'a> {
     }
 
     /// 指定IDのチェックポイントへロールバック
+    ///
+    /// 追跡済みファイルのみ復元。未追跡ファイルはstash対象外。
     pub fn rollback(&self, id: i64) -> Result<bool> {
         let cp = self
             .cps
