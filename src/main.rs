@@ -436,7 +436,8 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
             &ctx.app_config.model.model_id,
             ctx.app_config.model.inference.clone(),
         )
-        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm);
+        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm)
+        .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
         if !b.is_healthy() {
             eprintln!(
                 "エラー: llama-server ({}) に接続できません。",
@@ -465,7 +466,8 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
             &ctx.app_config.model.model_id,
             ctx.app_config.model.inference.clone(),
         )
-        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm);
+        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm)
+        .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
         if !b.is_healthy() {
             eprintln!(
                 "エラー: llama-server ({}) に接続できません。",

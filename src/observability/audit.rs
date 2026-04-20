@@ -247,12 +247,12 @@ impl<'a> AuditLog<'a> {
             Some(_) => {
                 "SELECT action_data FROM audit_log
                  WHERE action_type = 'task_complete' AND session_id = ?1
-                 ORDER BY id DESC"
+                 ORDER BY id DESC LIMIT 1000"
             }
             None => {
                 "SELECT action_data FROM audit_log
                  WHERE action_type = 'task_complete'
-                 ORDER BY id DESC"
+                 ORDER BY id DESC LIMIT 1000"
             }
         };
         let mut stmt = self.conn.prepare(sql)?;

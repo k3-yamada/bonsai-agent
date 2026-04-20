@@ -211,10 +211,8 @@ impl LlamaServerBackend {
         reader: impl std::io::Read,
         on_token: &mut dyn FnMut(&str),
         cancel: &CancellationToken,
-        chunk_timeout_secs: u64,
     ) -> Result<(String, usize, usize)> {
-        // OpenCode知見: SSEチャンク間タイムアウトでハング防止
-        let _ = chunk_timeout_secs; // ureqのinto_reader()はRead traitのみ、TCPタイムアウトはHTTP層で設定済み
+        // SSEタイムアウトはHTTP Agent層(timeout_recv_body)で適用済み
         let buf_reader = std::io::BufReader::new(reader);
         let mut full_text = String::new();
         let mut prompt_tokens: usize = 0;
@@ -361,7 +359,7 @@ impl LlmBackend for LlamaServerBackend {
 
         // SSEストリームをパース
         let reader = response.into_body().into_reader();
-        match self.parse_sse_stream(reader, on_token, cancel, self.sse_chunk_timeout_secs) {
+        match self.parse_sse_stream(reader, on_token, cancel) {
             Ok((text, prompt_tokens, completion_tokens)) => {
                 // SSEでusageが返らないサーバー（MLX等）向けの概算フォールバック
                 let final_prompt = if prompt_tokens == 0 {
@@ -584,7 +582,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, prompt, completion) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
             .unwrap();
 
         assert_eq!(text, "Hello world!");
@@ -603,7 +601,7 @@ mod tests {
                         data: [DONE]\n\n";
         let reader = std::io::Cursor::new(sse_data.as_bytes());
 
-        let result = backend.parse_sse_stream(reader, &mut |_| {}, &cancel, 60);
+        let result = backend.parse_sse_stream(reader, &mut |_| {}, &cancel);
         assert!(result.is_err());
     }
 
@@ -619,7 +617,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, _, _) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
             .unwrap();
 
         assert_eq!(text, "OK");
@@ -638,7 +636,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, _, _) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
             .unwrap();
 
         assert_eq!(text, "OK");
@@ -753,7 +751,7 @@ mod tests {
         let mut tokens: Vec<String> = Vec::new();
 
         let (text, prompt, completion) = backend
-            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel, 60)
+            .parse_sse_stream(reader, &mut |t| tokens.push(t.to_string()), &cancel)
             .unwrap();
 
         assert_eq!(text, "Hello world");

@@ -89,7 +89,6 @@ fn expand_tilde(path: &str) -> String {
 
 
 /// 編集距離ベースの類似ツール名提案（OpenCode知見: Invalidツールハンドラ）
-#[cfg_attr(not(test), allow(dead_code))]
 fn suggest_similar_tool(name: &str, known: &HashSet<String>) -> Option<String> {
     let mut best: Option<(String, usize)> = None;
     for tool_name in known {
@@ -106,7 +105,6 @@ fn suggest_similar_tool(name: &str, known: &HashSet<String>) -> Option<String> {
 
 /// 簡易Levenshtein距離
 #[allow(clippy::needless_range_loop)]
-#[cfg_attr(not(test), allow(dead_code))]
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -133,11 +131,17 @@ pub fn validate_tool_call(
     let mut issues = Vec::new();
     let patterns = dangerous_patterns.unwrap_or(&DANGEROUS_PATTERNS);
 
-    // 1. ツール名がレジストリに存在するか
+    // 1. ツール名がレジストリに存在するか（OpenCode知見: Invalidツールハンドラ）
     if !known_tools.contains(&call.name) {
+        let suggestion = suggest_similar_tool(&call.name, known_tools);
+        let msg = if let Some(s) = suggestion {
+            format!("不明なツール: '{}'。もしかして: '{}'", call.name, s)
+        } else {
+            format!("不明なツール: '{}'", call.name)
+        };
         issues.push(ValidationIssue {
             severity: Severity::Block,
-            message: format!("不明なツール: '{}'", call.name),
+            message: msg,
         });
     }
 
