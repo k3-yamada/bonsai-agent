@@ -68,7 +68,8 @@ impl McpConnection {
         if let Some(ref url) = config.url {
             // HTTP transportで接続
             let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .map_err(|e| anyhow::anyhow!("HTTPクライアント作成失敗: {e}"))?;
 
@@ -184,12 +185,18 @@ impl McpConnection {
                     .send()
                     .map_err(|e| anyhow::anyhow!("MCP HTTP送信失敗: {e}"))?;
 
+                let status = resp.status();
+                if !status.is_success() {
+                    let err_body = resp.text().unwrap_or_default();
+                    anyhow::bail!("MCP HTTPエラー: ステータス {status}, ボディ: {err_body}");
+                }
+
                 let text = resp
                     .text()
                     .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンス読取失敗: {e}"))?;
 
                 let response: JsonRpcResponse = serde_json::from_str(&text)
-                    .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンスパース失敗: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンスパース失敗: {e}, ボディ: {text}"))?;
 
                 if let Some(error) = response.error {
                     anyhow::bail!("MCPエラー: {error}");
@@ -215,13 +222,14 @@ impl McpConnection {
             }
             McpTransport::Http { client, url } => {
                 let body = serde_json::to_string(&request)?;
-                // MCP仕様上、通知のレスポンスボディは無視するが、送信失敗はエラーとして伝搬
-                client
+                let resp = client
                     .post(url.as_str())
                     .header("Content-Type", "application/json")
                     .body(body)
                     .send()
                     .map_err(|e| anyhow::anyhow!("MCP HTTP通知送信失敗: {e}"))?;
+                // ボディを消費してKeep-Alive接続を正しく解放
+                let _ = resp.text();
             }
         }
         Ok(())
@@ -283,13 +291,28 @@ impl McpConnection {
 }
 
 impl McpConnection {
-    /// MCPサーバーの生存チェック（HTTP: ステートレスのため常にtrue）
+    /// MCPサーバーの生存チェック
     pub fn is_alive(&mut self) -> bool {
         match &mut self.transport {
             McpTransport::Stdio { child, .. } => {
                 matches!(child.try_wait(), Ok(None))
             }
-            McpTransport::Http { .. } => true, // ステートレス接続
+            McpTransport::Http { client, url } => {
+                // HTTPサーバーの死活をtools/listで軽量チェック（タイムアウト5秒）
+                let req = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "tools/list",
+                });
+                client
+                    .post(url.as_str())
+                    .header("Content-Type", "application/json")
+                    .timeout(std::time::Duration::from_secs(5))
+                    .body(req.to_string())
+                    .send()
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false)
+            }
         }
     }
 }
@@ -563,6 +586,116 @@ url = "https://mcp.example.com/rpc"
             parsed["params"]["arguments"]["path"],
             "/tmp/test.txt"
         );
+    }
+
+    #[test]
+    fn test_http_notification_format() {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        });
+        let json = serde_json::to_string(&notification).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["method"], "notifications/initialized");
+        assert!(parsed.get("id").is_none());
+    }
+
+    #[test]
+    fn test_http_error_response_parsing() {
+        let error_json = r#"{"id": 1, "result": null, "error": {"code": -32601, "message": "Method not found"}}"#;
+        let response: JsonRpcResponse = serde_json::from_str(error_json).unwrap();
+        assert!(response.error.is_some());
+        let err = response.error.unwrap();
+        assert_eq!(err["code"], -32601);
+    }
+
+    #[test]
+    fn test_http_tool_call_result_empty_content() {
+        let result = serde_json::json!({"content": []});
+        let text = result
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_http_tool_call_result_with_text() {
+        let result = serde_json::json!({
+            "content": [{"type": "text", "text": "ファイル内容です"}]
+        });
+        let text = result
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(text, "ファイル内容です");
+    }
+
+    #[test]
+    fn test_http_config_url_overrides_command() {
+        let toml_str = r#"
+name = "http-server"
+command = "should-not-run"
+args = ["--invalid"]
+url = "http://localhost:9090/mcp"
+"#;
+        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.url.is_some());
+        assert_eq!(config.command, "should-not-run");
+    }
+
+    #[test]
+    fn test_http_initialize_request_format() {
+        let init_params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
+        });
+        assert_eq!(init_params["protocolVersion"], "2024-11-05");
+        assert_eq!(init_params["clientInfo"]["name"], "bonsai-agent");
+    }
+
+    #[test]
+    fn test_http_tool_call_result_no_content_field() {
+        let result = serde_json::json!({"status": "ok"});
+        let text = result
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_http_tool_call_result_non_text_content() {
+        let result = serde_json::json!({
+            "content": [{"type": "image", "data": "base64..."}]
+        });
+        let text = result
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_json_rpc_response_both_result_and_error() {
+        let json = r#"{"id": 1, "result": {"tools": []}, "error": {"code": -1, "message": "partial"}}"#;
+        let response: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert!(response.error.is_some());
+        assert!(response.result.is_some());
     }
 
     // 実MCPサーバーとの統合テスト
