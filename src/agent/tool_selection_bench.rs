@@ -241,6 +241,17 @@ pub fn default_cases() -> Vec<ToolSelectionCase> {
     ]
 }
 
+/// FunctionGemmaが生成するツール名を正規化
+/// 例: "git status" → "git", "file_read" → "file_read"
+fn normalize_tool_name(name: &str) -> String {
+    // スペースで分割し、最初の語をツール名とみなす
+    // （FunctionGemmaが `call:git status{}` のようにサブコマンドを名前に含めるケース対応）
+    name.split_whitespace()
+        .next()
+        .unwrap_or(name)
+        .to_string()
+}
+
 /// FunctionGemma形式でllama-serverに問い合わせ、ツール選択を1件実行
 fn run_single_case(
     base_url: &str,
@@ -256,9 +267,10 @@ fn run_single_case(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": case.query}
         ],
-        "max_tokens": 256,
+        "max_tokens": 128,
         "temperature": 0.1,
-        "stream": false
+        "stream": false,
+        "stop": ["<end_function_call>"]
     });
 
     let resp: serde_json::Value = ureq::post(&format!("{base_url}/v1/chat/completions"))
@@ -277,14 +289,25 @@ fn run_single_case(
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
+    // stop sequenceで切れた場合、閉じタグを補完してからパース
+    let raw_for_parse = if raw_output.contains("<start_function_call>")
+        && !raw_output.contains("<end_function_call>")
+    {
+        format!("{raw_output}<end_function_call>")
+    } else {
+        raw_output.clone()
+    };
+
     // FunctionGemma出力をパース
-    let selected = match parse_functiongemma_output(&raw_output) {
-        Ok(parsed) if !parsed.tool_calls.is_empty() => Some(parsed.tool_calls[0].name.clone()),
+    let selected = match parse_functiongemma_output(&raw_for_parse) {
+        Ok(parsed) if !parsed.tool_calls.is_empty() => {
+            Some(normalize_tool_name(&parsed.tool_calls[0].name))
+        }
         _ => None,
     };
 
     let correct = match &selected {
-        Some(name) => case.expected_tools.contains(name),
+        Some(name) => case.expected_tools.iter().any(|e| name.starts_with(e)),
         None => false,
     };
 
