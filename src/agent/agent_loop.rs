@@ -2034,7 +2034,7 @@ mod tests {
             success: true,
             is_error: false,
         };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store));
+        apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store), 4000);
 
         // グラフにツール使用が記録されていることを確認
         let graph = KnowledgeGraph::new(store.conn());
@@ -2064,7 +2064,7 @@ mod tests {
             success: false,
             is_error: true,
         };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store));
+        apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store), 4000);
 
         // グラフにエラーパターンが記録されていることを確認
         let graph = KnowledgeGraph::new(store.conn());

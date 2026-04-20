@@ -30,6 +30,33 @@ pub(crate) struct ToolExecResult {
     pub is_error: bool,
 }
 
+/// ツール出力をmax_chars以内に切り詰め（OpenCode知見: スピルオーバー保存）
+pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
+    if max_chars == 0 || output.len() <= max_chars {
+        return output.to_string();
+    }
+    let safe_end = output
+        .char_indices()
+        .take_while(|(i, _)| *i < max_chars)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let truncated = &output[..safe_end];
+    let hash = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        output.len().hash(&mut h);
+        output[..safe_end.min(200)].hash(&mut h);
+        h.finish()
+    };
+    let overflow_path = format!("/tmp/bonsai-overflow-{:x}.txt", hash);
+    let _ = std::fs::write(&overflow_path, output);
+    format!(
+        "{}...\n[全文保存: {} ({}文字、表示{}文字)]",
+        truncated, overflow_path, output.len(), safe_end
+    )
+}
+
 /// 単一ツール呼び出しを実行
 pub(crate) fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
     match call.tool.call(call.coerced_args.clone()) {
@@ -73,6 +100,7 @@ pub(crate) fn apply_tool_result(
     circuit_breaker: &mut CircuitBreaker,
     secrets_filter: &SecretsFilter,
     store: Option<&MemoryStore>,
+    max_output_chars: usize,
 ) {
     let file_path = serde_json::from_str::<serde_json::Value>(&r.args_json)
         .ok()
@@ -99,6 +127,7 @@ pub(crate) fn apply_tool_result(
     } else {
         circuit_breaker.record_success(&r.name);
         let redacted = secrets_filter.redact(&r.output);
+        let redacted = truncate_tool_output(&redacted, max_output_chars);
         if let Some(s) = store {
             let audit = AuditLog::new(s.conn());
             let _ = audit.log(
@@ -151,7 +180,7 @@ pub(crate) fn execute_validated_calls(
                         },
                     );
                 }
-                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
+                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
                 if !r.is_error {
                     step_tools.push(r.name);
                 }
@@ -181,7 +210,7 @@ pub(crate) fn execute_validated_calls(
                         },
                     );
                 }
-                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
+                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
                 if !r.is_error {
                     step_tools.push(r.name);
                 }
@@ -189,7 +218,7 @@ pub(crate) fn execute_validated_calls(
         }
         if i < calls.len() && !calls[i].is_read_only {
             let r = execute_single_call(&calls[i]);
-            apply_tool_result(&r, session, circuit_breaker, secrets_filter, store);
+            apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
             if !r.is_error {
                 step_tools.push(r.name);
             }
@@ -299,7 +328,7 @@ mod tests {
             success: true,
             is_error: false,
         };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, None);
+        apply_tool_result(&r, &mut session, &mut cb, &sf, None, 4000);
         assert!(
             session
                 .messages
@@ -320,7 +349,7 @@ mod tests {
             success: false,
             is_error: true,
         };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, None);
+        apply_tool_result(&r, &mut session, &mut cb, &sf, None, 4000);
         assert!(
             session
                 .messages
@@ -343,3 +372,41 @@ mod tests {
         assert!(call.is_read_only);
     }
 }
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_small_output() {
+        let output = "hello world";
+        let result = truncate_tool_output(output, 4000);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_large_output() {
+        let output = "a".repeat(5000);
+        let result = truncate_tool_output(&output, 4000);
+        assert!(result.contains("..."));
+        assert!(result.contains("全文保存"));
+        assert!(result.contains("5000文字"));
+    }
+
+    #[test]
+    fn test_truncate_unicode_safe() {
+        let output = "日本語テスト".repeat(1000);
+        let result = truncate_tool_output(&output, 100);
+        // Unicode境界で安全に切断されていることを確認
+        assert!(result.contains("..."));
+        // パニックしないことが重要
+    }
+
+    #[test]
+    fn test_truncate_zero_max() {
+        let output = "hello";
+        let result = truncate_tool_output(output, 0);
+        assert_eq!(result, "hello");
+    }
+}
+
