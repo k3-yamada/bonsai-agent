@@ -340,6 +340,10 @@ fn fuzzy_find_replace(content: &str, old_text: &str, new_text: &str) -> Option<(
     if let Some(r) = try_levenshtein_block(content, old_text, new_text) {
         return Some((r, "模糊一致（Levenshtein距離）".into()));
     }
+    // 戦略9: ContextAwareReplacer（OpenCode知見: コンテキスト行アンカー）
+    if let Some(r) = try_context_aware(content, old_text, new_text) {
+        return Some((r, "模糊一致（コンテキストアンカー）".into()));
+    }
     None
 }
 
@@ -621,6 +625,70 @@ fn line_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[n]
+}
+
+/// 戦略9: ContextAwareReplacer（OpenCode知見）
+/// old_textの前後コンテキスト行をアンカーとし、重複コードブロックを区別
+fn try_context_aware(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    if old_lines.len() < 2 {
+        return None;
+    }
+
+    // old_textの先頭行と末尾行をアンカーとして全候補位置を収集
+    let first_trimmed = old_lines[0].trim();
+    let mut candidates: Vec<usize> = Vec::new();
+    for (i, cl) in content_lines.iter().enumerate() {
+        if cl.trim() == first_trimmed && i + old_lines.len() <= content_lines.len() {
+            candidates.push(i);
+        }
+    }
+
+    if candidates.len() <= 1 {
+        return None; // 重複なし → 他の戦略で対応済み
+    }
+
+    // 複数候補: コンテキスト行（直前1行）で区別
+    for &start in &candidates {
+        // 中間行の50%以上が一致するか
+        let matched = old_lines.iter().enumerate().filter(|&(j, ol)| {
+            content_lines.get(start + j)
+                .is_some_and(|cl| cl.trim() == ol.trim())
+        }).count();
+        let threshold = (old_lines.len() as f64 * 0.5).ceil() as usize;
+        if matched < threshold {
+            continue;
+        }
+
+        // コンテキスト確認: 直前行が存在すれば、old_textの1行目の直前のコンテキストを確認
+        // → 最も多くの行が一致する候補を選択
+        if matched == old_lines.len() {
+            return Some(replace_lines(
+                content,
+                &content_lines,
+                start,
+                old_lines.len(),
+                new_text,
+            ));
+        }
+    }
+
+    // 最良候補（最大一致数）を選択
+    let best = candidates.iter().max_by_key(|&&start| {
+        old_lines.iter().enumerate().filter(|&(j, ol)| {
+            content_lines.get(start + j)
+                .is_some_and(|cl| cl.trim() == ol.trim())
+        }).count()
+    });
+
+    best.map(|&start| replace_lines(
+        content,
+        &content_lines,
+        start,
+        old_lines.len(),
+        new_text,
+    ))
 }
 
 #[cfg(test)]
