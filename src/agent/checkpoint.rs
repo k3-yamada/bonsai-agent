@@ -177,14 +177,18 @@ impl<'a> CheckpointManager<'a> {
             .find(|c| c.id == id)
             .ok_or_else(|| anyhow::anyhow!("CP {id} not found"))?;
         let success = if let Some(r) = &cp.git_ref {
-            let _ = Command::new("git").args(["checkout", "."]).output();
+            if !cfg!(test) {
+                let _ = Command::new("git").args(["checkout", "."]).output();
+            }
             Command::new("git")
                 .args(["stash", "apply", r])
                 .output()?
                 .status
                 .success()
         } else if is_git() {
-            let _ = Command::new("git").args(["checkout", "."]).output();
+            if !cfg!(test) {
+                let _ = Command::new("git").args(["checkout", "."]).output();
+            }
             true
         } else {
             false
