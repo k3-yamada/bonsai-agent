@@ -119,6 +119,9 @@ impl<'a> CheckpointManager<'a> {
     }
 
     /// チェックポイントを作成し、git stash と DB（設定時）に記録
+    ///
+    /// 追跡済みファイルの変更のみstashする（未追跡ファイルは対象外）。
+    /// Lab実行中にClaude Codeが新規ファイルを作成しても干渉しない。
     pub fn create(&mut self, desc: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let git_ref = if is_git() {
@@ -128,7 +131,6 @@ impl<'a> CheckpointManager<'a> {
                     "push",
                     "-m",
                     &format!("bonsai-cp-{desc}"),
-                    "--include-untracked",
                 ])
                 .output()?;
             if o.status.success()
