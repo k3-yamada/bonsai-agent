@@ -11,7 +11,7 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
-- **100のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（739テスト、66ソースファイル）
+- **135のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（840テスト、69ソースファイル）
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
 - **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
 - **読取ツール並列実行** — 連続読取2件以上で自動並列化（書き込みはバリア逐次）
@@ -113,7 +113,8 @@ cargo run -- --server-url <URL>        # カスタムサーバーURL
 |--------|------|------|
 | `shell` | Confirm | シェルコマンド実行（Sandbox経由） |
 | `file_read` | Auto | ファイル読み取り（並列実行対応） |
-| `file_write` | Confirm | ファイル書き込み（全文 or search/replace差分、fuzzy 7戦略） |
+| `file_write` | Confirm | ファイル書き込み（全文 or search/replace差分、fuzzy 9戦略） |
+| `multi_edit` | Confirm | 単一ファイル複数箇所一括編集（アトミック操作） |
 | `git` | Confirm | Git操作（status/diff/log/commit/add/branch） |
 | `web_search` | Auto | Web検索（DuckDuckGo API） |
 | `web_fetch` | Auto | URLからテキスト取得 |
@@ -155,7 +156,7 @@ LLM推論（Bonsai-8B via llama-server / mlx-lm）
 
 ## 設定
 
-`~/.config/bonsai-agent/config.toml`（オプション、なくてもデフォルト値で動作）
+`~/Library/Application Support/bonsai-agent/config.toml`（macOS）または `~/.config/bonsai-agent/config.toml`（Linux）。オプション、なくてもデフォルト値で動作。
 
 `cargo run -- --init` でテンプレートを生成可能。
 
@@ -208,6 +209,13 @@ location = { type = "string", description = "都市名" }
 name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# HTTP transport（Streamable HTTP MCP）
+# [[mcp.servers]]
+# name = "remote"
+# command = ""
+# args = []
+# url = "http://localhost:3000/mcp"
 ```
 
 ## ナレッジVault
@@ -272,7 +280,7 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - ベースライン: score=0.8596, pass@k=1.0
 - 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
 
-## ハーネスパターン（106項目）
+## ハーネスパターン（135項目）
 
 「Scaffolding > Model」設計原則に基づく、1ビットモデルの信頼性向上パターン:
 
@@ -280,7 +288,7 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - **Continue Sites**: 連続失敗→リトライ→再計画→安全停止の3段エスカレーション
 - **2層LoopDetector**: salient hash + 頻度閾値 + 循環パターン検出
 - **StallDetector**: 進捗なし検出→Advisor連携で再計画注入
-- **fuzzyマッチ7戦略**: 空白正規化/Trim/インデント柔軟/Unicode/エスケープ/Blockアンカー/境界Trim
+- **fuzzyマッチ9戦略**: 空白正規化/Trim/インデント柔軟/Unicode/エスケープ/Blockアンカー/境界Trim
 - **Deferred Schema**: ツールスキーマ名+説明のみでトークン80%節約
 - **段階分離パイプライン**: 複雑タスク検出→計画プレステップ自動注入
 - **Event Sourcing**: 統一イベントストリーム（リプレイ・分析対応）
@@ -292,12 +300,12 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - **構造化エラー分類12種**: FailureMode拡張 + RecoveryHint
 - **ヘルスチェック統一**: /health + /v1/modelsフォールバック（MLX対応）
 
-全106項目の詳細はCLAUDE.mdを参照。
+全135項目の詳細はCLAUDE.mdを参照。
 
 ## 開発
 
 ```bash
-cargo test                     # 739テスト
+cargo test                     # 840テスト
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマット
 cargo build --features full    # fastembed有効化ビルド
