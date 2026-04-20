@@ -139,6 +139,9 @@ pub struct Experiment {
     pub pass_at_k: Option<f64>,
     pub pass_consecutive_k: Option<f64>,
     pub score_variance: Option<f64>,
+    /// プリスクリーニングで早期棄却された実験（フルベンチマーク未実行）
+    #[serde(default)]
+    pub prescreened: bool,
 }
 
 impl Experiment {
@@ -167,6 +170,7 @@ impl Experiment {
             pass_at_k: None,
             pass_consecutive_k: None,
             score_variance: None,
+            prescreened: false,
         }
     }
 
@@ -201,6 +205,7 @@ impl Experiment {
                     .sum::<f64>()
                     / experiment.task_scores.len().max(1) as f64,
             ),
+            prescreened: false,
         }
     }
 }
@@ -213,8 +218,8 @@ impl ExperimentLog {
     pub fn save_to_db(conn: &Connection, exp: &Experiment) -> Result<()> {
         conn.execute(
             "INSERT INTO experiments (experiment_id, mutation_type, mutation_detail, \
-             baseline_score, experiment_score, delta, accepted, duration_secs) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             baseline_score, experiment_score, delta, accepted, duration_secs, prescreened) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 exp.experiment_id,
                 exp.mutation_type.as_str(),
@@ -224,6 +229,7 @@ impl ExperimentLog {
                 exp.delta,
                 exp.accepted as i32,
                 exp.duration_secs,
+                exp.prescreened as i32,
             ],
         )?;
 
@@ -248,13 +254,13 @@ impl ExperimentLog {
         if needs_header {
             writeln!(
                 file,
-                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance"
+                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\tprescreened"
             )?;
         }
 
         writeln!(
             file,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}",
             exp.experiment_id,
             exp.mutation_type.as_str(),
             exp.mutation_detail.replace('\t', " "),
@@ -268,6 +274,7 @@ impl ExperimentLog {
                 .map_or("-".to_string(), |v| format!("{v:.4}")),
             exp.score_variance
                 .map_or("-".to_string(), |v| format!("{v:.6}")),
+            exp.prescreened,
         )?;
         Ok(())
     }
@@ -276,7 +283,8 @@ impl ExperimentLog {
     pub fn recent_experiments(conn: &Connection, limit: usize) -> Result<Vec<Experiment>> {
         let mut stmt = conn.prepare(
             "SELECT experiment_id, mutation_type, mutation_detail, \
-             baseline_score, experiment_score, delta, accepted, duration_secs \
+             baseline_score, experiment_score, delta, accepted, duration_secs, \
+             COALESCE(prescreened, 0) \
              FROM experiments ORDER BY id DESC LIMIT ?1",
         )?;
 
@@ -290,18 +298,20 @@ impl ExperimentLog {
                 row.get::<_, f64>(5)?,
                 row.get::<_, i32>(6)?,
                 row.get::<_, f64>(7)?,
+                row.get::<_, i32>(8)?,
             ))
         })?;
 
+        // config_snapshot用のステートメントをループ外で準備
+        let mut config_stmt = conn.prepare(
+            "SELECT config_key, config_value FROM experiment_config WHERE experiment_id = ?1",
+        )?;
+
         let mut experiments = Vec::new();
         for row in rows {
-            let (id, mt, detail, baseline, score, delta, accepted, dur) = row?;
+            let (id, mt, detail, baseline, score, delta, accepted, dur, prescreened) = row?;
             let mutation_type = MutationType::parse(&mt).unwrap_or(MutationType::PromptRule);
 
-            // config_snapshotを取得
-            let mut config_stmt = conn.prepare(
-                "SELECT config_key, config_value FROM experiment_config WHERE experiment_id = ?1",
-            )?;
             let config: HashMap<String, String> = config_stmt
                 .query_map(params![id], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -322,6 +332,7 @@ impl ExperimentLog {
                 pass_at_k: None,
                 pass_consecutive_k: None,
                 score_variance: None,
+                prescreened: prescreened != 0,
             });
         }
         Ok(experiments)
@@ -351,7 +362,8 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        for version in 1..=2 {
+        // V7まで適用（prescreenedカラム含む）
+        for version in [1, 2, 7] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -372,6 +384,7 @@ mod tests {
             pass_at_k: None,
             pass_consecutive_k: None,
             score_variance: None,
+            prescreened: false,
         }
     }
 
@@ -497,7 +510,7 @@ mod tests {
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
         let data_line = content.lines().nth(1).unwrap();
-        assert_eq!(data_line.split('\t').count(), 11);
+        assert_eq!(data_line.split('\t').count(), 12);
     }
 
     #[test]

@@ -485,6 +485,7 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
         tsv_path: Some(tsv_path),
         max_experiments: Some(max_experiments),
         dreamer_interval: ctx.app_config.experiment.dreamer_interval,
+        ..Default::default()
     };
     let backend = CachedBackend::new(backend, 200);
     let experiments = run_experiment_loop(

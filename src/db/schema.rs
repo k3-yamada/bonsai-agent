@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -32,6 +32,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 6,
         description: "TTL: memories, experiences, skills に expires_at カラム追加",
         sql: SCHEMA_V6,
+    },
+    Migration {
+        version: 7,
+        description: "プリスクリーニング: experiments に prescreened カラム追加",
+        sql: SCHEMA_V7,
     },
 ];
 
@@ -202,6 +207,10 @@ CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
 CREATE INDEX IF NOT EXISTS idx_experiences_expires ON experiences(expires_at);
 "#;
 
+const SCHEMA_V7: &str = r#"
+ALTER TABLE experiments ADD COLUMN prescreened INTEGER NOT NULL DEFAULT 0;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +334,18 @@ mod tests {
         assert!(
             SCHEMA_V5.contains("idx_knowledge_edges_target"),
             "V5にターゲットインデックスが必要"
+        );
+    }
+
+    #[test]
+    fn test_schema_v7_contains_prescreened_column() {
+        assert!(
+            SCHEMA_V7.contains("prescreened"),
+            "V7にprescreenedカラムが必要"
+        );
+        assert!(
+            SCHEMA_V7.contains("ALTER TABLE experiments"),
+            "V7はexperimentsテーブルのALTER"
         );
     }
 }

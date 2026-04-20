@@ -15,6 +15,9 @@ pub struct McpServerConfig {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    /// HTTP transportを使用する場合のURL（設定時はcommand/argsを無視）
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// JSON-RPC リクエスト
@@ -38,57 +41,105 @@ struct JsonRpcResponse {
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-/// MCPサーバープロセスとの接続
+/// MCP通信トランスポート
+enum McpTransport {
+    /// 子プロセスstdio通信
+    Stdio {
+        child: Child,
+        stdin: ChildStdin,
+        reader: BufReader<ChildStdout>,
+    },
+    /// HTTP JSON-RPC通信
+    Http {
+        client: reqwest::blocking::Client,
+        url: String,
+    },
+}
+
+/// MCPサーバーとの接続
 pub struct McpConnection {
-    child: Child,
-    stdin: ChildStdin,
-    reader: BufReader<ChildStdout>,
-    #[allow(dead_code)]
+    transport: McpTransport,
     config: McpServerConfig,
 }
 
 impl McpConnection {
-    /// MCPサーバーを子プロセスとして起動
+    /// MCPサーバーへ接続（url設定時はHTTP、未設定時はstdioプロセス起動）
     pub fn spawn(config: &McpServerConfig) -> Result<Self> {
-        let mut child = Command::new(&config.command)
-            .args(&config.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command))?;
+        if let Some(ref url) = config.url {
+            // HTTP transportで接続
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| anyhow::anyhow!("HTTPクライアント作成失敗: {e}"))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdin取得失敗"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdout取得失敗"))?;
-        let reader = BufReader::new(stdout);
+            let mut conn = Self {
+                transport: McpTransport::Http {
+                    client,
+                    url: url.clone(),
+                },
+                config: config.clone(),
+            };
 
-        let mut conn = Self {
-            child,
-            stdin,
-            reader,
-            config: config.clone(),
-        };
+            // initialize
+            conn.send_request(
+                "initialize",
+                Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
+                })),
+            )?;
 
-        // initialize
-        conn.send_request(
-            "initialize",
-            Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
-            })),
-        )?;
+            // initialized通知
+            conn.send_notification("notifications/initialized")?;
 
-        // initialized通知
-        conn.send_notification("notifications/initialized")?;
+            Ok(conn)
+        } else {
+            // Stdio transportで起動
+            let mut child = Command::new(&config.command)
+                .args(&config.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| {
+                    anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command)
+                })?;
 
-        Ok(conn)
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdin取得失敗"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("MCPサーバーのstdout取得失敗"))?;
+            let reader = BufReader::new(stdout);
+
+            let mut conn = Self {
+                transport: McpTransport::Stdio {
+                    child,
+                    stdin,
+                    reader,
+                },
+                config: config.clone(),
+            };
+
+            // initialize
+            conn.send_request(
+                "initialize",
+                Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
+                })),
+            )?;
+
+            // initialized通知
+            conn.send_notification("notifications/initialized")?;
+
+            Ok(conn)
+        }
     }
 
     /// JSON-RPCリクエストを送信してレスポンスを受け取る
@@ -105,20 +156,48 @@ impl McpConnection {
             params,
         };
 
-        let request_json = serde_json::to_string(&request)?;
-        writeln!(self.stdin, "{request_json}")?;
-        self.stdin.flush()?;
+        match &mut self.transport {
+            McpTransport::Stdio {
+                stdin, reader, ..
+            } => {
+                let request_json = serde_json::to_string(&request)?;
+                writeln!(stdin, "{request_json}")?;
+                stdin.flush()?;
 
-        let mut line = String::new();
-        self.reader.read_line(&mut line)?;
+                let mut line = String::new();
+                reader.read_line(&mut line)?;
 
-        let response: JsonRpcResponse = serde_json::from_str(line.trim())?;
+                let response: JsonRpcResponse = serde_json::from_str(line.trim())?;
 
-        if let Some(error) = response.error {
-            anyhow::bail!("MCPエラー: {error}");
+                if let Some(error) = response.error {
+                    anyhow::bail!("MCPエラー: {error}");
+                }
+
+                Ok(response.result.unwrap_or(serde_json::Value::Null))
+            }
+            McpTransport::Http { client, url } => {
+                let body = serde_json::to_string(&request)?;
+                let resp = client
+                    .post(url.as_str())
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .send()
+                    .map_err(|e| anyhow::anyhow!("MCP HTTP送信失敗: {e}"))?;
+
+                let text = resp
+                    .text()
+                    .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンス読取失敗: {e}"))?;
+
+                let response: JsonRpcResponse = serde_json::from_str(&text)
+                    .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンスパース失敗: {e}"))?;
+
+                if let Some(error) = response.error {
+                    anyhow::bail!("MCPエラー: {error}");
+                }
+
+                Ok(response.result.unwrap_or(serde_json::Value::Null))
+            }
         }
-
-        Ok(response.result.unwrap_or(serde_json::Value::Null))
     }
 
     /// 通知を送信（レスポンスなし）
@@ -128,9 +207,23 @@ impl McpConnection {
             "method": method,
         });
 
-        let json = serde_json::to_string(&request)?;
-        writeln!(self.stdin, "{json}")?;
-        self.stdin.flush()?;
+        match &mut self.transport {
+            McpTransport::Stdio { stdin, .. } => {
+                let json = serde_json::to_string(&request)?;
+                writeln!(stdin, "{json}")?;
+                stdin.flush()?;
+            }
+            McpTransport::Http { client, url } => {
+                let body = serde_json::to_string(&request)?;
+                // MCP仕様上、通知のレスポンスボディは無視するが、送信失敗はエラーとして伝搬
+                client
+                    .post(url.as_str())
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .send()
+                    .map_err(|e| anyhow::anyhow!("MCP HTTP通知送信失敗: {e}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -190,19 +283,23 @@ impl McpConnection {
 }
 
 impl McpConnection {
-    /// MCPサーバープロセスの生存チェック
+    /// MCPサーバーの生存チェック（HTTP: ステートレスのため常にtrue）
     pub fn is_alive(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(None) => true,  // まだ実行中
-            _ => false,        // 終了済みまたはエラー
+        match &mut self.transport {
+            McpTransport::Stdio { child, .. } => {
+                matches!(child.try_wait(), Ok(None))
+            }
+            McpTransport::Http { .. } => true, // ステートレス接続
         }
     }
 }
 
 impl Drop for McpConnection {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let McpTransport::Stdio { child, .. } = &mut self.transport {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -262,8 +359,10 @@ impl Tool for McpToolWrapper {
             .connection
             .lock()
             .map_err(|_| anyhow::anyhow!("MCP接続ロック取得失敗"))?;
-        // 自動復旧: プロセス死亡時に再接続
-        if !conn.is_alive() {
+        // 自動復旧: stdioプロセス死亡時に再接続
+        // HTTP transportはステートレスのため再接続不要（send_request内でリトライなし、呼出側で対応）
+        if !conn.is_alive() && matches!(conn.transport, McpTransport::Stdio { .. }) {
+            // clone必須: *conn = new_conn で参照先が上書きされるため、事前にconfigをコピー
             match McpConnection::spawn(&conn.config.clone()) {
                 Ok(new_conn) => {
                     *conn = new_conn;
@@ -309,6 +408,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         assert_eq!(config.name, "filesystem");
         assert_eq!(config.command, "npx");
         assert_eq!(config.args.len(), 3);
+        assert!(config.url.is_none()); // url未設定時はNone
     }
 
     #[test]
@@ -385,6 +485,86 @@ args = ["-y", "@modelcontextprotocol/server-git"]
         assert_eq!(config.servers[1].name, "git");
     }
 
+    #[test]
+    fn test_mcp_server_config_with_url() {
+        // url設定時のデシリアライズ検証
+        let toml_str = r#"
+name = "remote-mcp"
+command = "unused"
+args = []
+url = "http://localhost:8080/mcp"
+"#;
+        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name, "remote-mcp");
+        assert_eq!(config.url.as_deref(), Some("http://localhost:8080/mcp"));
+        // command/argsはHTTP時は無視されるが、フィールドとして保持
+        assert_eq!(config.command, "unused");
+    }
+
+    #[test]
+    fn test_mcp_server_config_without_url() {
+        // url未設定時の後方互換性検証
+        let toml_str = r#"
+name = "stdio-server"
+command = "npx"
+args = ["-y", "some-mcp-server"]
+"#;
+        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.url.is_none());
+        assert_eq!(config.command, "npx");
+    }
+
+    #[test]
+    fn test_mcp_server_config_http_toml() {
+        // 複数サーバー混在（stdio + HTTP）のTOML検証
+        let toml_str = r#"
+[[servers]]
+name = "local"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[servers]]
+name = "remote"
+command = "unused"
+args = []
+url = "https://mcp.example.com/rpc"
+"#;
+        let config: crate::config::McpConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.servers.len(), 2);
+        assert!(config.servers[0].url.is_none()); // stdioサーバー
+        assert_eq!(
+            config.servers[1].url.as_deref(),
+            Some("https://mcp.example.com/rpc")
+        );
+    }
+
+    #[test]
+    fn test_http_transport_request_serialization() {
+        // HTTP transport用JSON-RPCリクエストのフォーマット検証
+        let id = 42u64;
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "read_file",
+                "arguments": {"path": "/tmp/test.txt"}
+            })),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // JSON-RPC 2.0準拠のフィールド検証
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert_eq!(parsed["id"], 42);
+        assert_eq!(parsed["method"], "tools/call");
+        assert_eq!(parsed["params"]["name"], "read_file");
+        assert_eq!(
+            parsed["params"]["arguments"]["path"],
+            "/tmp/test.txt"
+        );
+    }
+
     // 実MCPサーバーとの統合テスト
     #[test]
     #[ignore]
@@ -398,6 +578,7 @@ args = ["-y", "@modelcontextprotocol/server-git"]
                 "@modelcontextprotocol/server-filesystem".to_string(),
                 "/tmp".to_string(),
             ],
+            url: None,
         };
         let mut conn = McpConnection::spawn(&config).unwrap();
         let tools = conn.list_tools().unwrap();

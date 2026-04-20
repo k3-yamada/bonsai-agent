@@ -309,11 +309,31 @@ impl MetaMutationGenerator {
     }
 }
 
-/// 少数タスクで変異の効果を事前推定する（フルベンチマークの代替）
+/// 少数タスクで変異の効果を事前推定する（事前計算済みベースラインスコアは使わず、
+/// サンプルタスク上で独自にベースラインを計測して比較する）
 /// タスク数の半分（最大4タスク）で1回実行し、delta推定値を返す
 pub fn estimate_mutation_effect(
     base_config: &AgentConfig,
     mutation: &Mutation,
+    backend: &dyn LlmBackend,
+    tools: &ToolRegistry,
+    path_guard: &PathGuard,
+    cancel: &CancellationToken,
+) -> Result<f64> {
+    // 旧APIラッパー: ベースラインスコア0.0を渡すが、内部でサンプル独自計測するため無関係
+    estimate_mutation_effect_with_baseline(
+        base_config, mutation, 0.0, backend, tools, path_guard, cancel,
+    )
+}
+
+/// 少数タスクで変異の効果を事前推定する（プリスクリーニング用）
+/// サンプルタスク上でベースラインと変異後の両方を計測し、delta推定値を返す。
+/// `_baseline_score`引数は互換性のために受け取るが、サンプルタスクの特性が
+/// フルスイートと異なる可能性があるため、サンプル独自のベースラインを計測する。
+pub fn estimate_mutation_effect_with_baseline(
+    base_config: &AgentConfig,
+    mutation: &Mutation,
+    _baseline_score: f64,
     backend: &dyn LlmBackend,
     tools: &ToolRegistry,
     path_guard: &PathGuard,
@@ -333,7 +353,7 @@ pub fn estimate_mutation_effect(
     };
     let pass_threshold = 0.5;
 
-    // ベースライン（サンプルタスクのみ）
+    // サンプルタスク上でベースライン計測（フルスイートのスコアとは異なる可能性がある）
     let baseline = sample_suite.run_k(
         base_config,
         backend,
@@ -359,9 +379,9 @@ pub fn estimate_mutation_effect(
     let delta = experiment.composite_score() - baseline.composite_score();
     log_event(
         LogLevel::Info,
-        "meta_mutation",
+        "lab",
         &format!(
-            "effect estimate: {} -> delta={:+.4} ({} tasks, k=1)",
+            "pre-screen estimate: {} -> delta={:+.4} ({} tasks, k=1)",
             mutation.detail, delta, sample_size,
         ),
     );
@@ -376,6 +396,10 @@ pub struct ExperimentLoopConfig {
     pub max_experiments: Option<usize>,
     /// Dreamerレポート間隔（N実験ごと）
     pub dreamer_interval: usize,
+    /// プリスクリーニング有効化（少数タスクで事前評価し、明らかな悪化を早期棄却）
+    pub enable_prescreening: bool,
+    /// プリスクリーニング棄却閾値（推定deltaがこの値未満なら早期棄却）
+    pub prescreening_threshold: f64,
 }
 
 impl Default for ExperimentLoopConfig {
@@ -384,6 +408,8 @@ impl Default for ExperimentLoopConfig {
             tsv_path: None,
             max_experiments: None,
             dreamer_interval: 10,
+            enable_prescreening: true,
+            prescreening_threshold: -0.01,
         }
     }
 }
@@ -483,6 +509,52 @@ pub fn run_experiment_loop(
 
         // b. 変異適用
         let modified_config = apply_mutation(base_config, &mutation);
+
+        // b2. プリスクリーニング: 少数タスクで事前評価し、明らかな悪化を早期棄却
+        if loop_config.enable_prescreening {
+            let estimated_delta = estimate_mutation_effect_with_baseline(
+                base_config,
+                &mutation,
+                baseline.composite_score(),
+                backend,
+                tools,
+                path_guard,
+                cancel,
+            )?;
+            if estimated_delta < loop_config.prescreening_threshold {
+                eprintln!(
+                    "[lab] pre-screen REJECT: {} (estimated delta={:+.4})",
+                    mutation.detail, estimated_delta
+                );
+                let snapshot = config_snapshot(&modified_config);
+                let exp = Experiment {
+                    experiment_id: experiment_id.clone(),
+                    mutation_type: mutation.mutation_type,
+                    mutation_detail: mutation.detail,
+                    baseline_score: baseline.composite_score(),
+                    experiment_score: baseline.composite_score() + estimated_delta,
+                    delta: estimated_delta,
+                    accepted: false,
+                    duration_secs: 0.0,
+                    config_snapshot: snapshot,
+                    pass_at_k: None,
+                    pass_consecutive_k: None,
+                    score_variance: None,
+                    prescreened: true,
+                };
+                ExperimentLog::save_to_db(store.conn(), &exp)?;
+                if let Some(tsv) = &loop_config.tsv_path {
+                    ExperimentLog::append_tsv(tsv, &exp)?;
+                }
+                experiments.push(exp);
+                experiment_count += 1;
+                continue;
+            }
+            eprintln!(
+                "[lab] pre-screen PASS: {} (estimated delta={:+.4})",
+                mutation.detail, estimated_delta
+            );
+        }
 
         // c. ベンチマーク実行（pass^k版）
         let result = suite.run_k(
@@ -851,6 +923,46 @@ mod tests {
         let compound = mg.generate_compound(0).unwrap();
         assert!(
             compound.detail.contains("insight rule") || compound.detail.contains("normal rule")
+        );
+    }
+
+    // --- プリスクリーニングテスト ---
+
+    #[test]
+    fn test_experiment_loop_config_prescreening_defaults() {
+        let config = ExperimentLoopConfig::default();
+        assert!(config.enable_prescreening, "プリスクリーニングはデフォルト有効");
+        assert!(
+            (config.prescreening_threshold - (-0.01)).abs() < f64::EPSILON,
+            "閾値のデフォルトは-0.01"
+        );
+    }
+
+    #[test]
+    fn test_prescreening_threshold_rejects_negative_delta() {
+        // 推定deltaが閾値を下回る場合、棄却されるべき
+        let threshold = -0.01;
+        let estimated_delta = -0.05;
+        assert!(
+            estimated_delta < threshold,
+            "大きな悪化は閾値を下回る"
+        );
+    }
+
+    #[test]
+    fn test_prescreening_threshold_passes_positive_delta() {
+        // 推定deltaが閾値以上の場合、通過するべき
+        let threshold = -0.01;
+        let estimated_delta = 0.02;
+        assert!(
+            estimated_delta >= threshold,
+            "改善は閾値以上で通過"
+        );
+        // 閾値ちょうどの場合も通過
+        let estimated_delta_border = -0.01;
+        assert!(
+            !(estimated_delta_border < threshold),
+            "閾値ちょうどは通過（<で判定するため）"
         );
     }
 }
