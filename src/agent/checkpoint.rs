@@ -124,7 +124,7 @@ impl<'a> CheckpointManager<'a> {
     /// Lab実行中にClaude Codeが新規ファイルを作成しても干渉しない。
     pub fn create(&mut self, desc: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
-        let git_ref = if is_git() {
+        let git_ref = if is_git() && !cfg!(test) {
             let o = Command::new("git")
                 .args([
                     "stash",
