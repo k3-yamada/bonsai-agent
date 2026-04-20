@@ -137,6 +137,9 @@ pub struct ExperimentConfig {
     /// プリスクリーニング棄却閾値（推定deltaがこの値未満なら早期棄却）
     #[serde(default = "default_prescreening_threshold")]
     pub prescreening_threshold: f64,
+    /// ベンチマークタスク単位のタイムアウト秒数（0=無制限）
+    #[serde(default = "default_task_timeout_secs")]
+    pub task_timeout_secs: u64,
 }
 
 /// デフォルト: true
@@ -149,6 +152,11 @@ fn default_prescreening_threshold() -> f64 {
     -0.01
 }
 
+/// デフォルト: 300秒（5分）タスク単位タイムアウト
+fn default_task_timeout_secs() -> u64 {
+    300
+}
+
 impl Default for ExperimentConfig {
     fn default() -> Self {
         Self {
@@ -156,6 +164,7 @@ impl Default for ExperimentConfig {
             dreamer_interval: 10,
             enable_prescreening: default_true(),
             prescreening_threshold: default_prescreening_threshold(),
+            task_timeout_secs: default_task_timeout_secs(),
         }
     }
 }
@@ -231,6 +240,7 @@ pub enum ServerBackend {
     /// mlx-lm server (MLX, Apple Silicon最適化)
     MlxLm,
     /// bitnet.cpp (1ビット最適化カーネル、llama-server互換API)
+    #[serde(rename = "bitnet")]
     BitNet,
 }
 
@@ -723,5 +733,44 @@ url = "http://localhost:3000/mcp"
             config.mcp.servers[1].url.as_deref(),
             Some("http://localhost:3000/mcp")
         );
+    }
+
+    #[test]
+    fn test_experiment_config_task_timeout_default() {
+        let config = ExperimentConfig::default();
+        assert_eq!(config.task_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_experiment_config_task_timeout_from_toml() {
+        let toml_str = r#"
+[experiment]
+task_timeout_secs = 600
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.experiment.task_timeout_secs, 600);
+    }
+
+    #[test]
+    fn test_experiment_config_task_timeout_zero_means_unlimited() {
+        let toml_str = r#"
+[experiment]
+task_timeout_secs = 0
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.experiment.task_timeout_secs, 0);
+    }
+
+    #[test]
+    fn test_bitnet_backend_from_toml() {
+        let toml_str = r#"
+[model]
+backend = "bitnet"
+server_url = "http://localhost:8090"
+model_id = "bitnet-3b"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.backend, ServerBackend::BitNet);
+        assert_eq!(config.model.server_url, "http://localhost:8090");
     }
 }

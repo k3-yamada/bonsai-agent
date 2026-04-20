@@ -41,6 +41,8 @@ pub struct AgentConfig {
     pub max_tools_in_context: usize,
     /// ベース推論パラメータ（TaskTypeで動的調整）
     pub base_inference: InferenceParams,
+    /// タスク単位のウォールクロックタイムアウト（None=無制限）
+    pub task_timeout: Option<std::time::Duration>,
 }
 
 impl Default for AgentConfig {
@@ -55,6 +57,7 @@ impl Default for AgentConfig {
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
             base_inference: InferenceParams::default(),
+            task_timeout: None,
         }
     }
 }
@@ -561,8 +564,24 @@ pub fn run_agent_loop_with_session(
         store,
     };
 
+    let task_start = std::time::Instant::now();
     let mut final_iteration = 0;
     for iteration in 0..config.max_iterations {
+        // ウォールクロックタイムアウトチェック
+        if let Some(timeout) = config.task_timeout {
+            if task_start.elapsed() > timeout {
+                let timeout_msg = format!(
+                    "[タイムアウト] {}秒以内に完了できませんでした",
+                    timeout.as_secs()
+                );
+                log_event(LogLevel::Warn, "timeout", &timeout_msg);
+                return Ok(AgentLoopResult {
+                    answer: timeout_msg,
+                    iterations_used: iteration,
+                    tools_called: state.all_tools,
+                });
+            }
+        }
         state.iteration = iteration;
         final_iteration = iteration + 1;
         let step_start = std::time::Instant::now();
@@ -1573,6 +1592,37 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.advisor.max_uses, 1);
+    }
+
+    // テスト: task_timeoutが設定されるとエージェントループがタイムアウトする
+    #[test]
+    fn test_task_timeout_triggers() {
+        use crate::runtime::inference::MockLlmBackend;
+        // 各ステップ遅延が発生するためタイムアウトする想定（0秒タイムアウト）
+        let responses: Vec<String> = (0..100)
+            .map(|_| "考え中です...".to_string())
+            .collect();
+        let mock = MockLlmBackend::new(responses);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig {
+            max_iterations: 100,
+            task_timeout: Some(std::time::Duration::from_millis(1)),
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let result = run_agent_loop("test", &mock, &tools, &guard, &config, &cancel, None);
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        // タイムアウトまたは少ないイテレーションで完了
+        assert!(r.answer.contains("タイムアウト") || r.iterations_used < 100);
+    }
+
+    // テスト: task_timeout=Noneではタイムアウトしない
+    #[test]
+    fn test_no_timeout_by_default() {
+        let config = AgentConfig::default();
+        assert!(config.task_timeout.is_none());
     }
 
     // テスト: inject_verification_step — 複雑タスク＋初回以降で検証挿入

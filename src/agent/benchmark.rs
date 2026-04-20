@@ -469,6 +469,7 @@ impl BenchmarkSuite {
                     max_tool_output_chars: config.max_tool_output_chars,
                     max_tools_in_context: config.max_tools_in_context,
                     base_inference: config.base_inference.clone(),
+                    task_timeout: config.task_timeout,
                 };
 
                 let store = MemoryStore::in_memory()?;
@@ -532,6 +533,7 @@ impl BenchmarkSuite {
                 max_tool_output_chars: config.max_tool_output_chars,
                 max_tools_in_context: config.max_tools_in_context,
                 base_inference: config.base_inference.clone(),
+                task_timeout: config.task_timeout,
             };
 
             let store = MemoryStore::in_memory()?;

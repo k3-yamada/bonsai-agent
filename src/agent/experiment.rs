@@ -48,6 +48,8 @@ pub enum MutationAction {
 pub struct HypothesisGenerator {
     rules: Vec<PromptRuleCandidate>,
     current_index: usize,
+    /// 試行済み変異detailのセット（重複回避）
+    tried: std::collections::HashSet<String>,
 }
 
 /// プロンプトルール候補
@@ -62,96 +64,91 @@ impl Default for HypothesisGenerator {
         Self {
             rules: default_prompt_rules(),
             current_index: 0,
+            tried: std::collections::HashSet::new(),
         }
     }
 }
 
-impl HypothesisGenerator {
-    /// 次の変異候補を生成（14サイクルローテーション）
-    pub fn next_mutation(&mut self, experiment_count: usize) -> Mutation {
-        // 14種のmutationをローテーション:
-        // 0-3: プロンプトルール追加（8候補ローテーション）
-        // 4,5: max_iterations変更
-        // 6,7: max_tools_selected変更
-        // 8,9: max_retries変更
-        // 10,11: temperature変更（探索軸）
-        // 12,13: max_tool_output_chars変更
-        let cycle = experiment_count % 14;
-        let theme = MutationTheme::from_cycle(cycle);
+/// パラメータ変異定義（コード重複削減）
+struct ParamMutation {
+    detail: &'static str,
+    action: MutationAction,
+}
 
-        match cycle {
-            4 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_iterations: 12 (+2)".into(),
-                apply: MutationAction::SetMaxIterations(12),
-                theme,
-            },
-            5 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_iterations: 8 (-2)".into(),
-                apply: MutationAction::SetMaxIterations(8),
-                theme,
-            },
-            6 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_tools_selected: 3 (-2)".into(),
-                apply: MutationAction::SetMaxToolsSelected(3),
-                theme,
-            },
-            7 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_tools_selected: 7 (+2)".into(),
-                apply: MutationAction::SetMaxToolsSelected(7),
-                theme,
-            },
-            8 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_retries: 1 (-2)".into(),
-                apply: MutationAction::SetMaxRetries(1),
-                theme,
-            },
-            9 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_retries: 5 (+2)".into(),
-                apply: MutationAction::SetMaxRetries(5),
-                theme,
-            },
-            10 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "temperature: 0.5 (低め、精密操作向け)".into(),
-                apply: MutationAction::SetTemperature(0.5),
-                theme,
-            },
-            11 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "temperature: 0.9 (高め、探索向け)".into(),
-                apply: MutationAction::SetTemperature(0.9),
-                theme,
-            },
-            12 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_tool_output_chars: 2000 (コンパクト出力)".into(),
-                apply: MutationAction::SetMaxToolOutputChars(2000),
-                theme,
-            },
-            13 => Mutation {
-                mutation_type: MutationType::AgentParam,
-                detail: "max_tool_output_chars: 6000 (コンテキスト増量)".into(),
-                apply: MutationAction::SetMaxToolOutputChars(6000),
-                theme,
-            },
-            _ => {
-                // サイクル 0-3 はプロンプトルール（8候補ローテーション）
-                let rule = &self.rules[self.current_index % self.rules.len()];
-                let mutation = Mutation {
+/// 全パラメータ変異候補（拡張版: 16種）
+fn param_mutations() -> Vec<ParamMutation> {
+    vec![
+        ParamMutation { detail: "max_iterations: 12 (+2)", action: MutationAction::SetMaxIterations(12) },
+        ParamMutation { detail: "max_iterations: 8 (-2)", action: MutationAction::SetMaxIterations(8) },
+        ParamMutation { detail: "max_iterations: 15 (+5)", action: MutationAction::SetMaxIterations(15) },
+        ParamMutation { detail: "max_tools_selected: 3 (-2)", action: MutationAction::SetMaxToolsSelected(3) },
+        ParamMutation { detail: "max_tools_selected: 7 (+2)", action: MutationAction::SetMaxToolsSelected(7) },
+        ParamMutation { detail: "max_tools_selected: 4 (-1)", action: MutationAction::SetMaxToolsSelected(4) },
+        ParamMutation { detail: "max_retries: 1 (-2)", action: MutationAction::SetMaxRetries(1) },
+        ParamMutation { detail: "max_retries: 5 (+2)", action: MutationAction::SetMaxRetries(5) },
+        ParamMutation { detail: "max_retries: 4 (+1)", action: MutationAction::SetMaxRetries(4) },
+        ParamMutation { detail: "temperature: 0.2 (超精密)", action: MutationAction::SetTemperature(0.2) },
+        ParamMutation { detail: "temperature: 0.5 (低め)", action: MutationAction::SetTemperature(0.5) },
+        ParamMutation { detail: "temperature: 0.7 (バランス)", action: MutationAction::SetTemperature(0.7) },
+        ParamMutation { detail: "temperature: 0.9 (探索的)", action: MutationAction::SetTemperature(0.9) },
+        ParamMutation { detail: "max_tool_output_chars: 2000 (コンパクト)", action: MutationAction::SetMaxToolOutputChars(2000) },
+        ParamMutation { detail: "max_tool_output_chars: 6000 (増量)", action: MutationAction::SetMaxToolOutputChars(6000) },
+        ParamMutation { detail: "max_tool_output_chars: 8000 (大容量)", action: MutationAction::SetMaxToolOutputChars(8000) },
+    ]
+}
+
+impl HypothesisGenerator {
+    /// 過去の実験ログから試行済みセットを構築
+    pub fn with_tried_details(mut self, details: impl IntoIterator<Item = String>) -> Self {
+        self.tried.extend(details);
+        self
+    }
+
+    /// 次の変異候補を生成（適応型: 試行済みをスキップ）
+    pub fn next_mutation(&mut self, experiment_count: usize) -> Mutation {
+        let params = param_mutations();
+        let total_slots = self.rules.len() + params.len();
+        // ルール→パラメータの順でローテーション
+        let base_slot = experiment_count % total_slots;
+
+        // 試行済みスキップ（最大total_slots回試行して見つからなければそのまま返す）
+        for offset in 0..total_slots {
+            let slot = (base_slot + offset) % total_slots;
+            let mutation = if slot < self.rules.len() {
+                let rule = &self.rules[slot];
+                let theme = MutationTheme::from_cycle(slot % 4);
+                Mutation {
                     mutation_type: MutationType::PromptRule,
                     detail: rule.description.clone(),
                     apply: MutationAction::AddPromptRule(rule.rule.clone()),
                     theme,
-                };
-                self.current_index += 1;
-                mutation
+                }
+            } else {
+                let pi = slot - self.rules.len();
+                let p = &params[pi];
+                let theme = MutationTheme::from_cycle((pi % 10) + 4);
+                Mutation {
+                    mutation_type: MutationType::AgentParam,
+                    detail: p.detail.to_string(),
+                    apply: p.action.clone(),
+                    theme,
+                }
+            };
+
+            if !self.tried.contains(&mutation.detail) {
+                self.tried.insert(mutation.detail.clone());
+                return mutation;
             }
+        }
+
+        // 全候補試行済みの場合、current_indexベースでルール返却
+        let rule = &self.rules[self.current_index % self.rules.len()];
+        self.current_index += 1;
+        Mutation {
+            mutation_type: MutationType::PromptRule,
+            detail: rule.description.clone(),
+            apply: MutationAction::AddPromptRule(rule.rule.clone()),
+            theme: MutationTheme::Precision,
         }
     }
 
@@ -164,9 +161,10 @@ impl HypothesisGenerator {
     }
 }
 
-/// デフォルトのプロンプトルール候補
+/// デフォルトのプロンプトルール候補（20種: 多様なエージェント行動制御）
 fn default_prompt_rules() -> Vec<PromptRuleCandidate> {
     vec![
+        // --- 精度向上系 ---
         PromptRuleCandidate {
             rule: "10. ツール呼び出しの前に必ず <think> タグで考える".into(),
             description: "ツール使用前に思考を強制".into(),
@@ -199,6 +197,58 @@ fn default_prompt_rules() -> Vec<PromptRuleCandidate> {
             rule: "10. 前のステップの結果を要約してから次のステップに進む".into(),
             description: "段階的要約".into(),
         },
+        // --- 効率化系 ---
+        PromptRuleCandidate {
+            rule: "10. 1つのツール呼び出しで十分な情報が得られたら、追加の呼び出しを控える".into(),
+            description: "冗長ツール呼び出し抑制".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 回答は簡潔に、必要最小限の情報だけを含める".into(),
+            description: "簡潔回答の強制".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. ツール引数は正確に指定し、省略せず完全な値を渡す".into(),
+            description: "ツール引数の正確性".into(),
+        },
+        // --- ロバスト性系 ---
+        PromptRuleCandidate {
+            rule: "10. ツールが失敗した場合、同じツールを2回まで再試行してから別の方法を試す".into(),
+            description: "リトライ上限付き再試行".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. ファイル編集前に必ず現在の内容を読み取る".into(),
+            description: "編集前読み取り強制".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. shell コマンドのタイムアウトを想定し、長時間コマンドは避ける".into(),
+            description: "コマンドタイムアウト意識".into(),
+        },
+        // --- 探索系 ---
+        PromptRuleCandidate {
+            rule: "10. 答えが不明な場合、まず関連ファイルを検索してから回答を組み立てる".into(),
+            description: "検索優先アプローチ".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 数値計算が必要な場合、shell で計算してから回答する".into(),
+            description: "計算ツール活用".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. コード生成時は、まず完成形をイメージしてから書き始める".into(),
+            description: "完成形イメージ先行".into(),
+        },
+        // --- 構造化思考系 ---
+        PromptRuleCandidate {
+            rule: "10. タスクを受け取ったら、まず3つ以下のサブタスクに分解する".into(),
+            description: "タスク分解の強制".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 最終回答の前に、タスクの要件を全て満たしたか確認する".into(),
+            description: "完了条件チェック".into(),
+        },
+        PromptRuleCandidate {
+            rule: "10. 推測で回答せず、確認できる情報はツールで確認する".into(),
+            description: "推測回避・事実確認".into(),
+        },
     ]
 }
 
@@ -214,6 +264,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         max_tool_output_chars: base_config.max_tool_output_chars,
         max_tools_in_context: base_config.max_tools_in_context,
         base_inference: base_config.base_inference.clone(),
+        task_timeout: base_config.task_timeout,
     };
 
     match &mutation.apply {
@@ -439,6 +490,17 @@ pub fn estimate_mutation_effect_with_baseline(
     Ok(delta)
 }
 
+/// DBから過去の試行済み変異detailをロード（重複回避用）
+fn load_tried_details(conn: &rusqlite::Connection) -> Vec<String> {
+    let sql = "SELECT DISTINCT mutation_detail FROM experiments WHERE accepted = 0";
+    conn.prepare(sql)
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default()
+}
+
 /// 実験ループ設定
 pub struct ExperimentLoopConfig {
     /// TSVログのパス
@@ -451,6 +513,8 @@ pub struct ExperimentLoopConfig {
     pub enable_prescreening: bool,
     /// プリスクリーニング棄却閾値（推定deltaがこの値未満なら早期棄却）
     pub prescreening_threshold: f64,
+    /// タスク単位タイムアウト秒数（0=無制限）
+    pub task_timeout_secs: u64,
 }
 
 impl Default for ExperimentLoopConfig {
@@ -461,6 +525,7 @@ impl Default for ExperimentLoopConfig {
             dreamer_interval: 10,
             enable_prescreening: true,
             prescreening_threshold: -0.01,
+            task_timeout_secs: 300,
         }
     }
 }
@@ -476,7 +541,17 @@ pub fn run_experiment_loop(
     loop_config: &ExperimentLoopConfig,
 ) -> Result<Vec<Experiment>> {
     let suite = BenchmarkSuite::default_tasks();
-    let mut generator = HypothesisGenerator::default();
+    // 過去の試行済み変異detailをDBからロードし、重複回避
+    let tried_details = load_tried_details(store.conn());
+    let tried_count = tried_details.len();
+    let mut generator = HypothesisGenerator::default().with_tried_details(tried_details);
+    if tried_count > 0 {
+        log_event(
+            LogLevel::Info,
+            "lab",
+            &format!("過去の試行済み変異: {}件（重複スキップ対象）", tried_count),
+        );
+    }
     let mut experiments: Vec<Experiment> = Vec::new();
     let multi = MultiRunConfig {
         k: 3,
@@ -702,6 +777,7 @@ mod tests {
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
             base_inference: crate::config::InferenceParams::default(),
+            task_timeout: None,
         }
     }
 
@@ -763,26 +839,27 @@ mod tests {
     #[test]
     fn test_hypothesis_generator_rotation() {
         let mut hyp_gen = HypothesisGenerator::default();
+        // 最初はプロンプトルール（slot 0〜19）
         let m0 = hyp_gen.next_mutation(0);
         assert_eq!(m0.mutation_type, MutationType::PromptRule);
-        let m4 = hyp_gen.next_mutation(4);
-        assert_eq!(m4.mutation_type, MutationType::AgentParam);
-        assert!(m4.detail.contains("+2"));
-        let m5 = hyp_gen.next_mutation(5);
-        assert_eq!(m5.mutation_type, MutationType::AgentParam);
-        assert!(m5.detail.contains("-2"));
+        // slot 20以降はパラメータ変異
+        let mut hyp_gen2 = HypothesisGenerator::default();
+        let n_rules = hyp_gen2.rules.len();
+        let m_param = hyp_gen2.next_mutation(n_rules);
+        assert_eq!(m_param.mutation_type, MutationType::AgentParam);
     }
 
     #[test]
-    fn test_hypothesis_generator_cycles_rules() {
+    fn test_hypothesis_generator_skips_tried() {
         let mut hyp_gen = HypothesisGenerator::default();
-        let n_rules = hyp_gen.rules.len();
-        // n_rules + 1回呼ぶとラップアラウンド
-        for i in 0..=n_rules {
-            let _ = hyp_gen.next_mutation(i % 3); // PromptRuleのみのcycle
-        }
-        // current_indexがn_rules+1になっている
-        assert_eq!(hyp_gen.current_index, n_rules + 1);
+        let m0 = hyp_gen.next_mutation(0);
+        let m0_detail = m0.detail.clone();
+        // 同じdetailをtriedに入れて再生成
+        let mut hyp_gen2 = HypothesisGenerator::default()
+            .with_tried_details(vec![m0_detail.clone()]);
+        let m0_retry = hyp_gen2.next_mutation(0);
+        // スキップされて別の変異が返る
+        assert_ne!(m0_retry.detail, m0_detail);
     }
 
     #[test]
@@ -1057,85 +1134,59 @@ mod tests {
     }
 
     #[test]
-    fn test_14_cycle_rotation() {
+    fn test_adaptive_cycle_rotation() {
         let mut hyp_gen = HypothesisGenerator::default();
+        let n_rules = hyp_gen.rules.len();
+        let n_params = param_mutations().len();
+        let total = n_rules + n_params;
 
-        // サイクル0-3: プロンプトルール
-        for cycle in 0..=3 {
-            let m = hyp_gen.next_mutation(cycle);
+        // 最初のn_rules個はPromptRule
+        for i in 0..n_rules {
+            let m = hyp_gen.next_mutation(i);
             assert_eq!(
                 m.mutation_type,
                 MutationType::PromptRule,
-                "サイクル{cycle}はPromptRule"
+                "slot {i}はPromptRule"
             );
         }
 
-        // サイクル4,5: max_iterations
-        let m4 = hyp_gen.next_mutation(4);
-        assert!(m4.detail.contains("max_iterations"));
-        assert!(m4.detail.contains("+2"));
-        let m5 = hyp_gen.next_mutation(5);
-        assert!(m5.detail.contains("max_iterations"));
-        assert!(m5.detail.contains("-2"));
+        // 次のn_params個はAgentParam
+        let mut hyp_gen2 = HypothesisGenerator::default();
+        for i in n_rules..total {
+            let m = hyp_gen2.next_mutation(i);
+            assert_eq!(
+                m.mutation_type,
+                MutationType::AgentParam,
+                "slot {i}はAgentParam"
+            );
+        }
 
-        // サイクル6,7: max_tools_selected
-        let m6 = hyp_gen.next_mutation(6);
-        assert!(m6.detail.contains("max_tools_selected"));
-        let m7 = hyp_gen.next_mutation(7);
-        assert!(m7.detail.contains("max_tools_selected"));
-
-        // サイクル8,9: max_retries
-        let m8 = hyp_gen.next_mutation(8);
-        assert!(m8.detail.contains("max_retries"));
-        let m9 = hyp_gen.next_mutation(9);
-        assert!(m9.detail.contains("max_retries"));
-
-        // サイクル10,11: temperature
-        let m10 = hyp_gen.next_mutation(10);
-        assert!(
-            m10.detail.contains("temperature"),
-            "サイクル10はtemperature: got {}",
-            m10.detail
-        );
-        assert!(m10.detail.contains("0.5"));
-        let m11 = hyp_gen.next_mutation(11);
-        assert!(m11.detail.contains("temperature"));
-        assert!(m11.detail.contains("0.9"));
-
-        // サイクル12,13: max_tool_output_chars
-        let m12 = hyp_gen.next_mutation(12);
-        assert!(
-            m12.detail.contains("max_tool_output_chars"),
-            "サイクル12はmax_tool_output_chars: got {}",
-            m12.detail
-        );
-        assert!(m12.detail.contains("2000"));
-        let m13 = hyp_gen.next_mutation(13);
-        assert!(m13.detail.contains("max_tool_output_chars"));
-        assert!(m13.detail.contains("6000"));
-
-        // サイクル14はラップして0と同じ（PromptRule）
-        let m14 = hyp_gen.next_mutation(14);
-        assert_eq!(m14.mutation_type, MutationType::PromptRule);
+        // totalでラップ
+        let mut hyp_gen3 = HypothesisGenerator::default();
+        let m_wrap = hyp_gen3.next_mutation(total);
+        assert_eq!(m_wrap.mutation_type, MutationType::PromptRule);
     }
 
     #[test]
     fn test_default_rules_expanded() {
         let rules = default_prompt_rules();
-        // 元の4 + 新規4 = 8候補
-        assert_eq!(rules.len(), 8, "プロンプトルール候補は8件");
+        // 20候補に拡張
+        assert_eq!(rules.len(), 20, "プロンプトルール候補は20件");
 
-        // 新規ルールの存在確認
         let descriptions: Vec<&str> = rules.iter().map(|r| r.description.as_str()).collect();
-        assert!(descriptions.contains(&"回答前の事実確認"));
-        assert!(descriptions.contains(&"最小限ツール選択"));
-        assert!(descriptions.contains(&"仮説検証アプローチ"));
-        assert!(descriptions.contains(&"段階的要約"));
-
-        // 既存ルールも保持されている
+        // 既存ルール保持
         assert!(descriptions.contains(&"ツール使用前に思考を強制"));
         assert!(descriptions.contains(&"エラー分析の強制"));
         assert!(descriptions.contains(&"フォールバック戦略"));
-        assert!(descriptions.contains(&"ファイル存在確認の強制"));
+        // 新規ルール存在
+        assert!(descriptions.contains(&"冗長ツール呼び出し抑制"));
+        assert!(descriptions.contains(&"タスク分解の強制"));
+        assert!(descriptions.contains(&"推測回避・事実確認"));
+    }
+
+    #[test]
+    fn test_param_mutations_count() {
+        let params = param_mutations();
+        assert_eq!(params.len(), 16, "パラメータ変異候補は16件");
     }
 }

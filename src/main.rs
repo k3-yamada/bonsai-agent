@@ -130,6 +130,10 @@ fn main() -> Result<()> {
         && app_config.model.server_url == "http://localhost:8080"
     {
         "http://localhost:8000".to_string()
+    } else if app_config.model.backend == ServerBackend::BitNet
+        && app_config.model.server_url == "http://localhost:8080"
+    {
+        "http://localhost:8090".to_string()
     } else {
         app_config.model.server_url.clone()
     };
@@ -154,6 +158,14 @@ fn main() -> Result<()> {
             max_tools_in_context: app_config.agent.max_tools_in_context,
             base_inference: app_config.model.inference.clone(),
             advisor: app_config.advisor.to_runtime(),
+            task_timeout: {
+                let secs = app_config.experiment.task_timeout_secs;
+                if secs > 0 {
+                    Some(std::time::Duration::from_secs(secs))
+                } else {
+                    None
+                }
+            },
             ..Default::default()
         },
         cancel,
@@ -431,19 +443,25 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
                 .collect(),
         ))
     } else {
+        let backend = &ctx.app_config.model.backend;
         let b = LlamaServerBackend::connect_with_params(
             &ctx.server_url,
             &ctx.app_config.model.model_id,
             ctx.app_config.model.inference.clone(),
         )
-        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm)
+        .with_mlx_compatible(*backend == ServerBackend::MlxLm)
         .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
         if !b.is_healthy() {
+            let backend_name = match backend {
+                ServerBackend::LlamaServer => "llama-server",
+                ServerBackend::MlxLm => "mlx-lm",
+                ServerBackend::BitNet => "bitnet.cpp",
+            };
             eprintln!(
-                "エラー: llama-server ({}) に接続できません。",
-                ctx.server_url
+                "エラー: {} ({}) に接続できません。",
+                backend_name, ctx.server_url
             );
-            eprintln!("--mock フラグでモックモードを使用するか、llama-serverを起動してください。");
+            eprintln!("--mock フラグでモックモードを使用するか、サーバーを起動してください。");
             std::process::exit(1);
         }
         Box::new(b)
@@ -469,9 +487,14 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
         .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm)
         .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
         if !b.is_healthy() {
+            let backend_name = match ctx.app_config.model.backend {
+                ServerBackend::LlamaServer => "llama-server",
+                ServerBackend::MlxLm => "mlx-lm",
+                ServerBackend::BitNet => "bitnet.cpp",
+            };
             eprintln!(
-                "エラー: llama-server ({}) に接続できません。",
-                ctx.server_url
+                "エラー: {} ({}) に接続できません。",
+                backend_name, ctx.server_url
             );
             std::process::exit(1);
         }
@@ -487,6 +510,7 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
         dreamer_interval: ctx.app_config.experiment.dreamer_interval,
         enable_prescreening: ctx.app_config.experiment.enable_prescreening,
         prescreening_threshold: ctx.app_config.experiment.prescreening_threshold,
+        task_timeout_secs: ctx.app_config.experiment.task_timeout_secs,
     };
     let backend = CachedBackend::new(backend, 200);
     let experiments = run_experiment_loop(
