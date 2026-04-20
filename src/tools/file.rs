@@ -336,6 +336,10 @@ fn fuzzy_find_replace(content: &str, old_text: &str, new_text: &str) -> Option<(
     if let Some(r) = try_boundary_trim(content, old_text, new_text) {
         return Some((r, "模糊一致（境界Trim）".into()));
     }
+    // 戦略8: Levenshtein距離ベースBlockアンカー（OpenCode知見）
+    if let Some(r) = try_levenshtein_block(content, old_text, new_text) {
+        return Some((r, "模糊一致（Levenshtein距離）".into()));
+    }
     None
 }
 
@@ -547,6 +551,76 @@ fn replace_lines(
     } else {
         result
     }
+}
+
+
+/// 戦略8: Levenshtein距離ベースBlockアンカー（OpenCode知見）
+/// 先頭行/末尾行が類似（距離≤行長の30%）かつ中間行の50%以上が類似
+fn try_levenshtein_block(content: &str, old_text: &str, new_text: &str) -> Option<String> {
+    let content_lines: Vec<&str> = content.lines().collect();
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    if old_lines.len() < 3 {
+        return None;
+    }
+    let first = old_lines[0].trim();
+    let last = old_lines[old_lines.len() - 1].trim();
+
+    for (i, cl) in content_lines.iter().enumerate() {
+        let cl_trimmed = cl.trim();
+        // 先頭行: Levenshtein距離が行長の30%以内
+        if line_distance(cl_trimmed, first) > first.len() / 3 + 1 {
+            continue;
+        }
+        let end = i + old_lines.len();
+        if end > content_lines.len() {
+            continue;
+        }
+        // 末尾行チェック
+        let last_content = content_lines[end - 1].trim();
+        if line_distance(last_content, last) > last.len() / 3 + 1 {
+            continue;
+        }
+        // 中間行の類似度チェック（50%閾値）
+        let middle_count = old_lines.len() - 2;
+        let threshold = (middle_count as f64 * 0.5).ceil() as usize;
+        let matched = (1..old_lines.len() - 1)
+            .filter(|&j| {
+                let a = content_lines[i + j].trim();
+                let b = old_lines[j].trim();
+                line_distance(a, b) <= b.len() / 3 + 1
+            })
+            .count();
+        if matched >= threshold {
+            return Some(replace_lines(
+                content,
+                &content_lines,
+                i,
+                old_lines.len(),
+                new_text,
+            ));
+        }
+    }
+    None
+}
+
+/// 行レベルLevenshtein距離（短い文字列向け簡易実装）
+fn line_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev = (0..=n).collect::<Vec<_>>();
+    let mut curr = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 #[cfg(test)]
