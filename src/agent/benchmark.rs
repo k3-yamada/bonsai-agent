@@ -64,6 +64,84 @@ impl TaskScore {
     }
 }
 
+/// 軌跡評価スコア（NAT Trajectory Evaluation知見）
+///
+/// 期待ツール呼出順序と実際の順序を比較し、
+/// 「正しい答えを間違った理由で出す」ケースを検出する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrajectoryScore {
+    /// 順序一致率（LCS長 / 期待シーケンス長）
+    pub sequence_accuracy: f64,
+    /// 期待ツールのカバー率（一致ユニークツール数 / 期待ユニークツール数）
+    pub tool_coverage: f64,
+    /// 期待外のツール呼出数
+    pub extra_calls: usize,
+}
+
+impl TrajectoryScore {
+    /// 期待軌跡と実際の軌跡からスコアを計算
+    pub fn compute(expected: &[String], actual: &[String]) -> Self {
+        if expected.is_empty() {
+            return Self {
+                sequence_accuracy: 1.0,
+                tool_coverage: 1.0,
+                extra_calls: 0,
+            };
+        }
+
+        // LCS（最長共通部分列）で順序一致率を計算
+        let lcs_len = lcs_length(expected, actual);
+        let sequence_accuracy = lcs_len as f64 / expected.len() as f64;
+
+        // ユニークツールカバー率
+        let expected_unique: std::collections::HashSet<&str> =
+            expected.iter().map(|s| s.as_str()).collect();
+        let actual_unique: std::collections::HashSet<&str> =
+            actual.iter().map(|s| s.as_str()).collect();
+        let covered = expected_unique.intersection(&actual_unique).count();
+        let tool_coverage = covered as f64 / expected_unique.len() as f64;
+
+        // 期待外呼出数
+        let extra_calls = actual
+            .iter()
+            .filter(|a| !expected_unique.contains(a.as_str()))
+            .count();
+
+        Self {
+            sequence_accuracy,
+            tool_coverage,
+            extra_calls,
+        }
+    }
+
+    /// 複合スコア（0.0-1.0）: 60%順序 + 30%カバー + 10%効率ペナルティ
+    pub fn composite(&self) -> f64 {
+        let extra_penalty = if self.extra_calls == 0 {
+            1.0
+        } else {
+            (1.0 / (1.0 + self.extra_calls as f64)).max(0.0)
+        };
+        0.6 * self.sequence_accuracy + 0.3 * self.tool_coverage + 0.1 * extra_penalty
+    }
+}
+
+/// LCS（最長共通部分列）の長さを計算
+fn lcs_length(a: &[String], b: &[String]) -> usize {
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1] + 1
+            } else {
+                dp[i - 1][j].max(dp[i][j - 1])
+            };
+        }
+    }
+    dp[m][n]
+}
+
 /// ベンチマーク全体の結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkResult {
@@ -1291,4 +1369,82 @@ mod tests {
             "ソート関数キーワード全一致"
         );
     }
+
+    // --- Phase 2: TrajectoryScore テスト（NAT軌跡評価知見） ---
+
+    #[test]
+    fn t_trajectory_score_perfect_match() {
+        let expected = vec!["file_read".to_string(), "shell".to_string(), "file_write".to_string()];
+        let actual = vec!["file_read".to_string(), "shell".to_string(), "file_write".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        assert!((ts.sequence_accuracy - 1.0).abs() < f64::EPSILON);
+        assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON);
+        assert_eq!(ts.extra_calls, 0);
+    }
+
+    #[test]
+    fn t_trajectory_score_empty_expected() {
+        let expected: Vec<String> = vec![];
+        let actual = vec!["shell".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        assert!((ts.sequence_accuracy - 1.0).abs() < f64::EPSILON);
+        assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn t_trajectory_score_partial_match() {
+        let expected = vec!["file_read".to_string(), "shell".to_string(), "file_write".to_string()];
+        let actual = vec!["file_read".to_string(), "file_write".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        assert!(ts.tool_coverage > 0.5);
+        assert!(ts.tool_coverage < 1.0);
+        assert!(ts.sequence_accuracy > 0.0);
+    }
+
+    #[test]
+    fn t_trajectory_score_wrong_order() {
+        let expected = vec!["file_read".to_string(), "shell".to_string()];
+        let actual = vec!["shell".to_string(), "file_read".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        assert!(ts.sequence_accuracy < 1.0, "逆順はsequence_accuracy < 1.0");
+        assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON, "ツールは全カバー");
+    }
+
+    #[test]
+    fn t_trajectory_score_extra_calls() {
+        let expected = vec!["file_read".to_string()];
+        let actual = vec!["shell".to_string(), "file_read".to_string(), "shell".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        assert_eq!(ts.extra_calls, 2);
+        assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn t_trajectory_score_no_match() {
+        let expected = vec!["file_read".to_string(), "git".to_string()];
+        let actual = vec!["shell".to_string(), "web_fetch".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        assert!((ts.tool_coverage - 0.0).abs() < f64::EPSILON);
+        assert!((ts.sequence_accuracy - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn t_trajectory_composite_score() {
+        let expected = vec!["file_read".to_string(), "shell".to_string()];
+        let actual = vec!["file_read".to_string(), "shell".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        let composite = ts.composite();
+        assert!((composite - 1.0).abs() < f64::EPSILON, "完全一致=1.0");
+    }
+
+    #[test]
+    fn t_trajectory_composite_with_extras() {
+        let expected = vec!["file_read".to_string()];
+        let actual = vec!["file_read".to_string(), "shell".to_string(), "shell".to_string()];
+        let ts = TrajectoryScore::compute(&expected, &actual);
+        let composite = ts.composite();
+        assert!(composite < 1.0, "余分呼出でペナルティ");
+        assert!(composite > 0.0);
+    }
+
 }
