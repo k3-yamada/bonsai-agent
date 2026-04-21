@@ -704,6 +704,9 @@ pub fn run_experiment_loop(
         );
     }
 
+    // 停滞検出器（NAT知見、項目141: Dreamer早期起動トリガー）
+    let mut stagnation_detector = LabStagnationDetector::default();
+
     // 2. 実験ループ
     let mut experiment_count = 0;
     let mut meta_cycle = 0;
@@ -837,7 +840,42 @@ pub fn run_experiment_loop(
         experiments.push(exp);
         experiment_count += 1;
 
-        // g. Dreamer統合（N実験ごと）
+        // g. 停滞検出+Dreamer早期起動（NAT知見、項目141）
+        let last_exp = experiments.last().unwrap();
+        let trigger = stagnation_detector.record_and_check(last_exp.delta, last_exp.experiment_score);
+        if trigger != LabTrigger::None {
+            log_event(
+                LogLevel::Info,
+                "lab",
+                &format!("停滞検出: {trigger:?} → Dreamer早期起動+oracle feedback注入"),
+            );
+            // oracle feedback: REJECT失敗パターンから逆向き変異候補を生成（NAT知見、項目140）
+            let worst = extract_worst_reasoning(&experiments, 5);
+            if !worst.is_empty() {
+                generator.add_worst_reasoning_insights(&worst);
+                log_event(
+                    LogLevel::Info,
+                    "lab",
+                    &format!("oracle feedback: {}件の失敗パターンから逆向き変異追加", worst.len()),
+                );
+            }
+            // Dreamer早期起動
+            if let Ok(report) =
+                crate::memory::evolution::EvolutionEngine::new(store).analyze_deep(7)
+            {
+                for insight in &report.insights {
+                    generator.add_insight_mutation(insight);
+                    log_event(
+                        LogLevel::Info,
+                        "lab",
+                        &format!("Dreamer early insight: {insight}"),
+                    );
+                }
+            }
+            stagnation_detector.reset();
+        }
+
+        // h. Dreamer定期統合（N実験ごと）
         if experiment_count % loop_config.dreamer_interval == 0
             && let Ok(report) =
                 crate::memory::evolution::EvolutionEngine::new(store).analyze_deep(7)
@@ -1411,6 +1449,7 @@ mod tests {
         assert_eq!(t, LabTrigger::None, "reset clears state");
     }
 
+    #[test]
     fn t_add_worst_reasoning_insights() {
         let mut hypo = HypothesisGenerator::default();
         let worst = vec![

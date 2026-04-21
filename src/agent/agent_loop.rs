@@ -588,6 +588,16 @@ pub fn run_agent_loop_with_session(
         }
         state.iteration = iteration;
         final_iteration = iteration + 1;
+
+        // before_stepフック: LLM呼出前にミドルウェア介入（NAT知見、項目142）
+        if let Some(abort_reason) = state.middleware_chain.run_before_step(session, iteration) {
+            return Ok(AgentLoopResult {
+                answer: format!("[中断] {abort_reason}"),
+                iterations_used: iteration,
+                tools_called: state.all_tools,
+            });
+        }
+
         let step_start = std::time::Instant::now();
         let outcome = execute_step(
             session,
@@ -2432,5 +2442,55 @@ mod tests {
             "成功率警告: {}",
             violations[0]
         );
+    }
+
+    // テスト: before_stepフックがAbort時にループを中断する（NAT知見、項目142統合）
+    #[test]
+    fn test_before_step_abort_stops_loop() {
+        use crate::agent::middleware::{Middleware, MiddlewareSignal, StepResult as MwStepResult};
+
+        struct AbortMiddleware;
+        impl Middleware for AbortMiddleware {
+            fn name(&self) -> &str { "abort_test" }
+            fn before_step(&mut self, _session: &Session, _iteration: usize) -> MiddlewareSignal {
+                MiddlewareSignal::Abort("テスト中断".to_string())
+            }
+            fn after_step(&mut self, _session: &mut Session, _result: &MwStepResult) -> MiddlewareSignal {
+                MiddlewareSignal::Ok
+            }
+        }
+
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(AbortMiddleware));
+        let mut session = Session::new();
+        let abort = chain.run_before_step(&mut session, 0);
+        assert!(abort.is_some(), "Abortミドルウェアはループ中断を返すべき");
+        assert!(abort.unwrap().contains("テスト中断"));
+    }
+
+    // テスト: before_stepフックがInject時にセッションにメッセージ追加
+    #[test]
+    fn test_before_step_inject_adds_message() {
+        use crate::agent::middleware::{Middleware, MiddlewareSignal, StepResult as MwStepResult};
+
+        struct InjectMiddleware;
+        impl Middleware for InjectMiddleware {
+            fn name(&self) -> &str { "inject_test" }
+            fn before_step(&mut self, _session: &Session, _iteration: usize) -> MiddlewareSignal {
+                MiddlewareSignal::Inject("注入テスト".to_string())
+            }
+            fn after_step(&mut self, _session: &mut Session, _result: &MwStepResult) -> MiddlewareSignal {
+                MiddlewareSignal::Ok
+            }
+        }
+
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(InjectMiddleware));
+        let mut session = Session::new();
+        let msg_count_before = session.messages.len();
+        let abort = chain.run_before_step(&mut session, 0);
+        assert!(abort.is_none(), "Injectはループ中断しない");
+        assert_eq!(session.messages.len(), msg_count_before + 1);
+        assert!(session.messages.last().unwrap().content.contains("注入テスト"));
     }
 }
