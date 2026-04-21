@@ -309,6 +309,54 @@ impl ToolRegistry {
         scored.into_iter().take(max).map(|(t, _)| t).collect()
     }
 
+    /// ビルトイン/MCP分離選択: ビルトインは上位builtin_max件、MCPは別枠mcp_max件
+    /// MCPツールは名前に':'を含む（"server:tool"形式）
+    pub fn select_relevant_split(
+        &self,
+        query: &str,
+        builtin_max: usize,
+        mcp_max: usize,
+    ) -> Vec<&dyn Tool> {
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+        let task_boost = Self::detect_task_boost(&query_lower);
+
+        let score_tool = |tool: &dyn Tool| -> usize {
+            let name = tool.name().to_lowercase();
+            let desc = tool.description().to_lowercase();
+            let mut score = query_words
+                .iter()
+                .filter(|w| name.contains(*w) || desc.contains(*w))
+                .count();
+            if task_boost.iter().any(|b| name.contains(b)) {
+                score += 2;
+            }
+            score
+        };
+
+        let mut builtin: Vec<(&dyn Tool, usize)> = Vec::new();
+        let mut mcp: Vec<(&dyn Tool, usize)> = Vec::new();
+        for tool in self.tools.values() {
+            let s = score_tool(tool.as_ref());
+            if tool.name().contains(':') {
+                mcp.push((tool.as_ref(), s));
+            } else {
+                builtin.push((tool.as_ref(), s));
+            }
+        }
+
+        let sort_fn = |a: &(&dyn Tool, usize), b: &(&dyn Tool, usize)| {
+            b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name()))
+        };
+        builtin.sort_by(sort_fn);
+        mcp.sort_by(sort_fn);
+
+        let mut result: Vec<&dyn Tool> =
+            builtin.into_iter().take(builtin_max).map(|(t, _)| t).collect();
+        result.extend(mcp.into_iter().take(mcp_max).map(|(t, _)| t));
+        result
+    }
+
     /// タスク種別からブーストするツール名プレフィックスを検出
     fn detect_task_boost(query: &str) -> Vec<&'static str> {
         let mut b = Vec::new();
@@ -1040,5 +1088,63 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
+    }
+
+    fn build_registry_with_mcp() -> ToolRegistry {
+        let mut reg = build_registry(); // ビルトイン6ツール
+        // MCPツール（コロン付き名前）を追加
+        reg.register(Box::new(DummyTool::new("fs:read_file", "ファイルを読む")));
+        reg.register(Box::new(DummyTool::new("fs:write_file", "ファイルに書く")));
+        reg.register(Box::new(DummyTool::new("fs:list_dir", "ディレクトリを一覧")));
+        reg.register(Box::new(DummyTool::new("fs:search", "ファイルを検索")));
+        reg.register(Box::new(DummyTool::new("db:query", "DBクエリ実行")));
+        reg
+    }
+
+    #[test]
+    fn test_select_relevant_split_separates_builtin_and_mcp() {
+        let reg = build_registry_with_mcp();
+        // ビルトイン最大8、MCP最大3
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        // ビルトイン6ツール全部入る（8枠）
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"file_read"));
+        // MCPも最大3件入る
+        let mcp_count = names.iter().filter(|n| n.contains(':')).count();
+        assert!(mcp_count <= 3);
+        assert!(mcp_count > 0);
+    }
+
+    #[test]
+    fn test_select_relevant_split_mcp_limit() {
+        let reg = build_registry_with_mcp();
+        // MCP枠を1に制限
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 1);
+        let mcp_count = selected.iter().filter(|t| t.name().contains(':')).count();
+        assert_eq!(mcp_count, 1);
+    }
+
+    #[test]
+    fn test_select_relevant_split_no_mcp() {
+        let reg = build_registry(); // MCPなし
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3);
+        // ビルトインのみ
+        assert_eq!(selected.len(), 6);
+        assert!(selected.iter().all(|t| !t.name().contains(':')));
+    }
+
+    #[test]
+    fn test_select_relevant_split_zero_mcp() {
+        let reg = build_registry_with_mcp();
+        // MCP枠を0にすればMCPは選ばれない
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 0);
+        assert!(selected.iter().all(|t| !t.name().contains(':')));
+    }
+
+    #[test]
+    fn test_max_mcp_tools_in_context_default() {
+        let settings = crate::config::AgentSettings::default();
+        assert_eq!(settings.max_mcp_tools_in_context, 3);
     }
 }

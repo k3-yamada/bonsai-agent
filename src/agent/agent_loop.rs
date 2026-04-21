@@ -39,6 +39,8 @@ pub struct AgentConfig {
     pub max_tool_output_chars: usize,
     /// コンテキストに含めるツールの最大数
     pub max_tools_in_context: usize,
+    /// MCPツールの追加枠（ビルトインとは別枠）
+    pub max_mcp_tools_in_context: usize,
     /// ベース推論パラメータ（TaskTypeで動的調整）
     pub base_inference: InferenceParams,
     /// タスク単位のウォールクロックタイムアウト（None=無制限）
@@ -56,6 +58,7 @@ impl Default for AgentConfig {
             auto_checkpoint: true,
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
+            max_mcp_tools_in_context: 3,
             base_inference: InferenceParams::default(),
             task_timeout: None,
         }
@@ -335,11 +338,10 @@ pub fn execute_step(
         .map(|m| m.content.as_str())
         .unwrap_or("");
 
-    let selected_tools = ctx.tools.select_relevant(
+    let selected_tools = ctx.tools.select_relevant_split(
         last_user_msg,
-        ctx.config
-            .max_tools_selected
-            .min(ctx.config.max_tools_in_context),
+        ctx.config.max_tools_in_context,
+        ctx.config.max_mcp_tools_in_context,
     );
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 

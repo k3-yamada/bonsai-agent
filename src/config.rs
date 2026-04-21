@@ -276,6 +276,8 @@ pub struct AgentSettings {
     pub max_tool_output_chars: usize,
     /// コンテキストに含めるツールの最大数（1bitモデルは8以下推奨）
     pub max_tools_in_context: usize,
+    /// MCPツールの追加枠（ビルトインとは別枠で確保）
+    pub max_mcp_tools_in_context: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +322,7 @@ impl Default for AgentSettings {
             max_tools_selected: 5,
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
+            max_mcp_tools_in_context: 3,
         }
     }
 }

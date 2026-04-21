@@ -263,6 +263,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         auto_checkpoint: base_config.auto_checkpoint,
         max_tool_output_chars: base_config.max_tool_output_chars,
         max_tools_in_context: base_config.max_tools_in_context,
+        max_mcp_tools_in_context: base_config.max_mcp_tools_in_context,
         base_inference: base_config.base_inference.clone(),
         task_timeout: base_config.task_timeout,
     };
@@ -776,6 +777,7 @@ mod tests {
             auto_checkpoint: false,
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
+            max_mcp_tools_in_context: 3,
             base_inference: crate::config::InferenceParams::default(),
             task_timeout: None,
         }

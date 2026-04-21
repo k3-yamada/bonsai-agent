@@ -468,6 +468,7 @@ impl BenchmarkSuite {
                     auto_checkpoint: false,
                     max_tool_output_chars: config.max_tool_output_chars,
                     max_tools_in_context: config.max_tools_in_context,
+                    max_mcp_tools_in_context: config.max_mcp_tools_in_context,
                     base_inference: config.base_inference.clone(),
                     task_timeout: config.task_timeout,
                 };
@@ -532,6 +533,7 @@ impl BenchmarkSuite {
                 auto_checkpoint: false,
                 max_tool_output_chars: config.max_tool_output_chars,
                 max_tools_in_context: config.max_tools_in_context,
+                max_mcp_tools_in_context: config.max_mcp_tools_in_context,
                 base_inference: config.base_inference.clone(),
                 task_timeout: config.task_timeout,
             };
