@@ -7,7 +7,8 @@ use crate::agent::context_inject::inject_contextual_memories;
 use crate::agent::conversation::{Message, ParsedOutput, Role, Session};
 use crate::agent::error_recovery::TrialSummary;
 use crate::agent::error_recovery::{
-    CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
+    CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction,
+    StructuredFeedback, decide_recovery,
 };
 use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
@@ -702,6 +703,7 @@ fn handle_outcome(
                 iteration,
                 max_iterations,
                 store,
+                &state.trial_summary,
             ) {
                 return OutcomeAction::Continue;
             }
@@ -912,7 +914,13 @@ fn inject_replan_on_stall(
     let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Replan, task_context);
     log_advisor_call(store, session, AdvisorRole::Replan, &resolution);
     let mut replan_msg = resolution.prompt;
-    if !trial_summary.is_empty() {
+    // NAT知見: 構造化フィードバックで再計画精度向上
+    let structured = StructuredFeedback::from_trial_summary(trial_summary, task_context);
+    let injection = structured.format_for_injection();
+    if !injection.is_empty() {
+        replan_msg.push_str("\n\n");
+        replan_msg.push_str(&injection);
+    } else if !trial_summary.is_empty() {
         replan_msg.push_str("\n\n");
         replan_msg.push_str(&trial_summary.format_for_replan());
     }
@@ -956,6 +964,7 @@ fn inject_verification_step(
     iteration: usize,
     max_iterations: usize,
     store: Option<&MemoryStore>,
+    trial_summary: &TrialSummary,
 ) -> bool {
     if iteration == 0
         || !advisor.can_advise()
@@ -968,16 +977,25 @@ fn inject_verification_step(
     let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Verification, task_context);
     log_advisor_call(store, session, AdvisorRole::Verification, &resolution);
     session.add_message(Message::system(resolution.prompt));
-    session.add_message(Message::system(
-        "確認チェックリスト:\n\
-         - すべての主張にツール結果の根拠があるか？\n\
-         - 確認していない仮定が残っていないか？\n\
-         - 見落としているケースはないか？\n\
-         - ツール呼び出し成功率が80%以上か？\n\
-         - ファイル変更がある場合、コンパイル/構文チェックを通過したか？\n\
+    let mut checklist = "確認チェックリスト:
+         - すべての主張にツール結果の根拠があるか？
+         - 確認していない仮定が残っていないか？
+         - 見落としているケースはないか？
+         - ツール呼び出し成功率が80%以上か？
+         - ファイル変更がある場合、コンパイル/構文チェックを通過したか？
          - 元のタスクの完了条件をすべて満たしているか？"
-            .to_string(),
-    ));
+        .to_string();
+    if !trial_summary.is_empty() {
+        let structured = StructuredFeedback::from_trial_summary(trial_summary, task_context);
+        let injection = structured.format_for_injection();
+        if !injection.is_empty() {
+            checklist.push_str("
+
+");
+            checklist.push_str(&injection);
+        }
+    }
+    session.add_message(Message::system(checklist));
     advisor.record_call();
     eprintln!(
         "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
@@ -1641,6 +1659,7 @@ mod tests {
             1, // iteration > 0
             10,
             None,
+            &TrialSummary::default(),
         );
         assert!(injected, "複雑タスクは検証ステップを挿入");
         assert_eq!(advisor.calls_used, 1);
@@ -1660,6 +1679,7 @@ mod tests {
             0, // 初回
             10,
             None,
+            &TrialSummary::default(),
         );
         assert!(!injected);
         assert_eq!(advisor.calls_used, 0);
@@ -1678,6 +1698,7 @@ mod tests {
             1,
             10,
             None,
+            &TrialSummary::default(),
         );
         assert!(!injected);
     }
@@ -1699,6 +1720,7 @@ mod tests {
             1,
             10,
             None,
+            &TrialSummary::default(),
         );
         assert!(!injected);
     }
@@ -1716,6 +1738,7 @@ mod tests {
             1,
             10,
             None,
+            &TrialSummary::default(),
         );
         assert!(!injected);
     }
@@ -2297,6 +2320,7 @@ mod tests {
             1,
             10,
             None,
+            &TrialSummary::default(),
         );
         if injected {
             let has_checklist = session
@@ -2349,8 +2373,8 @@ mod tests {
             let has_trial = session
                 .messages
                 .iter()
-                .any(|m| m.content.contains("試した方法"));
-            assert!(has_trial, "試行サマリーがreplanに含まれる");
+                .any(|m| m.content.contains("[EVALUATION]") || m.content.contains("試した方法"));
+            assert!(has_trial, "構造化フィードバックまたは試行サマリーがreplanに含まれる");
         }
     }
 

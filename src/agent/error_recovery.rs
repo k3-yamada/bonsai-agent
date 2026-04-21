@@ -346,6 +346,122 @@ impl Default for TrialSummary {
     }
 }
 
+/// 構造化フィードバック（NAT SelfEvaluatingAgentWithFeedback知見）
+///
+/// 再計画・検証時に EVALUATION / MISSING_STEPS / SUGGESTIONS の
+/// 3セクション構造でフィードバックを注入し、1bitモデルの回復精度を向上させる。
+/// confidence値でベスト回答追跡にも使用。
+pub struct StructuredFeedback {
+    pub evaluation: String,
+    pub missing_steps: Vec<String>,
+    pub suggestions: Vec<String>,
+    /// 0.0(最低)〜1.0(最高) — 失敗数に応じて減衰
+    pub confidence: f64,
+}
+
+impl StructuredFeedback {
+    /// TrialSummaryから構造化フィードバックを生成
+    ///
+    /// confidence = max(0.0, 1.0 - 0.15 * failure_count)
+    /// NAT閾値: 0.85未満でフィードバック注入、0.5はJSON解析失敗時フォールバック
+    pub fn from_trial_summary(trials: &TrialSummary, task_context: &str) -> Self {
+        if trials.is_empty() {
+            return Self {
+                evaluation: String::new(),
+                missing_steps: Vec::new(),
+                suggestions: Vec::new(),
+                confidence: 1.0,
+            };
+        }
+
+        let failure_count = trials.len() as f64;
+        let confidence = (1.0 - 0.15 * failure_count).max(0.0);
+
+        // 使用済みツールの集計
+        let mut tool_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for entry in &trials.entries {
+            *tool_counts.entry(&entry.tool_name).or_insert(0) += 1;
+        }
+        let tool_list: Vec<String> = tool_counts
+            .iter()
+            .map(|(name, count)| format!("{}({}回失敗)", name, count))
+            .collect();
+
+        let evaluation = format!(
+            "タスク「{}」で{}回の試行が失敗。使用ツール: {}",
+            task_context,
+            trials.len(),
+            tool_list.join(", ")
+        );
+
+        // エラーパターンから未完了ステップを推定
+        let mut missing = Vec::new();
+        let last = trials.entries.last().unwrap();
+        missing.push(format!(
+            "直近の失敗: {}({}) → {}",
+            last.tool_name, last.args_summary, last.error_summary
+        ));
+
+        // 同一ツール連続失敗の検出
+        let mut suggestions = Vec::new();
+        for (tool, count) in &tool_counts {
+            if *count >= 2 {
+                suggestions.push(format!(
+                    "{}が{}回連続失敗 — 別のツールか別の引数を検討してください",
+                    tool, count
+                ));
+            }
+        }
+        if suggestions.is_empty() {
+            suggestions.push("これまでの方法を避けて、別のアプローチを試してください".to_string());
+        }
+
+        Self {
+            evaluation,
+            missing_steps: missing,
+            suggestions,
+            confidence,
+        }
+    }
+
+    /// セッション注入用のフォーマット出力（NAT EVALUATION/MISSING/SUGGESTIONS構造）
+    ///
+    /// 空のフィードバック（confidence=1.0、失敗なし）の場合は空文字列を返す
+    pub fn format_for_injection(&self) -> String {
+        if self.confidence >= 1.0 && self.missing_steps.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        parts.push(format!("[EVALUATION]\n{}", self.evaluation));
+
+        if !self.missing_steps.is_empty() {
+            let steps: Vec<String> = self
+                .missing_steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {}", i + 1, s))
+                .collect();
+            parts.push(format!("[MISSING STEPS]\n{}", steps.join("\n")));
+        }
+
+        if !self.suggestions.is_empty() {
+            let sugs: Vec<String> = self
+                .suggestions
+                .iter()
+                .map(|s| format!("- {}", s))
+                .collect();
+            parts.push(format!("[SUGGESTIONS]\n{}", sugs.join("\n")));
+        }
+
+        format!(
+            "<structured-feedback>\n{}\n</structured-feedback>",
+            parts.join("\n\n")
+        )
+    }
+}
+
 /// 環境障害フィルタ: エラー出力からサーバー/ネットワーク障害を分類（GLM-5.1知見）
 ///
 /// サーバー障害やネットワーク障害は「モデルの能力不足」ではなく
@@ -1083,5 +1199,80 @@ mod tests {
         assert_eq!(classify_environment_failure("コンパイルエラー E0308"), None);
         assert_eq!(classify_environment_failure("file not found"), None);
         assert_eq!(classify_environment_failure("permission denied"), None);
+    }
+
+    // --- Phase 1: StructuredFeedback テスト（NAT SelfEvaluatingAgentWithFeedback知見） ---
+
+    #[test]
+    fn t_structured_feedback_from_trial_summary() {
+        let mut ts = TrialSummary::new(10);
+        ts.record_failure("shell", r#"{"command":"ls"}"#, "permission denied", 1);
+        ts.record_failure("shell", r#"{"command":"cat /etc/shadow"}"#, "permission denied", 2);
+        let fb = StructuredFeedback::from_trial_summary(&ts, "ファイル一覧を取得する");
+        assert!(fb.confidence < 1.0);
+        assert!(!fb.evaluation.is_empty());
+        assert!(!fb.suggestions.is_empty());
+    }
+
+    #[test]
+    fn t_structured_feedback_empty_trial() {
+        let ts = TrialSummary::new(10);
+        let fb = StructuredFeedback::from_trial_summary(&ts, "テスト");
+        assert!((fb.confidence - 1.0).abs() < f64::EPSILON);
+        assert!(fb.missing_steps.is_empty());
+        assert!(fb.suggestions.is_empty());
+    }
+
+    #[test]
+    fn t_structured_feedback_confidence_decreases_with_failures() {
+        let mut ts = TrialSummary::new(10);
+        let fb1 = StructuredFeedback::from_trial_summary(&ts, "タスク");
+        ts.record_failure("shell", "{}", "error", 1);
+        let fb2 = StructuredFeedback::from_trial_summary(&ts, "タスク");
+        ts.record_failure("file_write", "{}", "error", 2);
+        ts.record_failure("shell", "{}", "error", 3);
+        let fb3 = StructuredFeedback::from_trial_summary(&ts, "タスク");
+        assert!(fb1.confidence > fb2.confidence);
+        assert!(fb2.confidence > fb3.confidence);
+        assert!(fb3.confidence >= 0.0);
+    }
+
+    #[test]
+    fn t_format_structured_contains_sections() {
+        let mut ts = TrialSummary::new(10);
+        ts.record_failure("shell", r#"{"cmd":"ls"}"#, "not found", 1);
+        let fb = StructuredFeedback::from_trial_summary(&ts, "ファイルを探す");
+        let output = fb.format_for_injection();
+        assert!(output.contains("[EVALUATION]"));
+        assert!(output.contains("[SUGGESTIONS]"));
+        assert!(output.contains("<structured-feedback>"));
+        assert!(output.contains("</structured-feedback>"));
+    }
+
+    #[test]
+    fn t_format_structured_empty_is_empty() {
+        let ts = TrialSummary::new(10);
+        let fb = StructuredFeedback::from_trial_summary(&ts, "テスト");
+        let output = fb.format_for_injection();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn t_structured_feedback_unique_tools_in_evaluation() {
+        let mut ts = TrialSummary::new(10);
+        ts.record_failure("shell", "{}", "err1", 1);
+        ts.record_failure("shell", "{}", "err2", 2);
+        ts.record_failure("file_read", "{}", "err3", 3);
+        let fb = StructuredFeedback::from_trial_summary(&ts, "タスク");
+        assert!(fb.evaluation.contains("shell"));
+        assert!(fb.evaluation.contains("file_read"));
+    }
+
+    #[test]
+    fn t_structured_feedback_max_confidence_clamp() {
+        let ts = TrialSummary::new(10);
+        let fb = StructuredFeedback::from_trial_summary(&ts, "タスク");
+        assert!(fb.confidence <= 1.0);
+        assert!(fb.confidence >= 0.0);
     }
 }
