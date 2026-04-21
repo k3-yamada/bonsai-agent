@@ -159,6 +159,18 @@ impl HypothesisGenerator {
             description: format!("insight: {}", insight.chars().take(50).collect::<String>()),
         });
     }
+
+    /// 失敗理由コンテキストから逆向き変異候補を生成（NAT oracle feedback知見）
+    pub fn add_worst_reasoning_insights(&mut self, worst: &[(String, f64)]) {
+        for (detail, delta) in worst.iter().take(3) {
+            let counter_rule = format!(
+                "前回の変異({})がdelta={:.4}で悪化。この方向を避け逆のアプローチを試す",
+                detail.chars().take(40).collect::<String>(),
+                delta
+            );
+            self.add_insight_mutation(&counter_rule);
+        }
+    }
 }
 
 /// デフォルトのプロンプトルール候補（20種: 多様なエージェント行動制御）
@@ -532,6 +544,21 @@ impl Default for ExperimentLoopConfig {
 }
 
 /// 実験ループ本体
+/// REJECT実験から最悪タスクの失敗パターンを抽出（NAT extract_worst_reasoning知見）
+///
+/// 直近N件のREJECT実験のdeltaでソートし、最も悪化した変異+deltaを返す。
+/// worst_n=5（NAT閾値）
+pub fn extract_worst_reasoning(experiments: &[Experiment], worst_n: usize) -> Vec<(String, f64)> {
+    let mut rejects: Vec<_> = experiments
+        .iter()
+        .filter(|e| !e.accepted && !e.prescreened)
+        .map(|e| (e.mutation_detail.clone(), e.delta))
+        .collect();
+    rejects.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    rejects.truncate(worst_n);
+    rejects
+}
+
 pub fn run_experiment_loop(
     base_config: &AgentConfig,
     backend: &dyn LlmBackend,
@@ -1190,5 +1217,84 @@ mod tests {
     fn test_param_mutations_count() {
         let params = param_mutations();
         assert_eq!(params.len(), 16, "パラメータ変異候補は16件");
+    }
+
+    // --- Phase 3: Oracle Feedback テスト（NAT extract_worst_reasoning知見） ---
+
+    #[test]
+    fn t_extract_worst_reasoning_empty() {
+        let experiments: Vec<Experiment> = vec![];
+        let worst = extract_worst_reasoning(&experiments, 5);
+        assert!(worst.is_empty());
+    }
+
+    #[test]
+    fn t_extract_worst_reasoning_filters_rejects() {
+        use std::collections::HashMap;
+        let experiments = vec![
+            Experiment {
+                experiment_id: "e1".into(), mutation_type: MutationType::PromptRule,
+                mutation_detail: "rule_a".into(), baseline_score: 0.8,
+                experiment_score: 0.75, delta: -0.05, accepted: false,
+                duration_secs: 10.0, config_snapshot: HashMap::new(),
+                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                prescreened: false,
+            },
+            Experiment {
+                experiment_id: "e2".into(), mutation_type: MutationType::PromptRule,
+                mutation_detail: "rule_b".into(), baseline_score: 0.8,
+                experiment_score: 0.82, delta: 0.02, accepted: true,
+                duration_secs: 10.0, config_snapshot: HashMap::new(),
+                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                prescreened: false,
+            },
+            Experiment {
+                experiment_id: "e3".into(), mutation_type: MutationType::AgentParam,
+                mutation_detail: "param_x".into(), baseline_score: 0.8,
+                experiment_score: 0.7, delta: -0.10, accepted: false,
+                duration_secs: 10.0, config_snapshot: HashMap::new(),
+                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                prescreened: false,
+            },
+        ];
+        let worst = extract_worst_reasoning(&experiments, 5);
+        assert_eq!(worst.len(), 2, "REJECT2件のみ");
+        assert_eq!(worst[0].0, "param_x", "最悪delta順");
+        assert!(worst[0].1 < worst[1].1);
+    }
+
+    #[test]
+    fn t_extract_worst_reasoning_truncates() {
+        use std::collections::HashMap;
+        let experiments: Vec<Experiment> = (0..10)
+            .map(|i| Experiment {
+                experiment_id: format!("e{i}"), mutation_type: MutationType::PromptRule,
+                mutation_detail: format!("rule_{i}"), baseline_score: 0.8,
+                experiment_score: 0.8 - (i as f64 * 0.01), delta: -(i as f64 * 0.01),
+                accepted: false, duration_secs: 10.0, config_snapshot: HashMap::new(),
+                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                prescreened: false,
+            })
+            .collect();
+        let worst = extract_worst_reasoning(&experiments, 3);
+        assert_eq!(worst.len(), 3, "worst_n=3で切り詰め");
+    }
+
+    #[test]
+    fn t_add_worst_reasoning_insights() {
+        let mut hypo = HypothesisGenerator::default();
+        let worst = vec![
+            ("rule_a".to_string(), -0.05),
+            ("rule_b".to_string(), -0.03),
+        ];
+        hypo.add_worst_reasoning_insights(&worst);
+        // 20 rules + 2 insights = 22 rules, 22 + 16 params = 38 total
+        // slot 20 and 21 should be insight-derived
+        let m20 = hypo.next_mutation(20);
+        assert!(
+            m20.detail.contains("insight:"),
+            "slot 20 should be insight: {}",
+            m20.detail
+        );
     }
 }
