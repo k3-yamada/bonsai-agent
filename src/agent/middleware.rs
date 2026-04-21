@@ -25,12 +25,18 @@ pub struct StepResult {
 pub enum MiddlewareSignal {
     Ok,
     Inject(String),
+    /// ループ中断（NAT before_step知見: LLM呼出前に安全停止）
+    Abort(String),
 }
 
 /// エージェントループのミドルウェアトレイト
 pub trait Middleware {
     fn name(&self) -> &str;
     fn after_step(&mut self, session: &mut Session, result: &StepResult) -> MiddlewareSignal;
+    /// LLM呼出前のフック（NAT知見: プリスクリーン/プロンプト修正/安全ガード）
+    fn before_step(&mut self, _session: &Session, _iteration: usize) -> MiddlewareSignal {
+        MiddlewareSignal::Ok
+    }
 }
 
 /// ミドルウェアチェーン — 登録順に実行
@@ -52,12 +58,35 @@ impl MiddlewareChain {
     pub fn run_after_step(&mut self, session: &mut Session, result: &StepResult) {
         for mw in &mut self.middlewares {
             match mw.after_step(session, result) {
-                MiddlewareSignal::Ok => {}
+                MiddlewareSignal::Ok | MiddlewareSignal::Abort(_) => {}
                 MiddlewareSignal::Inject(msg) => {
                     session.add_message(Message::system(msg));
                 }
             }
         }
+    }
+
+    /// LLM呼出前にミドルウェアチェーンを実行（NAT before_step知見）
+    ///
+    /// Abort返却時はループ中断理由を返す。Inject時はセッションにメッセージ追加。
+    pub fn run_before_step(&mut self, session: &mut Session, iteration: usize) -> Option<String> {
+        for mw in &mut self.middlewares {
+            match mw.before_step(session, iteration) {
+                MiddlewareSignal::Ok => {}
+                MiddlewareSignal::Inject(msg) => {
+                    session.add_message(Message::system(msg));
+                }
+                MiddlewareSignal::Abort(reason) => {
+                    log_event(
+                        LogLevel::Warn,
+                        "middleware",
+                        &format!("{} before_step abort: {}", mw.name(), reason),
+                    );
+                    return Some(reason);
+                }
+            }
+        }
+        None
     }
 
     pub fn len(&self) -> usize {
@@ -563,5 +592,78 @@ mod tests {
             let results: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
             assert!(results.iter().all(|&len| len == 2));
         });
+    }
+
+    // --- Phase 5: before_step テスト（NAT知見） ---
+
+    struct BeforeInjectMw;
+    impl Middleware for BeforeInjectMw {
+        fn name(&self) -> &str { "before_inject" }
+        fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
+            MiddlewareSignal::Ok
+        }
+        fn before_step(&mut self, _s: &Session, _iter: usize) -> MiddlewareSignal {
+            MiddlewareSignal::Inject("pre-step context".to_string())
+        }
+    }
+
+    struct BeforeAbortMw;
+    impl Middleware for BeforeAbortMw {
+        fn name(&self) -> &str { "before_abort" }
+        fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
+            MiddlewareSignal::Ok
+        }
+        fn before_step(&mut self, _s: &Session, _iter: usize) -> MiddlewareSignal {
+            MiddlewareSignal::Abort("safety limit".to_string())
+        }
+    }
+
+    #[test]
+    fn t_before_step_inject() {
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(BeforeInjectMw));
+        let mut session = Session::new();
+        let result = chain.run_before_step(&mut session, 0);
+        assert!(result.is_none(), "Inject does not abort");
+        assert!(session.messages.iter().any(|m| m.content.contains("pre-step context")));
+    }
+
+    #[test]
+    fn t_before_step_abort() {
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(BeforeAbortMw));
+        let mut session = Session::new();
+        let result = chain.run_before_step(&mut session, 0);
+        assert_eq!(result, Some("safety limit".to_string()));
+    }
+
+    struct DefaultBeforeMw;
+    impl Middleware for DefaultBeforeMw {
+        fn name(&self) -> &str { "default_before" }
+        fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
+            MiddlewareSignal::Ok
+        }
+        // before_step uses default impl -> Ok
+    }
+
+    #[test]
+    fn t_before_step_default_ok() {
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(DefaultBeforeMw));
+        let mut session = Session::new();
+        let result = chain.run_before_step(&mut session, 0);
+        assert!(result.is_none(), "default before_step returns Ok");
+        assert!(session.messages.is_empty());
+    }
+
+    #[test]
+    fn t_before_step_abort_stops_chain() {
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(BeforeAbortMw));
+        chain.add(Box::new(BeforeInjectMw));
+        let mut session = Session::new();
+        let result = chain.run_before_step(&mut session, 0);
+        assert!(result.is_some(), "abort stops chain");
+        assert!(session.messages.is_empty(), "inject after abort not reached");
     }
 }
