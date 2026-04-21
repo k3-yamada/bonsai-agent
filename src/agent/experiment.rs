@@ -514,6 +514,86 @@ fn load_tried_details(conn: &rusqlite::Connection) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Lab停滞検出器（NAT check_adaptive_triggers知見）
+///
+/// 3条件で停滞を検出し、Dreamer早期起動のトリガーを提供:
+/// - Stagnation: ベストスコア不変N回以上
+/// - VarianceCollapse: 直近delta分散が閾値未満
+pub struct LabStagnationDetector {
+    best_score: f64,
+    best_unchanged_count: usize,
+    recent_deltas: std::collections::VecDeque<f64>,
+    stagnation_threshold: usize,
+    variance_collapse_threshold: f64,
+    window_size: usize,
+}
+
+/// 停滞トリガーの種類
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabTrigger {
+    None,
+    Stagnation,
+    VarianceCollapse,
+}
+
+impl LabStagnationDetector {
+    pub fn new(stagnation_threshold: usize, variance_collapse_threshold: f64) -> Self {
+        Self {
+            best_score: f64::NEG_INFINITY,
+            best_unchanged_count: 0,
+            recent_deltas: std::collections::VecDeque::new(),
+            stagnation_threshold,
+            variance_collapse_threshold,
+            window_size: 5,
+        }
+    }
+
+    /// 実験結果を記録し、トリガーを判定
+    pub fn record_and_check(&mut self, delta: f64, experiment_score: f64) -> LabTrigger {
+        // delta履歴を更新
+        self.recent_deltas.push_back(delta);
+        if self.recent_deltas.len() > self.window_size {
+            self.recent_deltas.pop_front();
+        }
+
+        // ベストスコア更新チェック
+        if experiment_score > self.best_score {
+            self.best_score = experiment_score;
+            self.best_unchanged_count = 0;
+        } else {
+            self.best_unchanged_count += 1;
+        }
+
+        // 1. Stagnation: ベスト不変N回以上（NAT閾値: delta < 0.001）
+        if self.best_unchanged_count >= self.stagnation_threshold {
+            return LabTrigger::Stagnation;
+        }
+
+        // 2. VarianceCollapse: 直近deltas分散が閾値未満
+        if self.recent_deltas.len() >= self.window_size {
+            let mean = self.recent_deltas.iter().sum::<f64>() / self.recent_deltas.len() as f64;
+            let variance = self.recent_deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
+                / self.recent_deltas.len() as f64;
+            if variance < self.variance_collapse_threshold {
+                return LabTrigger::VarianceCollapse;
+            }
+        }
+
+        LabTrigger::None
+    }
+
+    pub fn reset(&mut self) {
+        self.best_unchanged_count = 0;
+        self.recent_deltas.clear();
+    }
+}
+
+impl Default for LabStagnationDetector {
+    fn default() -> Self {
+        Self::new(3, 0.001)
+    }
+}
+
 /// 実験ループ設定
 pub struct ExperimentLoopConfig {
     /// TSVログのパス
@@ -1281,6 +1361,56 @@ mod tests {
     }
 
     #[test]
+    // --- Phase 4: LabStagnationDetector テスト（NAT adaptive triggers知見） ---
+
+    #[test]
+    fn t_stagnation_detector_no_trigger() {
+        let mut det = LabStagnationDetector::default();
+        let t = det.record_and_check(-0.01, 0.80);
+        assert_eq!(t, LabTrigger::None);
+    }
+
+    #[test]
+    fn t_stagnation_detector_stagnation() {
+        let mut det = LabStagnationDetector::new(3, 0.001);
+        det.record_and_check(-0.01, 0.80); // sets best=0.80, unchanged=0
+        det.record_and_check(-0.02, 0.78); // unchanged=1
+        det.record_and_check(-0.03, 0.77); // unchanged=2
+        let t = det.record_and_check(-0.01, 0.76); // unchanged=3 -> trigger
+        assert_eq!(t, LabTrigger::Stagnation, "4th non-improvement triggers at threshold=3");
+    }
+
+    #[test]
+    fn t_stagnation_detector_reset_on_improvement() {
+        let mut det = LabStagnationDetector::new(3, 0.001);
+        det.record_and_check(-0.01, 0.80);
+        det.record_and_check(-0.02, 0.78);
+        det.record_and_check(0.05, 0.85); // improvement resets
+        let t = det.record_and_check(-0.01, 0.84);
+        assert_eq!(t, LabTrigger::None, "reset after improvement");
+    }
+
+    #[test]
+    fn t_stagnation_detector_variance_collapse() {
+        let mut det = LabStagnationDetector::new(100, 0.001); // high stagnation to avoid
+        // 5 nearly identical deltas
+        for _ in 0..5 {
+            det.record_and_check(-0.01, 0.79);
+        }
+        let t = det.record_and_check(-0.01, 0.78);
+        assert_eq!(t, LabTrigger::VarianceCollapse);
+    }
+
+    #[test]
+    fn t_stagnation_detector_reset() {
+        let mut det = LabStagnationDetector::default();
+        det.record_and_check(-0.01, 0.80);
+        det.record_and_check(-0.02, 0.78);
+        det.reset();
+        let t = det.record_and_check(-0.01, 0.77);
+        assert_eq!(t, LabTrigger::None, "reset clears state");
+    }
+
     fn t_add_worst_reasoning_insights() {
         let mut hypo = HypothesisGenerator::default();
         let worst = vec![
