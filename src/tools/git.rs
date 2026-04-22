@@ -46,7 +46,7 @@ pub struct GitArgs {
 impl TypedTool for GitTool {
     type Args = GitArgs;
     const NAME: &'static str = "git";
-    const DESCRIPTION: &'static str = "Gitリポジトリを操作する。subcommandパラメータにstatus/diff/log/commit/add/branchを指定。commitにはmessageパラメータも必要。";
+    const DESCRIPTION: &'static str = super::descriptions::GIT;
     const PERMISSION: Permission = Permission::Confirm;
 
     fn execute(&self, args: GitArgs) -> Result<ToolResult> {

@@ -444,9 +444,9 @@ pub fn select_model(ctx: &TaskContext, config: &RouterConfig) -> ModelSelection 
     ModelSelection::Bonsai
 }
 
-/// macOSの利用可能RAM（バイト）を取得
+/// macOSの総RAM（バイト）を取得
 #[cfg(target_os = "macos")]
-pub fn get_available_ram() -> u64 {
+pub fn get_total_ram() -> u64 {
     let mut size: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     let name = std::ffi::CString::new("hw.memsize").unwrap();
@@ -459,10 +459,57 @@ pub fn get_available_ram() -> u64 {
             0,
         );
     }
+    size
+}
 
-    // 空きメモリの概算: 総メモリの60%を利用可能と仮定
-    // （正確にはvm_statisticsを使うが、簡易実装）
-    size * 60 / 100
+/// macOSの利用可能RAM（バイト）を取得（vm_stat経由で実測値）
+#[cfg(target_os = "macos")]
+pub fn get_available_ram() -> u64 {
+    // vm_statコマンドで実際の空きメモリを取得
+    if let Ok(output) = std::process::Command::new("vm_stat").output()
+        && let Ok(text) = String::from_utf8(output.stdout)
+    {
+        let page_size = parse_vm_stat_page_size(&text).unwrap_or(16384);
+        let mut free: u64 = 0;
+        let mut inactive: u64 = 0;
+        let mut purgeable: u64 = 0;
+
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("Pages free:") {
+                free = parse_vm_stat_value(v);
+            } else if let Some(v) = line.strip_prefix("Pages inactive:") {
+                inactive = parse_vm_stat_value(v);
+            } else if let Some(v) = line.strip_prefix("Pages purgeable:") {
+                purgeable = parse_vm_stat_value(v);
+            }
+        }
+
+        let available = (free + inactive + purgeable) * page_size;
+        if available > 0 {
+            return available;
+        }
+    }
+
+    // フォールバック: 総メモリの60%
+    get_total_ram() * 60 / 100
+}
+
+/// vm_stat出力からページ数を抽出
+fn parse_vm_stat_value(s: &str) -> u64 {
+    s.trim().trim_end_matches('.').parse().unwrap_or(0)
+}
+
+/// vm_stat出力からページサイズを抽出
+fn parse_vm_stat_page_size(text: &str) -> Option<u64> {
+    // "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+    let start = text.find("page size of ")? + 13;
+    let end = start + text[start..].find(' ')?;
+    text[start..end].parse().ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn get_total_ram() -> u64 {
+    8 * 1024 * 1024 * 1024
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -560,6 +607,18 @@ mod tests {
     fn test_get_available_ram() {
         let ram = get_available_ram();
         assert!(ram > 0);
+        // M2 16GBでは空きRAMは1GB以上16GB未満であるべき
+        let gb = ram / (1024 * 1024 * 1024);
+        assert!(gb >= 1, "空きRAMが1GB未満: {}GB", gb);
+        assert!(gb <= 16, "空きRAMが16GB超: {}GB", gb);
+    }
+
+    #[test]
+    fn test_get_total_ram() {
+        let total = get_total_ram();
+        assert!(total > 0);
+        let gb = total / (1024 * 1024 * 1024);
+        assert!(gb >= 4, "総RAMが4GB未満: {}GB", gb);
     }
 
     #[test]

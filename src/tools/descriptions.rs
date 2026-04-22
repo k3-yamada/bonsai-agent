@@ -1,7 +1,7 @@
 //! ツール説明テキストの集約管理（OpenCode知見: コードとプロンプトの分離）
 //!
-//! 各ツールのDESCRIPTIONをここに集約し、Lab変異実験での書き換えを容易にする。
-//! 将来的にはTOML/YAML外部ファイルからinclude_str!()で読込可能な構造。
+//! 全ツールのDESCRIPTIONをここに集約。Lab変異実験での書き換えはこのファイルのみ。
+//! 各ツールは `super::descriptions::CONST` を参照する。
 
 pub const FILE_READ: &str =
     "ファイルの内容を読み取る。pathパラメータにファイルパスを指定。";
@@ -18,14 +18,29 @@ pub const SHELL: &str =
 pub const GIT: &str =
     "Gitリポジトリを操作する。subcommandパラメータにstatus/diff/log/commit/add/branchを指定。commitにはmessageパラメータも必要。";
 
-pub const WEB_FETCH: &str =
-    "指定URLの内容を取得する。urlパラメータにURLを指定。";
-
 pub const WEB_SEARCH: &str =
-    "Web検索を実行する。queryパラメータに検索クエリを指定。";
+    "Webを検索する。queryパラメータに検索クエリを指定。DuckDuckGo Instant Answer APIを使用。";
 
-pub const REPO_MAP: &str =
-    "リポジトリのファイル構造とシンボルマップを生成する。pathパラメータにルートディレクトリを指定。";
+pub const WEB_FETCH: &str =
+    "URLからWebページのテキスト内容を取得する。urlパラメータにURLを指定。";
+
+pub const REPO_MAP: &str = "コード構造を要約。";
 
 pub const ARXIV_SEARCH: &str =
-    "arXiv論文を検索する。queryパラメータに検索クエリを指定。";
+    "arxiv論文を検索する。queryパラメータに検索クエリを指定。";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_descriptions_non_empty() {
+        let all = [
+            FILE_READ, FILE_WRITE, MULTI_EDIT, SHELL, GIT,
+            WEB_SEARCH, WEB_FETCH, REPO_MAP, ARXIV_SEARCH,
+        ];
+        for desc in &all {
+            assert!(!desc.is_empty(), "空の説明文が存在");
+        }
+    }
+}

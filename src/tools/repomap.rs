@@ -18,7 +18,7 @@ pub struct RepoMapArgs {
 impl TypedTool for RepoMapTool {
     type Args = RepoMapArgs;
     const NAME: &'static str = "repo_map";
-    const DESCRIPTION: &'static str = "コード構造を要約。";
+    const DESCRIPTION: &'static str = super::descriptions::REPO_MAP;
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 

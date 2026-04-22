@@ -966,6 +966,7 @@ fn compute_output_hash(session: &Session) -> u64 {
 /// - 複雑タスクである
 /// - 回答に [検証済] マーカー未含有
 /// - 残りイテレーションあり
+#[allow(clippy::too_many_arguments)]
 fn inject_verification_step(
     session: &mut Session,
     advisor: &mut AdvisorConfig,

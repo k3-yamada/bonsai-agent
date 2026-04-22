@@ -16,7 +16,7 @@ pub struct ArxivTool;
 impl TypedTool for ArxivTool {
     type Args = ArxivArgs;
     const NAME: &'static str = "arxiv_search";
-    const DESCRIPTION: &'static str = "arxiv論文を検索する。queryパラメータに検索クエリを指定。";
+    const DESCRIPTION: &'static str = super::descriptions::ARXIV_SEARCH;
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 

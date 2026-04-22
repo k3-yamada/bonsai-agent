@@ -18,8 +18,7 @@ pub struct WebSearchArgs {
 impl TypedTool for WebSearchTool {
     type Args = WebSearchArgs;
     const NAME: &'static str = "web_search";
-    const DESCRIPTION: &'static str =
-        "Webを検索する。queryパラメータに検索クエリを指定。DuckDuckGo Instant Answer APIを使用。";
+    const DESCRIPTION: &'static str = super::descriptions::WEB_SEARCH;
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 
@@ -60,8 +59,7 @@ pub struct WebFetchArgs {
 impl TypedTool for WebFetchTool {
     type Args = WebFetchArgs;
     const NAME: &'static str = "web_fetch";
-    const DESCRIPTION: &'static str =
-        "URLからWebページのテキスト内容を取得する。urlパラメータにURLを指定。";
+    const DESCRIPTION: &'static str = super::descriptions::WEB_FETCH;
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 

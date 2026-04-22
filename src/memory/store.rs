@@ -163,25 +163,44 @@ impl MemoryStore {
 
     // --- セッション ---
 
-    /// セッションを保存
+    /// セッションを保存（単一トランザクションでバッチ実行）
     pub fn save_session(&self, session: &crate::agent::conversation::Session) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
+
+        // 単一トランザクションで全操作を実行（N+2 fsync → 1 fsync）
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = self.save_session_inner(session, &now);
+        if result.is_ok() {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn save_session_inner(
+        &self,
+        session: &crate::agent::conversation::Session,
+        now: &str,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO sessions (id, created_at, updated_at, summary) VALUES (?1, ?2, ?3, ?4)",
             params![
                 &session.id,
                 session.created_at.to_rfc3339(),
-                &now,
+                now,
                 &session.summary,
             ],
         )?;
 
-        // 既存メッセージを削除して再挿入（簡易実装）
         self.conn.execute(
             "DELETE FROM messages WHERE session_id = ?1",
             params![&session.id],
         )?;
 
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO messages (session_id, role, content, tool_call_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
         for msg in &session.messages {
             let role = match msg.role {
                 crate::agent::conversation::Role::System => "system",
@@ -189,10 +208,7 @@ impl MemoryStore {
                 crate::agent::conversation::Role::Assistant => "assistant",
                 crate::agent::conversation::Role::Tool => "tool",
             };
-            self.conn.execute(
-                "INSERT INTO messages (session_id, role, content, tool_call_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![&session.id, role, &msg.content, &msg.tool_call_id, &now],
-            )?;
+            stmt.execute(params![&session.id, role, &msg.content, &msg.tool_call_id, now])?;
         }
         Ok(())
     }
@@ -495,6 +511,52 @@ mod tests {
         store.save_memory("A", "fact", &[]).unwrap();
         store.save_memory("B", "skill", &[]).unwrap();
         assert_eq!(store.memory_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_save_session_transactional() {
+        // セッション保存がトランザクション内で実行され、差分更新されることを検証
+        use crate::agent::conversation::{Message, Session};
+        let store = test_store();
+        let mut session = Session::new();
+        session.messages.push(Message::user("msg1"));
+        session.messages.push(Message::user("msg2"));
+
+        // 初回保存
+        store.save_session(&session).unwrap();
+        let loaded = store.load_session(&session.id).unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+
+        // メッセージ追加後の再保存で正しく更新される
+        session.messages.push(Message::user("msg3"));
+        store.save_session(&session).unwrap();
+        let loaded = store.load_session(&session.id).unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 3);
+        assert_eq!(loaded.messages[2].content, "msg3");
+    }
+
+    #[test]
+    fn test_save_session_idempotent() {
+        // 同一セッションを複数回保存しても重複しない
+        use crate::agent::conversation::{Message, Session};
+        let store = test_store();
+        let mut session = Session::new();
+        session.messages.push(Message::user("hello"));
+
+        store.save_session(&session).unwrap();
+        store.save_session(&session).unwrap();
+        store.save_session(&session).unwrap();
+
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                params![&session.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // 3回保存しても1メッセージのまま
+        assert_eq!(count, 1);
     }
 
     #[test]

@@ -24,8 +24,7 @@ pub struct FileReadArgs {
 impl TypedTool for FileReadTool {
     type Args = FileReadArgs;
     const NAME: &'static str = "file_read";
-    const DESCRIPTION: &'static str =
-        "ファイルの内容を読み取る。pathパラメータにファイルパスを指定。";
+    const DESCRIPTION: &'static str = super::descriptions::FILE_READ;
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 
@@ -114,7 +113,7 @@ pub struct FileWriteArgs {
 impl TypedTool for FileWriteTool {
     type Args = FileWriteArgs;
     const NAME: &'static str = "file_write";
-    const DESCRIPTION: &'static str = "ファイルに書き込む。全文置換(content)またはsearch/replace差分適用(old_text/new_text)。git管理下では自動スナップショット。";
+    const DESCRIPTION: &'static str = super::descriptions::FILE_WRITE;
     const PERMISSION: Permission = Permission::Confirm;
 
     fn execute(&self, args: FileWriteArgs) -> Result<ToolResult> {
@@ -211,7 +210,7 @@ pub struct MultiEditArgs {
 impl TypedTool for MultiEditTool {
     type Args = MultiEditArgs;
     const NAME: &'static str = "multi_edit";
-    const DESCRIPTION: &'static str = "単一ファイルの複数箇所を一括編集する。全て成功するか、失敗時は元に戻す。editsに[{old_text, new_text}]の配列を指定。";
+    const DESCRIPTION: &'static str = super::descriptions::MULTI_EDIT;
     const PERMISSION: Permission = Permission::Confirm;
 
     fn execute(&self, args: MultiEditArgs) -> Result<ToolResult> {

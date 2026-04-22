@@ -42,8 +42,7 @@ pub struct ShellArgs {
 impl TypedTool for ShellTool {
     type Args = ShellArgs;
     const NAME: &'static str = "shell";
-    const DESCRIPTION: &'static str =
-        "シェルコマンドを実行する。commandパラメータにコマンド文字列を指定。";
+    const DESCRIPTION: &'static str = super::descriptions::SHELL;
     const PERMISSION: Permission = Permission::Confirm;
 
     fn execute(&self, args: ShellArgs) -> Result<ToolResult> {
