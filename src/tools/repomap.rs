@@ -190,7 +190,7 @@ fn pagerank(
 fn extract_definitions(path: &Path) -> Vec<String> {
     let syms = extract_syms(path);
     let re = Regex::new(r"(?:fn|struct|enum|trait|class|type|interface|func|def|const|static|mod|object|protocol|actor)\s+(\w+)").unwrap();
-    let mut defs = Vec::new();
+    let mut defs = Vec::with_capacity(syms.len().min(30));
     for s in &syms {
         if let Some(caps) = re.captures(s)
             && let Some(m) = caps.get(1)

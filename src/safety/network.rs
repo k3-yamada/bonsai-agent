@@ -71,4 +71,24 @@ mod tests {
         let f = NetworkFilter::strict(&["huggingface.co"]);
         assert!(f.is_allowed("https://huggingface.co/api"));
     }
+    #[test]
+    fn t_default_is_allow_all() {
+        let f = NetworkFilter::default();
+        assert!(!f.block_by_default);
+        assert!(f.is_allowed("https://any.domain.example"));
+    }
+    #[test]
+    fn t_strict_blocks_unknown() {
+        let f = NetworkFilter::strict(&["trusted.example"]);
+        assert!(!f.is_allowed("https://evil.com/path"));
+        assert!(!f.is_allowed("http://localhost:8080"));
+    }
+    #[test]
+    fn t_extract_domain_no_scheme() {
+        assert_eq!(extract_domain("example.com/path"), "example.com");
+    }
+    #[test]
+    fn t_extract_domain_empty() {
+        assert_eq!(extract_domain(""), "");
+    }
 }

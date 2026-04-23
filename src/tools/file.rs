@@ -542,7 +542,7 @@ fn replace_lines(
     count: usize,
     new_text: &str,
 ) -> String {
-    let mut result_lines = Vec::new();
+    let mut result_lines = Vec::with_capacity(content_lines.len());
     result_lines.extend_from_slice(&content_lines[..start]);
     for new_line in new_text.lines() {
         result_lines.push(new_line);
@@ -637,7 +637,7 @@ fn try_context_aware(content: &str, old_text: &str, new_text: &str) -> Option<St
 
     // old_textの先頭行と末尾行をアンカーとして全候補位置を収集
     let first_trimmed = old_lines[0].trim();
-    let mut candidates: Vec<usize> = Vec::new();
+    let mut candidates: Vec<usize> = Vec::with_capacity(content_lines.len());
     for (i, cl) in content_lines.iter().enumerate() {
         if cl.trim() == first_trimmed && i + old_lines.len() <= content_lines.len() {
             candidates.push(i);

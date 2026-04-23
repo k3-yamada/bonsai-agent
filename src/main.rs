@@ -777,10 +777,13 @@ fn handle_rollback_mode(store: &MemoryStore, cp_id: i64) -> Result<()> {
         return Ok(());
     }
     // DB+gitで直接ロールバック実行
-    let git_ref = cp.git_ref.as_ref().unwrap();
-    let _ = std::process::Command::new("git")
+    let git_ref = cp.git_ref.as_deref().expect("git_ref確認済み");
+    if let Err(e) = std::process::Command::new("git")
         .args(["checkout", "."])
-        .output();
+        .output()
+    {
+        eprintln!("git checkout失敗: {e}");
+    }
     let success = std::process::Command::new("git")
         .args(["stash", "apply", git_ref])
         .output()
