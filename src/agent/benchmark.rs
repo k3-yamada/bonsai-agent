@@ -522,9 +522,15 @@ impl BenchmarkSuite {
             }
 
             let mut scores = Vec::new();
+            // タスク毎に1 DB作成、k回ループ間でリセット（66→22 DB作成に削減）
+            let store = MemoryStore::in_memory()?;
             for run_idx in 0..multi.k {
                 if cancel.is_cancelled() {
                     break;
+                }
+
+                if run_idx > 0 {
+                    store.reset_session_data()?;
                 }
 
                 // jitter_seed時はプロンプトに実行番号を付加してキャッシュ回避
@@ -550,8 +556,6 @@ impl BenchmarkSuite {
                     base_inference: config.base_inference.clone(),
                     task_timeout: config.task_timeout,
                 };
-
-                let store = MemoryStore::in_memory()?;
                 let result = run_agent_loop(
                     &task.input,
                     backend,

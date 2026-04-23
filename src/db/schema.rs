@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -37,6 +37,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 7,
         description: "プリスクリーニング: experiments に prescreened カラム追加",
         sql: SCHEMA_V7,
+    },
+    Migration {
+        version: 8,
+        description: "実験インデックス: accepted+mutation_detail複合インデックス",
+        sql: SCHEMA_V8,
     },
 ];
 
@@ -211,6 +216,10 @@ const SCHEMA_V7: &str = r#"
 ALTER TABLE experiments ADD COLUMN prescreened INTEGER NOT NULL DEFAULT 0;
 "#;
 
+const SCHEMA_V8: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_experiments_accepted_detail ON experiments(accepted, mutation_detail);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +355,18 @@ mod tests {
         assert!(
             SCHEMA_V7.contains("ALTER TABLE experiments"),
             "V7はexperimentsテーブルのALTER"
+        );
+    }
+
+    #[test]
+    fn test_schema_v8_contains_accepted_detail_index() {
+        assert!(
+            SCHEMA_V8.contains("idx_experiments_accepted_detail"),
+            "V8にaccepted+mutation_detail複合インデックスが必要"
+        );
+        assert!(
+            SCHEMA_V8.contains("experiments(accepted, mutation_detail)"),
+            "V8はexperimentsテーブルの複合インデックス"
         );
     }
 }

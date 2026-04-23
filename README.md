@@ -280,7 +280,7 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - ベースライン: score=0.8596, pass@k=1.0
 - 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
 
-## ハーネスパターン（135項目）
+## ハーネスパターン（148項目）
 
 「Scaffolding > Model」設計原則に基づく、1ビットモデルの信頼性向上パターン:
 
@@ -300,12 +300,12 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - **構造化エラー分類12種**: FailureMode拡張 + RecoveryHint
 - **ヘルスチェック統一**: /health + /v1/modelsフォールバック（MLX対応）
 
-全135項目の詳細はCLAUDE.mdを参照。
+全148項目の詳細はCLAUDE.mdを参照。
 
 ## 開発
 
 ```bash
-cargo test                     # 840テスト
+cargo test                     # 880テスト
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマット
 cargo build --features full    # fastembed有効化ビルド

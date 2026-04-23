@@ -51,7 +51,7 @@ impl<'a> HybridSearch<'a> {
         let vector_results = self.vector_search(query_embedding, limit * 2)?;
 
         // 3. RRF融合
-        let merged = self.rrf_merge(&keyword_results, &vector_results, limit);
+        let merged = self.rrf_merge(keyword_results, vector_results, limit);
 
         Ok(merged)
     }
@@ -86,8 +86,8 @@ impl<'a> HybridSearch<'a> {
     /// Reciprocal Rank Fusion
     fn rrf_merge(
         &self,
-        keyword_results: &[MemoryRecord],
-        vector_results: &[(MemoryRecord, f32)],
+        keyword_results: Vec<MemoryRecord>,
+        vector_results: Vec<(MemoryRecord, f32)>,
         limit: usize,
     ) -> Vec<SearchResult> {
         use std::collections::HashMap;
@@ -95,8 +95,8 @@ impl<'a> HybridSearch<'a> {
         let k = 60.0f32; // RRF定数
         let mut scores: HashMap<i64, (f32, MemoryRecord, SearchSource)> = HashMap::new();
 
-        // キーワード検索のスコア
-        for (rank, mem) in keyword_results.iter().enumerate() {
+        // キーワード検索のスコア（所有権移動でclone不要）
+        for (rank, mem) in keyword_results.into_iter().enumerate() {
             let rrf_score = self.alpha / (k + rank as f32 + 1.0);
             scores
                 .entry(mem.id)
@@ -104,11 +104,11 @@ impl<'a> HybridSearch<'a> {
                     *s += rrf_score;
                     *src = SearchSource::Hybrid;
                 })
-                .or_insert((rrf_score, mem.clone(), SearchSource::Keyword));
+                .or_insert((rrf_score, mem, SearchSource::Keyword));
         }
 
-        // ベクトル検索のスコア
-        for (rank, (mem, _sim)) in vector_results.iter().enumerate() {
+        // ベクトル検索のスコア（所有権移動でclone不要）
+        for (rank, (mem, _sim)) in vector_results.into_iter().enumerate() {
             let rrf_score = (1.0 - self.alpha) / (k + rank as f32 + 1.0);
             scores
                 .entry(mem.id)
@@ -116,7 +116,7 @@ impl<'a> HybridSearch<'a> {
                     *s += rrf_score;
                     *src = SearchSource::Hybrid;
                 })
-                .or_insert((rrf_score, mem.clone(), SearchSource::Vector));
+                .or_insert((rrf_score, mem, SearchSource::Vector));
         }
 
         let mut results: Vec<SearchResult> = scores

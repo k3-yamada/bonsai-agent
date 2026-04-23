@@ -59,6 +59,14 @@ impl MemoryStore {
         &self.conn
     }
 
+    /// セッション関連データをリセット（ベンチマークのk回実行間で使用）
+    pub fn reset_session_data(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM messages; DELETE FROM sessions; DELETE FROM memories;",
+        )?;
+        Ok(())
+    }
+
     /// 全テーブルの期限切れレコードを一括パージ
     pub fn purge_all_expired(&self) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
@@ -577,5 +585,26 @@ mod tests {
         let deleted = store.purge_stale_memories(1, 100).unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(store.memory_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_reset_session_data() {
+        let store = test_store();
+
+        // メモリを挿入
+        store
+            .save_memory("test memory", "fact", &["test".to_string()])
+            .unwrap();
+        assert!(store.memory_count().unwrap() > 0);
+
+        // リセットでデータがクリアされる
+        store.reset_session_data().unwrap();
+        assert_eq!(store.memory_count().unwrap(), 0);
+
+        // リセット後もスキーマは正常（新規データ保存可能）
+        store
+            .save_memory("after reset", "fact", &["test".to_string()])
+            .unwrap();
+        assert_eq!(store.memory_count().unwrap(), 1);
     }
 }
