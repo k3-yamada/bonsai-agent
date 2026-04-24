@@ -27,6 +27,7 @@ use crate::tools::detect_task_type;
 use crate::tools::{TaskType, ToolRegistry, ToolResultCache};
 
 /// エージェント設定
+#[derive(Clone)]
 pub struct AgentConfig {
     pub max_iterations: usize,
     pub max_retries: usize,

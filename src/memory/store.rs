@@ -6,13 +6,20 @@ use crate::db::migrate;
 /// SQLite統合ストア。A-MEMメモリ、セッション、経験、プロファイルを一元管理。
 pub struct MemoryStore {
     conn: Connection,
+    /// ファイルベースDBのパス（in-memoryはNone）。
+    /// rusqlite Connectionは!Syncなため、並列実行時に別スレッドで
+    /// 同一ファイルへ新しいConnectionを開くために保持する。
+    path: Option<String>,
 }
 
 impl MemoryStore {
     /// ファイルベースのDBを開く
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-        let mut store = Self { conn };
+        let mut store = Self {
+            conn,
+            path: Some(path.to_string()),
+        };
         store.initialize()?;
         Ok(store)
     }
@@ -20,9 +27,22 @@ impl MemoryStore {
     /// インメモリDB（テスト用）
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let mut store = Self { conn };
+        let mut store = Self { conn, path: None };
         store.initialize()?;
         Ok(store)
+    }
+
+    /// ファイルパス（in-memoryならNone）
+    pub fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+
+    /// 並列実行用のConnectionクローン。
+    /// file-backedならパスから新しいConnectionを開き、in-memoryならNoneを返す
+    /// （in-memoryはプロセス内で共有できないため並列化不能）。
+    /// SQLiteはWAL/rollbackジャーナルで複数Connectionから同時アクセス安全。
+    pub fn try_clone_for_thread(&self) -> Option<Result<Self>> {
+        self.path.as_ref().map(|p| Self::open(p))
     }
 
     /// スキーマの初期化/マイグレーション
