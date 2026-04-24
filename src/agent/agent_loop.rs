@@ -148,7 +148,7 @@ pub enum StepOutcome {
 ///
 /// run_agent_loop_with_session の局所変数が多すぎるため構造体に抽出。
 /// 将来のミドルウェアチェーン化の基盤。
-pub struct LoopState {
+pub struct LoopState<'a> {
     pub circuit_breaker: CircuitBreaker,
     pub loop_detector: LoopDetector,
     pub stall_detector: StallDetector,
@@ -159,14 +159,14 @@ pub struct LoopState {
     /// トークン予算追跡（diminishing returns検出用、macOS26/Agent知見）
     pub token_budget: TokenBudgetTracker,
     /// ミドルウェアチェーン（DeerFlow知見: 5段パイプライン）
-    pub middleware_chain: MiddlewareChain,
+    pub middleware_chain: MiddlewareChain<'a>,
     /// ツール結果キャッシュ（読取専用ツールの重複呼び出し回避）
     pub tool_cache: ToolResultCache,
     /// 試行サマリー記憶（GrandCode知見: 失敗履歴を保持し再計画時に注入）
     pub trial_summary: TrialSummary,
 }
 
-impl LoopState {
+impl<'a> LoopState<'a> {
     pub fn new(advisor: AdvisorConfig) -> Self {
         Self {
             circuit_breaker: CircuitBreaker::default(),
@@ -555,8 +555,7 @@ pub fn run_agent_loop_with_session(
 
     let mut state = LoopState::new(config.advisor.clone());
     // ミドルウェアチェーン構築（DeerFlow知見: 5段パイプライン）
-    state.middleware_chain =
-        unsafe { crate::agent::middleware::build_default_chain(&session.id, store) };
+    state.middleware_chain = crate::agent::middleware::build_default_chain(&session.id, store);
 
     let ctx = StepContext {
         backend,

@@ -40,18 +40,18 @@ pub trait Middleware {
 }
 
 /// ミドルウェアチェーン — 登録順に実行
-pub struct MiddlewareChain {
-    middlewares: Vec<Box<dyn Middleware>>,
+pub struct MiddlewareChain<'a> {
+    middlewares: Vec<Box<dyn Middleware + 'a>>,
 }
 
-impl MiddlewareChain {
+impl<'a> MiddlewareChain<'a> {
     pub fn new() -> Self {
         Self {
             middlewares: Vec::new(),
         }
     }
 
-    pub fn add(&mut self, mw: Box<dyn Middleware>) {
+    pub fn add(&mut self, mw: Box<dyn Middleware + 'a>) {
         self.middlewares.push(mw);
     }
 
@@ -102,7 +102,7 @@ impl MiddlewareChain {
     }
 }
 
-impl Default for MiddlewareChain {
+impl<'a> Default for MiddlewareChain<'a> {
     fn default() -> Self {
         Self::new()
     }
@@ -111,30 +111,24 @@ impl Default for MiddlewareChain {
 // --- 具象ミドルウェア ---
 
 /// 1. 監査ログミドルウェア
-pub struct AuditMiddleware {
+pub struct AuditMiddleware<'a> {
     session_id: String,
-    store: Option<*const MemoryStore>,
+    store: Option<&'a MemoryStore>,
 }
 
-impl AuditMiddleware {
-    /// # Safety
-    /// store のライフタイムは MiddlewareChain より長くなければならない。
-    pub unsafe fn new(session_id: String, store: Option<&MemoryStore>) -> Self {
-        Self {
-            session_id,
-            store: store.map(|s| s as *const MemoryStore),
-        }
+impl<'a> AuditMiddleware<'a> {
+    pub fn new(session_id: String, store: Option<&'a MemoryStore>) -> Self {
+        Self { session_id, store }
     }
 }
 
-impl Middleware for AuditMiddleware {
+impl Middleware for AuditMiddleware<'_> {
     fn name(&self) -> &str {
         "audit"
     }
 
     fn after_step(&mut self, _session: &mut Session, result: &StepResult) -> MiddlewareSignal {
-        if let Some(ptr) = self.store {
-            let store = unsafe { &*ptr };
+        if let Some(store) = self.store {
             let audit = AuditLog::new(store.conn());
             let _ = audit.log(
                 Some(&self.session_id),
@@ -303,17 +297,15 @@ impl Middleware for TokenBudgetMiddleware {
 }
 
 /// デフォルト5段ミドルウェアチェーンを構築
-///
-/// # Safety
-/// store のライフタイムは返却される MiddlewareChain より長くなければならない。
-pub unsafe fn build_default_chain(
+pub fn build_default_chain<'a>(
     session_id: &str,
-    store: Option<&MemoryStore>,
-) -> MiddlewareChain {
+    store: Option<&'a MemoryStore>,
+) -> MiddlewareChain<'a> {
     let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(unsafe {
-        AuditMiddleware::new(session_id.to_string(), store)
-    }));
+    chain.add(Box::new(AuditMiddleware::new(
+        session_id.to_string(),
+        store,
+    )));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
     // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
     chain.add(Box::new(CompactionMiddleware::default()));
@@ -456,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_audit_no_store_no_panic() {
-        let mut mw = unsafe { AuditMiddleware::new("test-session".to_string(), None) };
+        let mut mw = AuditMiddleware::new("test-session".to_string(), None);
         let mut session = Session::new();
         let r = make_continue_result(0, vec![]);
         assert!(matches!(
@@ -468,7 +460,7 @@ mod tests {
     #[test]
     fn test_audit_with_store() {
         let store = MemoryStore::in_memory().unwrap();
-        let mut mw = unsafe { AuditMiddleware::new("test-session".to_string(), Some(&store)) };
+        let mut mw = AuditMiddleware::new("test-session".to_string(), Some(&store));
         let mut session = Session::new();
         let r = make_continue_result(0, vec!["shell".to_string()]);
         mw.after_step(&mut session, &r);
@@ -479,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_build_default_chain_has_5_middlewares() {
-        let chain = unsafe { build_default_chain("test", None) };
+        let chain = build_default_chain("test", None);
         assert_eq!(chain.len(), 4);
         assert_eq!(
             chain.names(),
