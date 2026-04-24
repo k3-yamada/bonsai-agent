@@ -1,5 +1,6 @@
 use crate::agent::conversation::{Message, Role};
 use crate::memory::store::MemoryStore;
+use crate::runtime::embedder::{Embedder, cosine_similarity};
 use std::collections::HashMap;
 pub struct CompactionConfig {
     pub large_output_threshold: usize,
@@ -211,6 +212,55 @@ pub fn score_message_importance(msg: &Message) -> f64 {
     }
 }
 
+/// セマンティック重要度スコアラー（P1 Step 4: embedding-based importance scoring）
+///
+/// 固定役割スコア（score_message_importance）とタスクコンテキストとの
+/// コサイン類似度を 6:4 でブレンドし、動的な重要度を算出する。
+/// embedderはBox<dyn Embedder>で所有、task_embeddingは set_task() で一度だけ計算。
+pub struct SemanticScorer {
+    embedder: Box<dyn Embedder>,
+    task_embedding: Vec<f32>,
+}
+
+impl SemanticScorer {
+    /// タスクコンテキストから初期化。失敗時はErr（呼び出し側でフォールバック判断）。
+    pub fn new(embedder: Box<dyn Embedder>, task_context: &str) -> anyhow::Result<Self> {
+        let truncated: String = task_context.chars().take(500).collect();
+        let mut vecs = embedder.embed(&[truncated.as_str()])?;
+        let task_embedding = vecs
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("embedder returned empty vector"))?;
+        Ok(Self {
+            embedder,
+            task_embedding,
+        })
+    }
+
+    /// メッセージの動的重要度スコア（0.0-1.0）
+    ///
+    /// ブレンド: 0.6 * 固定役割スコア + 0.4 * ((cosine_sim + 1) / 2)
+    /// コサイン類似度 [-1, 1] を [0, 1] にマッピング。
+    pub fn score(&self, msg: &Message) -> f64 {
+        let base = score_message_importance(msg);
+        let preview: String = msg.content.chars().take(500).collect();
+        if preview.trim().is_empty() {
+            return base;
+        }
+        match self.embedder.embed(&[preview.as_str()]) {
+            Ok(mut vecs) => {
+                if let Some(v) = vecs.pop() {
+                    let sim = cosine_similarity(&v, &self.task_embedding) as f64;
+                    let normalized = (sim + 1.0) / 2.0;
+                    0.6 * base + 0.4 * normalized
+                } else {
+                    base
+                }
+            }
+            Err(_) => base,
+        }
+    }
+}
+
 /// Toolメッセージからエラー（未解決事項）を検出
 fn collect_unresolved(messages: &[Message], boundary: usize) -> Vec<String> {
     let mut errors = Vec::new();
@@ -252,6 +302,69 @@ pub fn compact_level0(messages: &mut [Message], config: &CompactionConfig) -> Ve
     }
     off
 }
+/// セマンティック版 level1: SemanticScorerで動的重要度スコアを算出
+///
+/// compact_level1と同じ保護ルール（最初/最後のUser、AI+Toolペア、直近トークン保護）を適用し、
+/// 固定スコアの代わりにscorer.score()で削除候補を順位付けする。
+pub fn compact_level1_with_scorer(
+    messages: &mut [Message],
+    config: &CompactionConfig,
+    scorer: &SemanticScorer,
+) {
+    let t = messages.len();
+    if t <= config.placeholder_keep_recent {
+        return;
+    }
+    let keep_by_count = config.placeholder_keep_recent;
+    let keep_by_tokens = {
+        let mut acc = 0usize;
+        let mut keep = 0usize;
+        for msg in messages.iter().rev() {
+            acc += msg.content.len().div_ceil(4);
+            if acc > config.prune_protect_tokens {
+                break;
+            }
+            keep += 1;
+        }
+        keep
+    };
+    let boundary = t.saturating_sub(keep_by_count.max(keep_by_tokens));
+    if boundary == 0 {
+        return;
+    }
+    let pairs = find_ai_tool_pairs(messages);
+    let protected: std::collections::HashSet<usize> = pairs
+        .iter()
+        .flat_map(|&(a, b)| {
+            if a >= boundary || b >= boundary {
+                vec![a, b]
+            } else {
+                vec![]
+            }
+        })
+        .collect();
+    let first_user_idx = messages[..boundary]
+        .iter()
+        .position(|m| matches!(m.role, Role::User));
+    let last_user_idx = messages[..boundary]
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User));
+    let mut candidates: Vec<(usize, f64)> = (0..boundary)
+        .filter(|&i| {
+            !protected.contains(&i) && Some(i) != first_user_idx && Some(i) != last_user_idx
+        })
+        .map(|i| (i, scorer.score(&messages[i])))
+        .collect();
+    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (i, _score) in &candidates {
+        let msg = &mut messages[*i];
+        if matches!(msg.role, Role::Tool) && msg.content.len() > config.prune_minimum_chars {
+            let id = msg.tool_call_id.as_deref().unwrap_or("?");
+            msg.content = format!("[prev:{id}]");
+        }
+    }
+}
+
 pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
     let t = messages.len();
     if t <= config.placeholder_keep_recent {
@@ -978,5 +1091,92 @@ mod tests {
     fn t_score_importance_system_normal() {
         let msg = Message::system("通常のシステムプロンプト");
         assert_eq!(score_message_importance(&msg), 0.9, "通常Systemは0.9");
+    }
+
+    // --- SemanticScorer テスト (P1 Step 4) ---
+
+    #[test]
+    fn t_semantic_scorer_new() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let embedder = Box::new(SimpleEmbedder::default());
+        let scorer = SemanticScorer::new(embedder, "rust programming task").unwrap();
+        assert_eq!(scorer.task_embedding.len(), 256, "埋め込み次元は256");
+    }
+
+    #[test]
+    fn t_semantic_scorer_blends_role_and_similarity() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let embedder = Box::new(SimpleEmbedder::default());
+        let scorer = SemanticScorer::new(embedder, "rust async programming").unwrap();
+
+        // User基本スコア=1.0、タスクと同じ内容 → 高スコア期待
+        let relevant_user = Message::user("rust async programming");
+        let score = scorer.score(&relevant_user);
+        // 0.6 * 1.0 + 0.4 * ((1.0 + 1.0) / 2.0) = 0.6 + 0.4 = 1.0（完全一致）
+        assert!(score > 0.7, "タスク関連Userは高スコア ({score})");
+    }
+
+    #[test]
+    fn t_semantic_scorer_empty_content() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let embedder = Box::new(SimpleEmbedder::default());
+        let scorer = SemanticScorer::new(embedder, "task").unwrap();
+        let empty_msg = Message::assistant("");
+        // 空コンテンツは固定スコアにフォールバック
+        let score = scorer.score(&empty_msg);
+        assert!((score - 0.4).abs() < 1e-6, "空はAssistant固定0.4 ({score})");
+    }
+
+    #[test]
+    fn t_semantic_scorer_error_tool_low() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let embedder = Box::new(SimpleEmbedder::default());
+        let scorer = SemanticScorer::new(embedder, "write unit tests").unwrap();
+        let error_tool = Message::tool("error: compile failed", "t1");
+        let ok_tool = Message::tool("write unit tests completed successfully", "t2");
+        // エラーToolはベース0.2、成功Toolはベース0.5 → 成功の方が高いはず
+        assert!(
+            scorer.score(&ok_tool) > scorer.score(&error_tool),
+            "成功Toolはエラーより高スコア"
+        );
+    }
+
+    #[test]
+    fn t_compact_level1_with_scorer_prunes() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let embedder = Box::new(SimpleEmbedder::default());
+        let scorer = SemanticScorer::new(embedder, "task").unwrap();
+        let mut m = mk(10, 100);
+        compact_level1_with_scorer(
+            &mut m,
+            &CompactionConfig {
+                placeholder_keep_recent: 4,
+                prune_protect_tokens: 0,
+                ..Default::default()
+            },
+            &scorer,
+        );
+        assert!(
+            m.iter().any(|x| x.content.contains("[prev:")),
+            "scorer版でも圧縮される"
+        );
+    }
+
+    #[test]
+    fn t_compact_level1_with_scorer_no_op_short() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let embedder = Box::new(SimpleEmbedder::default());
+        let scorer = SemanticScorer::new(embedder, "task").unwrap();
+        let mut m = vec![Message::user("q"), Message::assistant("a")];
+        let orig_len = m.len();
+        compact_level1_with_scorer(
+            &mut m,
+            &CompactionConfig {
+                placeholder_keep_recent: 10,
+                ..Default::default()
+            },
+            &scorer,
+        );
+        assert_eq!(m.len(), orig_len, "短いセッションは圧縮されない");
     }
 }
