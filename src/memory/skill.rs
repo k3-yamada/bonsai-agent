@@ -155,6 +155,56 @@ impl<'a> SkillStore<'a> {
         Ok(deleted)
     }
 
+    /// 成功軌跡からスキルへの昇格（event_store::TrajectoryCandidate 由来）
+    ///
+    /// tool_chain_key() を tool_chain として使用、重複（同一 tool_chain）なら None を返す。
+    /// スキル名は task_description 先頭30文字 + tool_chain ハッシュ4桁で安定化。
+    pub fn promote_from_trajectory(
+        &self,
+        candidate: &crate::agent::event_store::TrajectoryCandidate,
+    ) -> Result<Option<i64>> {
+        let tool_chain = candidate.tool_chain_key();
+        if tool_chain.is_empty() {
+            return Ok(None);
+        }
+
+        // 重複判定: 同一 tool_chain のスキルがすでに存在するならスキップ
+        let exists: bool = self.conn.query_row(
+            "SELECT COUNT(*) > 0 FROM skills WHERE tool_chain = ?1",
+            params![&tool_chain],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(None);
+        }
+
+        // 名前生成: task_description 先頭30文字 + tool_chain ハッシュ4桁
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool_chain.hash(&mut hasher);
+        let hash_suffix = format!("{:04x}", hasher.finish() & 0xFFFF);
+
+        let raw_prefix: String = candidate.task_description.chars().take(30).collect();
+        let safe_prefix = if raw_prefix.trim().is_empty() {
+            "trajectory".to_string()
+        } else {
+            raw_prefix.replace([' ', ':', '/', '\n'], "_")
+        };
+        let name = format!("traj_{safe_prefix}_{hash_suffix}");
+
+        let description = format!(
+            "軌跡昇格: {:.0}%成功率 / {}ステップ / {}ms",
+            candidate.tool_success_rate * 100.0,
+            candidate.total_steps,
+            candidate.duration_ms
+        );
+        let triggers = serde_json::to_string(&candidate.tool_sequence)
+            .unwrap_or_else(|_| "[]".to_string());
+
+        let id = self.save(&name, &description, &tool_chain, &triggers)?;
+        Ok(Some(id))
+    }
+
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
     /// frequency(0.4) + recency(0.35) + diversity(0.25)
     pub fn promote_from_experiences(
@@ -389,6 +439,79 @@ mod tests {
         // expires_atなし = 削除されない
         let deleted = skills.purge_expired().unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn test_promote_from_trajectory_basic() {
+        use crate::agent::event_store::TrajectoryCandidate;
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+
+        let candidate = TrajectoryCandidate {
+            session_id: "s1".into(),
+            task_description: "READMEを読んでサマリを作る".into(),
+            tool_sequence: vec!["file_read".into(), "shell".into()],
+            tool_success_rate: 1.0,
+            total_steps: 2,
+            duration_ms: 1500,
+        };
+        let id = skills.promote_from_trajectory(&candidate).unwrap();
+        assert!(id.is_some());
+
+        let all = skills.list_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].tool_chain, "file_read -> shell");
+        assert!(all[0].name.starts_with("traj_"));
+    }
+
+    #[test]
+    fn test_promote_from_trajectory_deduplicates() {
+        use crate::agent::event_store::TrajectoryCandidate;
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+
+        let c1 = TrajectoryCandidate {
+            session_id: "s1".into(),
+            task_description: "タスクA".into(),
+            tool_sequence: vec!["shell".into(), "file_read".into()],
+            tool_success_rate: 1.0,
+            total_steps: 2,
+            duration_ms: 100,
+        };
+        let c2 = TrajectoryCandidate {
+            session_id: "s2".into(),
+            task_description: "タスクB".into(), // 異なる説明でも tool_chain が同じなら重複
+            tool_sequence: vec!["shell".into(), "file_read".into()],
+            tool_success_rate: 0.9,
+            total_steps: 2,
+            duration_ms: 200,
+        };
+
+        assert!(skills.promote_from_trajectory(&c1).unwrap().is_some());
+        assert!(
+            skills.promote_from_trajectory(&c2).unwrap().is_none(),
+            "同一 tool_chain は重複としてスキップ"
+        );
+        assert_eq!(skills.list_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_promote_from_trajectory_empty_tool_chain() {
+        use crate::agent::event_store::TrajectoryCandidate;
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        let c = TrajectoryCandidate {
+            session_id: "s1".into(),
+            task_description: "tool無しタスク".into(),
+            tool_sequence: vec![],
+            tool_success_rate: 0.0,
+            total_steps: 0,
+            duration_ms: 0,
+        };
+        assert!(
+            skills.promote_from_trajectory(&c).unwrap().is_none(),
+            "tool_sequence 空は昇格しない"
+        );
     }
 
     #[test]
