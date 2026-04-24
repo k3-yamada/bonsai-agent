@@ -38,7 +38,7 @@ tree-sitter-go = { version = "0.25", optional = true }
 schemars = "0.8"
 
 [features]
-default = ["cli", "tree-sitter"]
+default = ["cli", "tree-sitter", "embeddings"]
 cli = []
 full = ["cli", "embeddings", "tree-sitter"]
 embeddings = ["dep:fastembed"]

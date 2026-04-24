@@ -339,7 +339,8 @@ pub fn execute_step(
         .map(|m| m.content.as_str())
         .unwrap_or("");
 
-    let selected_tools = ctx.tools.select_relevant_split(
+    // セマンティックツール選択（ローカルONNX埋め込み、失敗時は自動でキーワード版にフォールバック）
+    let selected_tools = ctx.tools.select_relevant_split_semantic(
         last_user_msg,
         ctx.config.max_tools_in_context,
         ctx.config.max_mcp_tools_in_context,

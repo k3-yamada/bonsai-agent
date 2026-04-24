@@ -58,22 +58,21 @@ fn hash_embed(text: &str, dim: usize) -> Vec<f32> {
     vec
 }
 
-/// fastembed有効時のEmbeddingGemmaラッパー
+/// fastembed有効時のローカルONNX埋め込みラッパー（AllMiniLML6V2）
 #[cfg(feature = "embeddings")]
 pub struct FastEmbedder {
-    model: fastembed::TextEmbedding,
+    // fastembed::TextEmbedding::embed()が&mut selfを要求するため内部可変性を持たせる
+    model: std::sync::Mutex<fastembed::TextEmbedding>,
     dim: usize,
 }
 
 #[cfg(feature = "embeddings")]
 impl FastEmbedder {
     pub fn new() -> Result<Self> {
-        let model = fastembed::TextEmbedding::try_new(fastembed::InitOptions {
-            model_name: fastembed::EmbeddingModel::AllMiniLML6V2,
-            ..Default::default()
-        })?;
+        let options = fastembed::TextInitOptions::new(fastembed::EmbeddingModel::AllMiniLML6V2);
+        let model = fastembed::TextEmbedding::try_new(options)?;
         Ok(Self {
-            model,
+            model: std::sync::Mutex::new(model),
             dim: DEFAULT_EMBEDDING_DIM,
         })
     }
@@ -83,8 +82,12 @@ impl FastEmbedder {
 impl Embedder for FastEmbedder {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
-        let embeddings = self.model.embed(owned, None)?;
-        // Matryoshka: 768d→256dに切り詰め
+        let mut guard = self
+            .model
+            .lock()
+            .map_err(|e| anyhow::anyhow!("FastEmbedder Mutex poisoned: {e}"))?;
+        let embeddings = guard.embed(owned, None)?;
+        // Matryoshka: 384d→256dに切り詰め（AllMiniLML6V2の出力は384次元）
         Ok(embeddings
             .into_iter()
             .map(|v| v.into_iter().take(self.dim).collect())

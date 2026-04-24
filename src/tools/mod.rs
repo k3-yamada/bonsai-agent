@@ -15,7 +15,9 @@ pub mod web;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Mutex;
 
+use crate::runtime::embedder::{Embedder, cosine_similarity, create_embedder};
 use crate::tools::permission::Permission;
 
 /// ツールのスキーマ情報（LLMのシステムプロンプトに注入する）
@@ -217,21 +219,36 @@ impl Default for ToolResultCache {
     }
 }
 
+/// セマンティック選択用の遅延初期化キャッシュ
+/// 初回呼び出し時にembedderとツール説明のembedding行列を構築
+struct SemanticCache {
+    embedder: Box<dyn Embedder>,
+    /// ツール名 → 説明文のembedding
+    tool_embeddings: HashMap<String, Vec<f32>>,
+}
+
 /// ツールレジストリ — 登録・検索・動的選択を管理
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
+    /// セマンティックツール選択用キャッシュ（初回使用時に遅延構築、register時に無効化）
+    semantic_cache: Mutex<Option<SemanticCache>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            semantic_cache: Mutex::new(None),
         }
     }
 
-    /// ツールを登録
+    /// ツールを登録（セマンティックキャッシュは次回使用時に再構築される）
     pub fn register(&mut self, tool: Box<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+        // キャッシュ無効化: 新ツール登録時は次回select_relevant_split_semanticで再構築
+        if let Ok(mut cache) = self.semantic_cache.lock() {
+            *cache = None;
+        }
     }
 
     /// 名前でツールを取得
@@ -353,6 +370,129 @@ impl ToolRegistry {
 
         let mut result: Vec<&dyn Tool> =
             builtin.into_iter().take(builtin_max).map(|(t, _)| t).collect();
+        result.extend(mcp.into_iter().take(mcp_max).map(|(t, _)| t));
+        result
+    }
+
+    /// セマンティック類似度ベースのビルトイン/MCP分離選択
+    ///
+    /// ローカルONNX埋め込みモデル（FastEmbedder/AllMiniLML6V2）でツール説明とクエリを
+    /// ベクトル化し、コサイン類似度+キーワードスコアのハイブリッドで上位を選択。
+    /// embedder初期化失敗時は`select_relevant_split`（キーワードマッチ）にフォールバック。
+    ///
+    /// キャッシュ: 初回呼び出しで embedder + ツール embedding行列を構築し、register時のみ無効化。
+    pub fn select_relevant_split_semantic(
+        &self,
+        query: &str,
+        builtin_max: usize,
+        mcp_max: usize,
+    ) -> Vec<&dyn Tool> {
+        // 1. キャッシュを初期化または検証
+        let query_embedding = {
+            let mut cache_guard = match self.semantic_cache.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    // Mutex poisoned → キーワードフォールバック
+                    return self.select_relevant_split(query, builtin_max, mcp_max);
+                }
+            };
+
+            // 初回またはinvalidate後: 遅延構築
+            if cache_guard.is_none() {
+                let embedder = create_embedder();
+                let tool_names: Vec<String> = self.tools.keys().cloned().collect();
+                let tool_descs: Vec<&str> = tool_names
+                    .iter()
+                    .filter_map(|n| self.tools.get(n).map(|t| t.description()))
+                    .collect();
+                match embedder.embed(&tool_descs) {
+                    Ok(vecs) if vecs.len() == tool_names.len() => {
+                        let mut map = HashMap::with_capacity(tool_names.len());
+                        for (name, v) in tool_names.into_iter().zip(vecs.into_iter()) {
+                            map.insert(name, v);
+                        }
+                        *cache_guard = Some(SemanticCache {
+                            embedder,
+                            tool_embeddings: map,
+                        });
+                    }
+                    _ => {
+                        // embedding失敗 → キーワードフォールバック
+                        return self.select_relevant_split(query, builtin_max, mcp_max);
+                    }
+                }
+            }
+
+            // クエリをembedding（Mutex内でembedder借用）
+            let cache = match cache_guard.as_ref() {
+                Some(c) => c,
+                None => return self.select_relevant_split(query, builtin_max, mcp_max),
+            };
+            match cache.embedder.embed(&[query]) {
+                Ok(mut vs) if !vs.is_empty() => vs.swap_remove(0),
+                _ => return self.select_relevant_split(query, builtin_max, mcp_max),
+            }
+        };
+
+        // 2. キーワードスコア（既存ロジック、補助シグナル）
+        let query_lower = query.to_lowercase();
+        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+        let task_boost = Self::detect_task_boost(&query_lower);
+
+        // 3. ハイブリッドスコアリング: 0.7 * cosine + 0.3 * 正規化キーワードスコア
+        let cache_guard = match self.semantic_cache.lock() {
+            Ok(g) => g,
+            Err(_) => return self.select_relevant_split(query, builtin_max, mcp_max),
+        };
+        let cache = match cache_guard.as_ref() {
+            Some(c) => c,
+            None => return self.select_relevant_split(query, builtin_max, mcp_max),
+        };
+
+        let max_keyword_score = query_words.len().max(1) as f32 + 2.0; // task_boost最大+2
+        let mut builtin: Vec<(&dyn Tool, f32)> = Vec::new();
+        let mut mcp: Vec<(&dyn Tool, f32)> = Vec::new();
+
+        for (name, tool) in &self.tools {
+            let sem_score = cache
+                .tool_embeddings
+                .get(name)
+                .map(|v| cosine_similarity(&query_embedding, v))
+                .unwrap_or(0.0)
+                .max(0.0); // 負の類似度は0にクリップ
+
+            let name_l = tool.name().to_lowercase();
+            let desc_l = tool.description().to_lowercase();
+            let mut kw_raw = query_words
+                .iter()
+                .filter(|w| name_l.contains(*w) || desc_l.contains(*w))
+                .count() as f32;
+            if task_boost.iter().any(|b| name_l.contains(b)) {
+                kw_raw += 2.0;
+            }
+            let kw_score = (kw_raw / max_keyword_score).clamp(0.0, 1.0);
+
+            let hybrid = 0.7 * sem_score + 0.3 * kw_score;
+            if tool.name().contains(':') {
+                mcp.push((tool.as_ref(), hybrid));
+            } else {
+                builtin.push((tool.as_ref(), hybrid));
+            }
+        }
+
+        let sort_fn = |a: &(&dyn Tool, f32), b: &(&dyn Tool, f32)| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.name().cmp(b.0.name()))
+        };
+        builtin.sort_by(sort_fn);
+        mcp.sort_by(sort_fn);
+
+        let mut result: Vec<&dyn Tool> = builtin
+            .into_iter()
+            .take(builtin_max)
+            .map(|(t, _)| t)
+            .collect();
         result.extend(mcp.into_iter().take(mcp_max).map(|(t, _)| t));
         result
     }

@@ -3,3 +3,9 @@
 .claude/settings.local.json
 .DS_Store
 logs/
+# ローカルONNX埋め込みモデルキャッシュ（fastembed自動DL）
+.fastembed_cache/
+# oh-my-claudecode内部状態
+.omc/
+# Claude Codeスケジューラロック
+.claude/scheduled_tasks.lock
