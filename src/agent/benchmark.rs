@@ -1451,4 +1451,55 @@ mod tests {
         assert!(composite > 0.0);
     }
 
+    // ========================================================================
+    // Phase C スケルトン（TDD Red、Lab v12 完走後に Green へ）
+    // 仕様: .claude/plan/phase-c-and-refactor-draft.md Part 1
+    // 既存 22 タスク + 新規 18 タスク = 40 タスク（Smoke=5/Full=40 への TaskTag 化を想定）
+    // 全テスト #[ignore]（CI 影響なし）、各タスク実装時に1件ずつ ignore 解除
+    // ========================================================================
+
+    fn assert_task_present(id: &str) {
+        let suite = BenchmarkSuite::default_tasks();
+        assert!(
+            suite.tasks.iter().any(|t| t.id == id),
+            "Phase C task '{}' は default_tasks() に未追加",
+            id
+        );
+    }
+
+    // --- MultiFileEdit (×2) -------------------------------------------------
+    #[test] #[ignore] fn phase_c_rename_var_3files() { assert_task_present("rename_var_3files"); }
+    #[test] #[ignore] fn phase_c_sig_change_4files() { assert_task_present("sig_change_4files"); }
+
+    // --- LongRun (×2) -------------------------------------------------------
+    #[test] #[ignore] fn phase_c_tool_chain_10steps() { assert_task_present("tool_chain_10steps"); }
+    #[test] #[ignore] fn phase_c_implement_50steps() { assert_task_present("implement_50steps"); }
+
+    // --- ToolChain (×2) -----------------------------------------------------
+    #[test] #[ignore] fn phase_c_repomap_read_edit_test() { assert_task_present("repomap_read_edit_test"); }
+    #[test] #[ignore] fn phase_c_grep_multiedit() { assert_task_present("grep_multiedit"); }
+
+    // --- ErrorRecovery (×2) -------------------------------------------------
+    #[test] #[ignore] fn phase_c_tool_fail_pivot() { assert_task_present("tool_fail_pivot"); }
+    #[test] #[ignore] fn phase_c_corrupt_file_repair() { assert_task_present("corrupt_file_repair"); }
+
+    // --- McpInteg (×2) ------------------------------------------------------
+    #[test] #[ignore] fn phase_c_mcp_filesystem_list() { assert_task_present("mcp_filesystem_list"); }
+    #[test] #[ignore] fn phase_c_mcp_search_replace() { assert_task_present("mcp_search_replace"); }
+
+    // --- Semantic (×2) ------------------------------------------------------
+    #[test] #[ignore] fn phase_c_vague_log_improve() { assert_task_present("vague_log_improve"); }
+    #[test] #[ignore] fn phase_c_refactor_intent() { assert_task_present("refactor_intent"); }
+
+    // --- Reasoning (×2) -----------------------------------------------------
+    #[test] #[ignore] fn phase_c_nested_logic() { assert_task_present("nested_logic"); }
+    #[test] #[ignore] fn phase_c_ambiguous_calc() { assert_task_present("ambiguous_calc"); }
+
+    // --- Summarization (×2) -------------------------------------------------
+    #[test] #[ignore] fn phase_c_multi_file_summary() { assert_task_present("multi_file_summary"); }
+    #[test] #[ignore] fn phase_c_git_log_summary() { assert_task_present("git_log_summary"); }
+
+    // --- Verification (×2) --------------------------------------------------
+    #[test] #[ignore] fn phase_c_self_check_arithmetic() { assert_task_present("self_check_arithmetic"); }
+    #[test] #[ignore] fn phase_c_tool_fact_check() { assert_task_present("tool_fact_check"); }
 }
