@@ -10,6 +10,7 @@ use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction,
     StructuredFeedback, decide_recovery,
 };
+use crate::agent::event_store::{EventStore, EventType};
 use crate::agent::middleware::{MiddlewareChain, StepResult as MwStepResult};
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
@@ -80,6 +81,30 @@ pub fn inference_for_task(task_type: TaskType, base: &InferenceParams) -> Infere
         TaskType::General => {} // ベースのまま
     }
     params
+}
+
+/// EventStore へイベントを emit する疎結合ヘルパー（項目162: P1 Step 5 ランタイム統合）
+///
+/// - `store=None` ならno-op（インメモリモードでイベント記録不要）
+/// - `append` 失敗は `log_event(Warn, "event", ...)` で握る（コアループは止めない）
+/// - AuditLog は粗粒度メトリクス、Event はシーケンス保存（役割分離）
+pub(crate) fn emit_event(
+    store: Option<&MemoryStore>,
+    session_id: &str,
+    event_type: &EventType,
+    event_data: &str,
+    step_index: Option<usize>,
+) {
+    if let Some(s) = store {
+        let es = EventStore::new(s.conn());
+        if let Err(e) = es.append(session_id, event_type, event_data, step_index) {
+            log_event(
+                LogLevel::Warn,
+                "event",
+                &format!("EventStore.append 失敗 (無視): {e}"),
+            );
+        }
+    }
 }
 
 /// 1ビットモデル向けに最適化されたシステムプロンプト。
@@ -542,6 +567,24 @@ pub fn run_agent_loop_with_session(
         }
     }
 
+    // EventStore へ SessionStart + UserMessage emit (項目162: P1 Step 5 ランタイム統合)
+    emit_event(
+        store,
+        &session.id,
+        &EventType::SessionStart,
+        &serde_json::json!({ "task_context": task_context.chars().take(500).collect::<String>() })
+            .to_string(),
+        None,
+    );
+    emit_event(
+        store,
+        &session.id,
+        &EventType::UserMessage,
+        &serde_json::json!({ "content": task_context.chars().take(500).collect::<String>() })
+            .to_string(),
+        None,
+    );
+
     inject_contextual_memories(session, &task_context, store);
     inject_planning_step(session, &task_context);
 
@@ -580,6 +623,18 @@ pub fn run_agent_loop_with_session(
                     timeout.as_secs()
                 );
                 log_event(LogLevel::Warn, "timeout", &timeout_msg);
+                emit_event(
+                    store,
+                    &session.id,
+                    &EventType::SessionEnd,
+                    &serde_json::json!({
+                        "reason": "timeout",
+                        "iterations": iteration,
+                        "tool_count": state.all_tools.len()
+                    })
+                    .to_string(),
+                    Some(iteration),
+                );
                 return Ok(AgentLoopResult {
                     answer: timeout_msg,
                     iterations_used: iteration,
@@ -592,6 +647,19 @@ pub fn run_agent_loop_with_session(
 
         // before_stepフック: LLM呼出前にミドルウェア介入（NAT知見、項目142）
         if let Some(abort_reason) = state.middleware_chain.run_before_step(session, iteration) {
+            emit_event(
+                store,
+                &session.id,
+                &EventType::SessionEnd,
+                &serde_json::json!({
+                    "reason": "abort",
+                    "abort_reason": abort_reason,
+                    "iterations": iteration,
+                    "tool_count": state.all_tools.len()
+                })
+                .to_string(),
+                Some(iteration),
+            );
             return Ok(AgentLoopResult {
                 answer: format!("[中断] {abort_reason}"),
                 iterations_used: iteration,
@@ -622,7 +690,21 @@ pub fn run_agent_loop_with_session(
             iteration,
             duration_ms,
         ) {
-            OutcomeAction::Return(result) => return Ok(result),
+            OutcomeAction::Return(result) => {
+                emit_event(
+                    store,
+                    &session.id,
+                    &EventType::SessionEnd,
+                    &serde_json::json!({
+                        "reason": "completed",
+                        "iterations": result.iterations_used,
+                        "tool_count": result.tools_called.len()
+                    })
+                    .to_string(),
+                    Some(iteration),
+                );
+                return Ok(result);
+            }
             OutcomeAction::Continue => continue,
         }
     }
@@ -630,6 +712,18 @@ pub fn run_agent_loop_with_session(
     let timeout_msg = format!(
         "最大ステップ数({})に達しました。タスクを完了できませんでした。",
         config.max_iterations
+    );
+    emit_event(
+        store,
+        &session.id,
+        &EventType::SessionEnd,
+        &serde_json::json!({
+            "reason": "max_iterations",
+            "iterations": final_iteration,
+            "tool_count": state.all_tools.len()
+        })
+        .to_string(),
+        Some(final_iteration),
     );
     Ok(AgentLoopResult {
         answer: format!("[中断] {timeout_msg}"),
@@ -2494,5 +2588,74 @@ mod tests {
         assert!(abort.is_none(), "Injectはループ中断しない");
         assert_eq!(session.messages.len(), msg_count_before + 1);
         assert!(session.messages.last().unwrap().content.contains("注入テスト"));
+    }
+
+    /// 項目162: P1 Step 5 ランタイム統合
+    /// run_agent_loop が EventStore に SessionStart/UserMessage/ToolCallStart/End/SessionEnd を emit
+    #[test]
+    fn test_run_agent_loop_emits_events() {
+        use crate::agent::event_store::EventStore;
+        use crate::memory::store::MemoryStore;
+
+        let store = MemoryStore::in_memory().expect("in-memory store");
+
+        // ツール1回 → 回答（test_single_tool_call と同じシナリオ）
+        let mock = MockLlmBackend::new(vec![
+            r#"<tool_call>{"name":"echo","arguments":{"text":"hello"}}</tool_call>"#.to_string(),
+            "ツール結果: hello".to_string(),
+        ]);
+        let tools = test_registry();
+        let guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+
+        let result = run_agent_loop(
+            "echo test",
+            &mock,
+            &tools,
+            &guard,
+            &config,
+            &cancel,
+            Some(&store),
+        )
+        .unwrap();
+        assert!(result.tools_called.contains(&"echo".to_string()));
+
+        // EventStore に積まれたイベントを検証
+        let es = EventStore::new(store.conn());
+        let sessions = es.list_sessions().expect("list_sessions");
+        assert_eq!(sessions.len(), 1, "1セッション分のイベントが記録される");
+        let events = es.replay(&sessions[0]).expect("replay");
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+
+        assert!(types.contains(&"session_start"), "SessionStart 必須");
+        assert!(types.contains(&"user_message"), "UserMessage 必須");
+        assert!(
+            types.contains(&"tool_call_start"),
+            "ToolCallStart 必須 (echo呼出)"
+        );
+        assert!(
+            types.contains(&"tool_call_end"),
+            "ToolCallEnd 必須 (echo呼出)"
+        );
+        assert!(
+            types.contains(&"session_end"),
+            "SessionEnd 必須 (extract_successful_trajectories の前提)"
+        );
+
+        // 軌跡抽出の最低限ガード（成功率100%、1ステップ以上）が通ることを確認
+        let trajectories = es
+            .extract_successful_trajectories(0.5, 1)
+            .expect("extract_successful_trajectories");
+        assert_eq!(trajectories.len(), 1, "1セッション分の軌跡が抽出される");
+        let traj = &trajectories[0];
+        assert!(
+            traj.tool_sequence.contains(&"echo".to_string()),
+            "tool_sequence に echo が含まれる"
+        );
+        assert!(
+            (traj.tool_success_rate - 1.0).abs() < 1e-6,
+            "成功率100% (失敗なし)"
+        );
     }
 }

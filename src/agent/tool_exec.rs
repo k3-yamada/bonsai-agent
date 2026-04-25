@@ -5,6 +5,7 @@
 
 use crate::agent::conversation::{Message, Session};
 use crate::agent::error_recovery::CircuitBreaker;
+use crate::agent::event_store::EventType;
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
@@ -107,6 +108,23 @@ pub(crate) fn apply_tool_result(
         .ok()
         .and_then(|v| v.get("path").and_then(|p| p.as_str().map(String::from)));
 
+    // EventStore: ToolCallStart + ToolCallEnd emit (項目162: P1 Step 5 ランタイム統合)
+    crate::agent::agent_loop::emit_event(
+        store,
+        &session.id,
+        &EventType::ToolCallStart,
+        &serde_json::json!({ "tool": r.name }).to_string(),
+        None,
+    );
+    crate::agent::agent_loop::emit_event(
+        store,
+        &session.id,
+        &EventType::ToolCallEnd,
+        &serde_json::json!({ "tool": r.name, "success": r.success && !r.is_error })
+            .to_string(),
+        None,
+    );
+
     if r.is_error {
         circuit_breaker.record_failure(&r.name);
         if let Some(s) = store {
@@ -191,6 +209,22 @@ pub(crate) fn execute_validated_calls(
                 if let Some(cached) = cache.get(&call.name, &call.coerced_args) {
                     session.add_message(Message::tool(&cached.output, &call.name));
                     step_tools.push(call.name.clone());
+                    // EventStore: キャッシュヒット時もトラジェクトリに記録（項目162）
+                    crate::agent::agent_loop::emit_event(
+                        store,
+                        &session.id,
+                        &EventType::ToolCallStart,
+                        &serde_json::json!({ "tool": call.name }).to_string(),
+                        None,
+                    );
+                    crate::agent::agent_loop::emit_event(
+                        store,
+                        &session.id,
+                        &EventType::ToolCallEnd,
+                        &serde_json::json!({ "tool": call.name, "success": cached.success })
+                            .to_string(),
+                        None,
+                    );
                     log_event(
                         LogLevel::Debug,
                         "cache",
