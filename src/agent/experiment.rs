@@ -647,6 +647,18 @@ pub fn extract_worst_reasoning(experiments: &[Experiment], worst_n: usize) -> Ve
     rejects
 }
 
+/// Lab 自己改善ループ本体
+///
+/// # ADK Phase D 評価結果（項目166）
+///
+/// Workflow primitive trait（`SequentialAgent`/`ParallelAgent`/`LoopAgent`）への
+/// 形式化は YAGNI 判定で **見送り**（加重 1.0/17.0 < 閾値 12.0）。
+/// 詳細は `.claude/plan/phase-d-evaluation.md` を参照。
+///
+/// 再評価トリガー:
+/// 1. 複合 Workflow 要件発生（リサーチ→コーダー→レビュアー等の固定パイプライン）
+/// 2. Lab pass^k 改善天井（v13/v14 で 3 サイクル全 REJECT）
+/// 3. ADK 2.0+ で primitive 標準スキーマが公開
 pub fn run_experiment_loop(
     base_config: &AgentConfig,
     backend: &dyn LlmBackend,

@@ -314,8 +314,36 @@ pub struct BenchmarkSuite {
     pub tasks: Vec<BenchmarkTask>,
 }
 
+/// 開発時に高速イテレーションするための smoke タスク ID 集合（5 件）。
+///
+/// `default_tasks()` 全 40 件のうち、各カテゴリから代表 1 件を選定。
+/// `smoke_tasks()` でこの ID に一致するタスクのみを返し、Lab 中の dev iteration
+/// を 1/8 に短縮する（k=3 で 15 ラン vs 120 ラン）。
+const SMOKE_TASK_IDS: &[&str] = &[
+    "file_read_simple",      // ToolUse: 単純ファイル読み取り
+    "multi_step_write_read", // MultiStep: 書込→読込
+    "error_recovery",        // ErrorRecovery: エラー後の代替試行
+    "tool_selection_git",    // ToolSelection: 適切なツール選択
+    "code_gen_fizzbuzz",     // CodeGeneration: コード生成
+];
+
 impl BenchmarkSuite {
-    /// デフォルトのベンチマークタスクセット（22タスク）
+    /// 開発時用の smoke タスクセット（5 タスク）。
+    ///
+    /// `default_tasks()` のうち `SMOKE_TASK_IDS` に一致するものだけを抽出。
+    /// CI/Lab 本番では `default_tasks()`（40 タスク）を使い、開発時の高速確認に
+    /// 限定して `smoke_tasks()` を使う。
+    pub fn smoke_tasks() -> Self {
+        Self {
+            tasks: Self::default_tasks()
+                .tasks
+                .into_iter()
+                .filter(|t| SMOKE_TASK_IDS.contains(&t.id.as_str()))
+                .collect(),
+        }
+    }
+
+    /// デフォルトのベンチマークタスクセット（40タスク）
     pub fn default_tasks() -> Self {
         Self {
             tasks: vec![
@@ -1058,6 +1086,33 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), suite.tasks.len());
+    }
+
+    #[test]
+    fn test_smoke_tasks_subset_of_default() {
+        let smoke = BenchmarkSuite::smoke_tasks();
+        let default = BenchmarkSuite::default_tasks();
+        assert_eq!(smoke.tasks.len(), 5, "smoke は 5 タスク");
+        assert!(smoke.tasks.len() < default.tasks.len(), "smoke ⊂ default");
+        // すべての smoke ID は default に含まれる
+        let default_ids: std::collections::HashSet<&str> =
+            default.tasks.iter().map(|t| t.id.as_str()).collect();
+        for t in &smoke.tasks {
+            assert!(
+                default_ids.contains(t.id.as_str()),
+                "smoke ID {} は default に存在すべき",
+                t.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_smoke_tasks_cover_distinct_categories() {
+        let smoke = BenchmarkSuite::smoke_tasks();
+        let mut cats: Vec<TaskCategory> = smoke.tasks.iter().map(|t| t.category.clone()).collect();
+        cats.sort_by_key(|c| format!("{c:?}"));
+        cats.dedup();
+        assert!(cats.len() >= 5, "smoke は 5+ カテゴリをカバー: got {cats:?}");
     }
 
     fn mock_result(answer: &str, tools: Vec<&str>, iterations: usize) -> AgentLoopResult {

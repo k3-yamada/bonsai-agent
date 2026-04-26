@@ -82,7 +82,27 @@ impl SubAgentConfig {
 /// サブエージェントエグゼキュータ
 ///
 /// 複雑タスクをサブタスクに分割し、各サブタスクを独立した
-/// エージェントループで順次実行する。
+/// エージェントループで実行する。
+///
+/// # ADK Workflow primitive 対応（項目166: Phase D 評価結果）
+///
+/// Google ADK 2.0 の 3 種 Workflow primitive と本実装の対応:
+///
+/// - **`SequentialAgent`** ⇄ `execute_sequential()`: サブタスクを順次実行し、
+///   前段の出力を後段のコンテキストへ伝搬。`check_independence` で日本語/英語の
+///   依存マーカー（"前の"/"上記"/"previous"/"then "等 20 種）を検出した場合、
+///   または in-memory store のためスレッド非可搬な場合、自動的にこちらを選択。
+///
+/// - **`ParallelAgent`** ⇄ `execute_parallel()`: サブタスク間に依存がなく
+///   かつ file-backed store を使う場合に `std::thread::scope` で並列実行。
+///   各スレッドは `MemoryStore::open()` で独立 Connection を確保。
+///
+/// - **`LoopAgent`** ⇄ サポートなし: 終了条件付きの繰り返しは
+///   `run_agent_loop_with_session` 自体の `for iteration in 0..max_iterations`
+///   で代替済み。プリミティブとしての trait 化は YAGNI 判定で見送り
+///   （`.claude/plan/phase-d-evaluation.md`）。
+///
+/// `execute()` がディスパッチャとして上記 2 系統を自動選択する。
 pub struct SubAgentExecutor<'a> {
     backend: &'a dyn LlmBackend,
     tools: &'a ToolRegistry,
