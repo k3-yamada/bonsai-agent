@@ -934,12 +934,53 @@ pub fn judge_gate_check(
     sample_size: usize,
     task_descriptions: &HashMap<String, String>,
 ) -> Result<JudgeGateOutcome> {
-    // Step 2 (Red): スタブ — 常に passed=false / mean=0.0 / scores=[] を返す
-    let _ = (judge, result, threshold, sample_size, task_descriptions);
+    let mut scores: Vec<RubricScore> = Vec::new();
+    let mut judged = 0usize;
+
+    for task_score in result.task_scores.iter() {
+        if judged >= sample_size {
+            break;
+        }
+        // last_response が無い task は judge にかけられない（skip）
+        let Some(response) = task_score.last_response.as_ref() else {
+            continue;
+        };
+        let trajectory: &[String] = task_score
+            .last_trajectory
+            .as_deref()
+            .unwrap_or(&[] as &[String]);
+        let description = task_descriptions
+            .get(&task_score.task_id)
+            .cloned()
+            .unwrap_or_else(|| task_score.task_id.clone());
+
+        judged += 1;
+        match judge.evaluate(&description, response, trajectory) {
+            Ok(score) => scores.push(score),
+            Err(e) => {
+                log_event(
+                    LogLevel::Warn,
+                    "judge",
+                    &format!("judge_gate evaluate failed (task={}): {e}", task_score.task_id),
+                );
+                // fail-open: scores に積まない
+            }
+        }
+    }
+
+    // composite 平均（fail-open: judge にかけられなかった or 全 err なら mean=0、passed=true）
+    let (mean_composite, passed) = if scores.is_empty() {
+        (0.0, true)
+    } else {
+        let mean: f64 =
+            scores.iter().map(|s| s.composite()).sum::<f64>() / scores.len() as f64;
+        (mean, mean >= threshold)
+    };
+
     Ok(JudgeGateOutcome {
-        passed: false,
-        mean_composite: 0.0,
-        scores: Vec::new(),
+        passed,
+        mean_composite,
+        scores,
     })
 }
 
