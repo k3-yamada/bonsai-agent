@@ -3,10 +3,11 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::agent::agent_loop::AgentConfig;
-use crate::agent::benchmark::{BenchmarkSuite, MultiRunConfig};
+use crate::agent::benchmark::{BenchmarkSuite, MultiRunBenchmarkResult, MultiRunConfig};
 use crate::agent::experiment_log::{
     AcceptedMutation, Experiment, ExperimentLog, MutationTheme, MutationType, load_accepted_archive,
 };
+use crate::agent::judge::{LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
@@ -908,6 +909,40 @@ pub fn run_experiment_loop(
     Ok(experiments)
 }
 
+/// judge gate の判定結果（B2: ACCEPT 判定の補助シグナル）
+///
+/// `passed` は `mean_composite >= threshold` を満たすかどうか。
+/// `scores` は judge を実際にかけた task の RubricScore（sample_size 件）。
+#[derive(Debug, Clone)]
+pub struct JudgeGateOutcome {
+    pub passed: bool,
+    pub mean_composite: f64,
+    pub scores: Vec<RubricScore>,
+}
+
+/// experiment 結果に judge を適用し、threshold を満たすか判定する
+///
+/// - `result.task_scores` の先頭 `sample_size` 件を judge にかける
+/// - `last_response` / `last_trajectory` が None のタスクはスキップ（judge 不可）
+/// - judge が Err を返したタスクは fail-open（warn ログ + 当該 task は scores に含めない）
+/// - 全 score の `composite()` 平均が `threshold` 以上なら `passed=true`
+/// - judge にかけられた task が 0 件なら `passed=true`（fail-open）
+pub fn judge_gate_check(
+    judge: &mut dyn LlmJudge,
+    result: &MultiRunBenchmarkResult,
+    threshold: f64,
+    sample_size: usize,
+    task_descriptions: &HashMap<String, String>,
+) -> Result<JudgeGateOutcome> {
+    // Step 2 (Red): スタブ — 常に passed=false / mean=0.0 / scores=[] を返す
+    let _ = (judge, result, threshold, sample_size, task_descriptions);
+    Ok(JudgeGateOutcome {
+        passed: false,
+        mean_composite: 0.0,
+        scores: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1465,5 +1500,164 @@ mod tests {
             "slot 20 should be insight: {}",
             m20.detail
         );
+    }
+
+    // ===== Phase B2: judge_gate_check tests (TDD Red) =====
+
+    /// テスト用 judge: 事前にスクリプトされた RubricScore をキューから順に返す
+    struct ScriptedJudge {
+        responses: std::collections::VecDeque<Result<RubricScore>>,
+        call_count: usize,
+    }
+
+    impl ScriptedJudge {
+        fn new(scores: Vec<RubricScore>) -> Self {
+            Self {
+                responses: scores.into_iter().map(Ok).collect(),
+                call_count: 0,
+            }
+        }
+
+        fn with_results(results: Vec<Result<RubricScore>>) -> Self {
+            Self {
+                responses: results.into_iter().collect(),
+                call_count: 0,
+            }
+        }
+    }
+
+    impl LlmJudge for ScriptedJudge {
+        fn evaluate(
+            &mut self,
+            _task_description: &str,
+            _response: &str,
+            _trajectory: &[String],
+        ) -> Result<RubricScore> {
+            self.call_count += 1;
+            self.responses
+                .pop_front()
+                .unwrap_or_else(|| anyhow::bail!("ScriptedJudge: queue empty"))
+        }
+    }
+
+    fn make_score(comp: f64, corr: f64, reas: f64) -> RubricScore {
+        RubricScore {
+            completeness: comp,
+            correctness: corr,
+            reasoning_quality: reas,
+            raw_judge_response: "scripted".into(),
+        }
+    }
+
+    fn make_task_score(task_id: &str, with_run: bool) -> crate::agent::benchmark::MultiRunTaskScore {
+        let s = crate::agent::benchmark::MultiRunTaskScore::from_scores(
+            task_id.into(),
+            vec![1.0, 1.0, 1.0],
+            0.5,
+        );
+        if with_run {
+            s.with_last_run("dummy response".into(), vec!["tool_a".into()])
+        } else {
+            s
+        }
+    }
+
+    fn make_descs(ids: &[&str]) -> HashMap<String, String> {
+        ids.iter()
+            .map(|id| ((*id).to_string(), format!("desc for {id}")))
+            .collect()
+    }
+
+    #[test]
+    fn test_judge_gate_passes_when_mean_above_threshold() {
+        // composite = 0.4*0.9 + 0.4*0.9 + 0.2*0.8 = 0.88 (high score, passes 0.7)
+        let mut judge = ScriptedJudge::new(vec![make_score(0.9, 0.9, 0.8); 2]);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![make_task_score("t1", true), make_task_score("t2", true)],
+            duration_secs: 1.0,
+        };
+        let descs = make_descs(&["t1", "t2"]);
+
+        let outcome = judge_gate_check(&mut judge, &result, 0.7, 2, &descs).unwrap();
+        assert!(outcome.passed, "high judge scores should pass threshold");
+        assert!(
+            outcome.mean_composite > 0.7,
+            "mean_composite={}",
+            outcome.mean_composite
+        );
+        assert_eq!(outcome.scores.len(), 2);
+    }
+
+    #[test]
+    fn test_judge_gate_rejects_when_mean_below_threshold() {
+        // composite = 0.4*0.5 + 0.4*0.5 + 0.2*0.5 = 0.5 (below 0.7)
+        let mut judge = ScriptedJudge::new(vec![make_score(0.5, 0.5, 0.5); 2]);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![make_task_score("t1", true), make_task_score("t2", true)],
+            duration_secs: 1.0,
+        };
+        let descs = make_descs(&["t1", "t2"]);
+
+        let outcome = judge_gate_check(&mut judge, &result, 0.7, 2, &descs).unwrap();
+        assert!(!outcome.passed, "low judge scores should fail threshold");
+        assert!(
+            outcome.mean_composite < 0.7,
+            "mean_composite={}",
+            outcome.mean_composite
+        );
+    }
+
+    #[test]
+    fn test_judge_gate_skips_tasks_without_last_run() {
+        // last_response が None の task は judge にかけられない
+        let mut judge = ScriptedJudge::new(vec![make_score(0.9, 0.9, 0.9)]);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![
+                make_task_score("t1", false), // skipped
+                make_task_score("t2", true),  // judged
+            ],
+            duration_secs: 1.0,
+        };
+        let descs = make_descs(&["t1", "t2"]);
+
+        let outcome = judge_gate_check(&mut judge, &result, 0.7, 2, &descs).unwrap();
+        assert_eq!(judge.call_count, 1, "only t2 should be judged");
+        assert_eq!(outcome.scores.len(), 1);
+    }
+
+    #[test]
+    fn test_judge_gate_fail_open_on_judge_error() {
+        // judge が Err を返した task はスキップ、scores が空なら passed=true
+        let mut judge =
+            ScriptedJudge::with_results(vec![Err(anyhow::anyhow!("judge backend down"))]);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![make_task_score("t1", true)],
+            duration_secs: 1.0,
+        };
+        let descs = make_descs(&["t1"]);
+
+        let outcome = judge_gate_check(&mut judge, &result, 0.7, 1, &descs).unwrap();
+        assert!(
+            outcome.passed,
+            "all-error judge should fail-open (passed=true)"
+        );
+        assert_eq!(outcome.scores.len(), 0);
+    }
+
+    #[test]
+    fn test_judge_gate_respects_sample_size() {
+        // sample_size=1 なら 1 task のみ judge にかける
+        let mut judge = ScriptedJudge::new(vec![make_score(0.9, 0.9, 0.9); 5]);
+        let result = MultiRunBenchmarkResult {
+            task_scores: (0..5)
+                .map(|i| make_task_score(&format!("t{i}"), true))
+                .collect(),
+            duration_secs: 1.0,
+        };
+        let descs = make_descs(&["t0", "t1", "t2", "t3", "t4"]);
+
+        let outcome = judge_gate_check(&mut judge, &result, 0.7, 1, &descs).unwrap();
+        assert_eq!(judge.call_count, 1, "sample_size=1 should judge 1 task");
+        assert_eq!(outcome.scores.len(), 1);
     }
 }
