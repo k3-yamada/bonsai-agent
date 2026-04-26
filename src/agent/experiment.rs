@@ -7,7 +7,7 @@ use crate::agent::benchmark::{BenchmarkSuite, MultiRunBenchmarkResult, MultiRunC
 use crate::agent::experiment_log::{
     AcceptedMutation, Experiment, ExperimentLog, MutationTheme, MutationType, load_accepted_archive,
 };
-use crate::agent::judge::{LlmJudge, RubricScore};
+use crate::agent::judge::{HttpAdvisorJudge, LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
@@ -609,6 +609,11 @@ pub struct ExperimentLoopConfig {
     pub prescreening_threshold: f64,
     /// タスク単位タイムアウト秒数（0=無制限）
     pub task_timeout_secs: u64,
+    /// judge gate 閾値（Phase B2: ADK rubric_based_final_response_quality_v1）
+    /// `Some(0.7)` で有効化、`None` で従来動作（delta > 0 のみで ACCEPT）
+    pub judge_threshold: Option<f64>,
+    /// judge にかける task 数（負荷制御、デフォルト 4）
+    pub judge_sample_size: usize,
 }
 
 impl Default for ExperimentLoopConfig {
@@ -620,6 +625,8 @@ impl Default for ExperimentLoopConfig {
             enable_prescreening: true,
             prescreening_threshold: -0.01,
             task_timeout_secs: 300,
+            judge_threshold: None,
+            judge_sample_size: 4,
         }
     }
 }
@@ -807,7 +814,7 @@ pub fn run_experiment_loop(
         let snapshot = config_snapshot(&modified_config);
 
         // d. 評価（pass^k指標を含む）
-        let exp = Experiment::from_multi_results(
+        let mut exp = Experiment::from_multi_results(
             experiment_id,
             mutation.mutation_type,
             mutation.detail,
@@ -815,6 +822,63 @@ pub fn run_experiment_loop(
             &result,
             snapshot,
         );
+
+        // d-1. judge gate（Phase B2、opt-in）— delta > 0 の experiment のみ judge にかけ、
+        // mean_composite が threshold 未満なら ACCEPT を REJECT に格下げ。
+        // 設計判断: ベースラインは judge にかけない（コスト 2 倍回避、delta > 0 で baseline 越えは保証）。
+        if let Some(threshold) = loop_config.judge_threshold
+            && exp.accepted
+        {
+            let task_descs: HashMap<String, String> = suite
+                .tasks
+                .iter()
+                .map(|t| (t.id.clone(), t.input.clone()))
+                .collect();
+            let mut judge_advisor = base_config.advisor.clone();
+            let mut judge = HttpAdvisorJudge::new(&mut judge_advisor);
+            match judge_gate_check(
+                &mut judge,
+                &result,
+                threshold,
+                loop_config.judge_sample_size,
+                &task_descs,
+            ) {
+                Ok(outcome) => {
+                    if !outcome.passed {
+                        log_event(
+                            LogLevel::Info,
+                            "lab",
+                            &format!(
+                                "judge gate REJECT: mean_composite={:.4} < threshold={:.4} (judged {} tasks)",
+                                outcome.mean_composite,
+                                threshold,
+                                outcome.scores.len()
+                            ),
+                        );
+                        exp.accepted = false;
+                    } else {
+                        log_event(
+                            LogLevel::Info,
+                            "lab",
+                            &format!(
+                                "judge gate PASS: mean_composite={:.4} ≥ threshold={:.4} (judged {} tasks)",
+                                outcome.mean_composite,
+                                threshold,
+                                outcome.scores.len()
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    log_event(
+                        LogLevel::Warn,
+                        "lab",
+                        &format!("judge gate failed (fail-open, ACCEPT 維持): {e}"),
+                    );
+                    // fail-open: judge 失敗時は exp.accepted を変えない
+                }
+            }
+        }
 
         eprintln!(
             "[lab]   score={:.4} pass@k={:.4} consec={:.4} (delta: {:+.4}) → {}",

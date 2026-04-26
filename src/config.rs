@@ -140,6 +140,13 @@ pub struct ExperimentConfig {
     /// ベンチマークタスク単位のタイムアウト秒数（0=無制限）
     #[serde(default = "default_task_timeout_secs")]
     pub task_timeout_secs: u64,
+    /// judge gate 閾値（Phase B2、ADK rubric_based_final_response_quality_v1）
+    /// `Some(0.7)` で ACCEPT に judge >= 0.7 の AND 条件を追加。`None` で従来動作。
+    #[serde(default)]
+    pub judge_threshold: Option<f64>,
+    /// judge にかける task 数（負荷制御、デフォルト 4）
+    #[serde(default = "default_judge_sample_size")]
+    pub judge_sample_size: usize,
 }
 
 /// デフォルト: true
@@ -157,6 +164,11 @@ fn default_task_timeout_secs() -> u64 {
     300
 }
 
+/// デフォルト: 4 タスク（judge gate sample size）
+fn default_judge_sample_size() -> usize {
+    4
+}
+
 impl Default for ExperimentConfig {
     fn default() -> Self {
         Self {
@@ -165,6 +177,8 @@ impl Default for ExperimentConfig {
             enable_prescreening: default_true(),
             prescreening_threshold: default_prescreening_threshold(),
             task_timeout_secs: default_task_timeout_secs(),
+            judge_threshold: None,
+            judge_sample_size: default_judge_sample_size(),
         }
     }
 }

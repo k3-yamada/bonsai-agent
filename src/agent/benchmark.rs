@@ -543,6 +543,8 @@ impl BenchmarkSuite {
             }
 
             let mut scores = Vec::new();
+            // 最終 run の代表 trajectory（B2: judge gate 用、最後に成功した run を優先）
+            let mut last_run_capture: Option<(String, Vec<String>)> = None;
             // タスク毎に1 DB作成、k回ループ間でリセット（66→22 DB作成に削減）
             let store = MemoryStore::in_memory()?;
             for run_idx in 0..multi.k {
@@ -588,17 +590,25 @@ impl BenchmarkSuite {
                 );
 
                 let score = match result {
-                    Ok(ref loop_result) => evaluate_task_response(task, loop_result).score(),
+                    Ok(ref loop_result) => {
+                        // judge gate 用: 最終 run の応答 + トラジェクトリを保持
+                        last_run_capture = Some((
+                            loop_result.answer.clone(),
+                            loop_result.tools_called.clone(),
+                        ));
+                        evaluate_task_response(task, loop_result).score()
+                    }
                     Err(_) => 0.0,
                 };
                 scores.push(score);
             }
 
-            task_scores.push(MultiRunTaskScore::from_scores(
-                task.id.clone(),
-                scores,
-                pass_threshold,
-            ));
+            let mut task_score =
+                MultiRunTaskScore::from_scores(task.id.clone(), scores, pass_threshold);
+            if let Some((response, trajectory)) = last_run_capture {
+                task_score = task_score.with_last_run(response, trajectory);
+            }
+            task_scores.push(task_score);
         }
 
         Ok(MultiRunBenchmarkResult {

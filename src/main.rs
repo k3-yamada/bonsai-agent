@@ -512,6 +512,8 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
         enable_prescreening: ctx.app_config.experiment.enable_prescreening,
         prescreening_threshold: ctx.app_config.experiment.prescreening_threshold,
         task_timeout_secs: ctx.app_config.experiment.task_timeout_secs,
+        judge_threshold: ctx.app_config.experiment.judge_threshold,
+        judge_sample_size: ctx.app_config.experiment.judge_sample_size,
     };
     let backend = CachedBackend::new(backend, 200);
     let experiments = run_experiment_loop(
