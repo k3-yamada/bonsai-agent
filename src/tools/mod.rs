@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_warn_if_exceeded_no_panic() {
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.warn_if_exceeded(8); // 空 → 警告なし
         // パニックしないことのみ確認
     }

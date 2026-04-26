@@ -1538,7 +1538,6 @@ mod tests {
         assert_eq!(worst.len(), 3, "worst_n=3で切り詰め");
     }
 
-    #[test]
     // --- Phase 4: LabStagnationDetector テスト（NAT adaptive triggers知見） ---
 
     #[test]
