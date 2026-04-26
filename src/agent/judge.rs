@@ -67,6 +67,11 @@ pub trait LlmJudge {
 /// Phase A1（現時点）: `evaluate()` は stub（Err 返却）。
 /// Phase B1 で `try_remote_advice` / `try_claude_code_advice` を呼び出して
 /// rubric prompt を送信し、JSON 応答を `parse_judge_response` でパースする。
+///
+/// **Phase B1 設計メモ**: 現在は `&'a mut AdvisorConfig` 借用。`Box<dyn LlmJudge + 'static>`
+/// で `BenchmarkSuite` に保持したい場合は、`AdvisorConfig` を値で保有する別実装
+/// （例: `OwnedHttpAdvisorJudge`）を追加するか、本構造体を `'static` 化する設計判断が必要。
+/// 借用は per-evaluation コール用、所有は per-suite コール用という両立も可。
 pub struct HttpAdvisorJudge<'a> {
     pub advisor: &'a mut AdvisorConfig,
     pub rubric_template: String,
@@ -116,11 +121,14 @@ pub fn parse_judge_response(raw: &str) -> RubricScore {
     };
 
     let extract = |key: &str| -> f64 {
-        value
-            .get(key)
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0)
+        let raw_value = value.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        // NaN / 非有限値の防御: clamp は NaN を通してしまうため明示ガード。
+        // 下流の benchmark 平均計算が NaN 汚染されないようにする。
+        if raw_value.is_finite() {
+            raw_value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     };
 
     RubricScore {
@@ -204,6 +212,17 @@ mod tests {
         let score = parse_judge_response(raw);
         assert!((score.completeness - 1.0).abs() < f64::EPSILON);
         assert_eq!(score.correctness, 0.0);
+        assert!((score.reasoning_quality - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_judge_response_handles_non_finite_and_null() {
+        // NaN / Infinity / null / 文字列値はすべて 0.0 にサニタイズされる
+        // （clamp は NaN を通すため明示ガードが必要、benchmark 平均の NaN 汚染防止）
+        let raw = r#"{"completeness": null, "correctness": "high", "reasoning_quality": 0.5}"#;
+        let score = parse_judge_response(raw);
+        assert_eq!(score.completeness, 0.0); // null
+        assert_eq!(score.correctness, 0.0); // 文字列 → as_f64() が None
         assert!((score.reasoning_quality - 0.5).abs() < f64::EPSILON);
     }
 
