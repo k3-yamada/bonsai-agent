@@ -518,6 +518,182 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
                 },
+                // ============================================================
+                // Phase C 追加タスク（22→40, .claude/plan/phase-c-and-refactor-draft.md Part 1）
+                // 既存 TaskCategory を再利用（MultiFileEdit/LongRun/ToolChain→MultiStep,
+                // McpInteg/Verification→ToolUse, Semantic→Reasoning へマッピング）
+                // ============================================================
+                // --- MultiFileEdit (×2) -------------------------------------
+                BenchmarkTask {
+                    id: "rename_var_3files".into(),
+                    name: "3ファイル変数リネーム".into(),
+                    input: "src/foo.rs と src/bar.rs と src/baz.rs の変数 `old_name` を `new_name` にリネームする手順を示して".into(),
+                    expected_tools: vec!["repo_map".into(), "multi_edit".into()],
+                    expected_keywords: vec!["new_name".into(), "リネーム".into()],
+                    max_iterations: 8,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "sig_change_4files".into(),
+                    name: "4ファイル関数シグネチャ変更".into(),
+                    input: "関数 `foo(a: i32)` を `foo(a: i32, b: bool)` に変更し、全呼出元を更新する手順を示して".into(),
+                    expected_tools: vec!["shell".into(), "multi_edit".into()],
+                    expected_keywords: vec!["b: bool".into(), "呼出".into()],
+                    max_iterations: 8,
+                    category: TaskCategory::MultiStep,
+                },
+                // --- LongRun (×2) -------------------------------------------
+                BenchmarkTask {
+                    id: "tool_chain_10steps".into(),
+                    name: "10ステップツールチェーン".into(),
+                    input: "RepoMap で全ファイルをリストし、各ファイルの先頭5行を読み取り、構造を要約して".into(),
+                    expected_tools: vec!["repo_map".into(), "file_read".into()],
+                    expected_keywords: vec!["要約".into(), "構造".into()],
+                    max_iterations: 10,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "implement_50steps".into(),
+                    name: "FizzBuzz拡張仕様".into(),
+                    input: "FizzBuzz 拡張版（7→Bazz, 11→Lazz）の仕様を示し、エッジケースを 3 件挙げて".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["Bazz".into(), "Lazz".into(), "FizzBuzz".into()],
+                    max_iterations: 6,
+                    category: TaskCategory::CodeGeneration,
+                },
+                // --- ToolChain (×2) -----------------------------------------
+                BenchmarkTask {
+                    id: "repomap_read_edit_test".into(),
+                    name: "RepoMap+読込+編集連鎖".into(),
+                    input: "ファイル src/foo.rs の `parse` 関数を `parse_v2` に改名する手順を、依存ファイル特定→編集の順で示して".into(),
+                    expected_tools: vec!["repo_map".into(), "file_read".into(), "multi_edit".into()],
+                    expected_keywords: vec!["parse_v2".into(), "改名".into()],
+                    max_iterations: 8,
+                    category: TaskCategory::MultiStep,
+                },
+                BenchmarkTask {
+                    id: "grep_multiedit".into(),
+                    name: "grep+一括編集".into(),
+                    input: "`anyhow::Result` を `Result<T, MyError>` に置換するために、grep で対象を特定する手順を示して".into(),
+                    expected_tools: vec!["shell".into(), "multi_edit".into()],
+                    expected_keywords: vec!["grep".into(), "置換".into()],
+                    max_iterations: 6,
+                    category: TaskCategory::MultiStep,
+                },
+                // --- ErrorRecovery (×2) -------------------------------------
+                BenchmarkTask {
+                    id: "tool_fail_pivot".into(),
+                    name: "ツール失敗→代替手段".into(),
+                    input: "存在しないコマンド `fakecmd_xyz` を試した後、別の方法で現在のディレクトリを確認して".into(),
+                    expected_tools: vec!["shell".into()],
+                    expected_keywords: vec!["代替".into(), "ls".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::ErrorRecovery,
+                },
+                BenchmarkTask {
+                    id: "corrupt_file_repair".into(),
+                    name: "破損JSON修復".into(),
+                    input: "JSON 文字列 `{\"name\":\"test\"` （閉じ括弧欠落）を修復した正しい形を示せ".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["}".into(), "name".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::ErrorRecovery,
+                },
+                // --- McpInteg (×2) — MCP 未接続時はツール不在で keyword 評価のみ ---
+                BenchmarkTask {
+                    id: "mcp_filesystem_list".into(),
+                    name: "MCP filesystem list".into(),
+                    input: "filesystem MCP で `/tmp` ディレクトリの一覧を取得する例を示して".into(),
+                    expected_tools: vec!["filesystem:list_directory".into()],
+                    expected_keywords: vec!["filesystem".into(), "list".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::ToolUse,
+                },
+                BenchmarkTask {
+                    id: "mcp_search_replace".into(),
+                    name: "MCP filesystem 置換".into(),
+                    input: "filesystem MCP で `/tmp/test.txt` 内の `foo` を `bar` に置換する手順を示して".into(),
+                    expected_tools: vec!["filesystem:read_file".into(), "filesystem:write_file".into()],
+                    expected_keywords: vec!["foo".into(), "bar".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::ToolUse,
+                },
+                // --- Semantic (×2) — 曖昧な指示への構造化応答 ---------------
+                BenchmarkTask {
+                    id: "vague_log_improve".into(),
+                    name: "曖昧指示: ログ改善".into(),
+                    input: "ログを改善したい。具体的な改善案を 3 点挙げて".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["ログ".into(), "改善".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::Reasoning,
+                },
+                BenchmarkTask {
+                    id: "refactor_intent".into(),
+                    name: "曖昧指示: リファクタ意図".into(),
+                    input: "このコードをもっと綺麗にしたい。一般的なリファクタリングの指針を 3 点述べて".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["リファクタ".into(), "指針".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::Reasoning,
+                },
+                // --- Reasoning (×2) -----------------------------------------
+                BenchmarkTask {
+                    id: "nested_logic".into(),
+                    name: "ネスト論理式".into(),
+                    input: "x=3, y=5 のとき式 `x > y && (x + y) % 2 == 0` の真偽は何か。理由とともに答えて".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["false".into(), "偽".into()],
+                    max_iterations: 3,
+                    category: TaskCategory::Reasoning,
+                },
+                BenchmarkTask {
+                    id: "ambiguous_calc".into(),
+                    name: "あいまい計算".into(),
+                    input: "2 の 8 乗を 3 で割った余りはいくつか。途中式も示して".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["1".into(), "256".into()],
+                    max_iterations: 3,
+                    category: TaskCategory::Reasoning,
+                },
+                // --- Summarization (×2) -------------------------------------
+                BenchmarkTask {
+                    id: "multi_file_summary".into(),
+                    name: "複数ファイル役割要約".into(),
+                    input: "src/agent/agent_loop.rs と src/agent/tool_exec.rs の役割の違いを 200 字以内で要約して".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec!["agent_loop".into(), "tool_exec".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::Summarization,
+                },
+                BenchmarkTask {
+                    id: "git_log_summary".into(),
+                    name: "git ログ要約".into(),
+                    input: "直近 5 コミットの「変更概要 + 影響範囲」を表形式で要約して".into(),
+                    expected_tools: vec!["shell".into()],
+                    expected_keywords: vec!["commit".into(), "要約".into()],
+                    max_iterations: 5,
+                    category: TaskCategory::Summarization,
+                },
+                // --- Verification (×2) — 自己検証 / 事実確認 ----------------
+                BenchmarkTask {
+                    id: "self_check_arithmetic".into(),
+                    name: "自己検算".into(),
+                    input: "(17 × 23) を計算し、別の方法で検算してから最終答を示して".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["391".into(), "検算".into()],
+                    max_iterations: 3,
+                    category: TaskCategory::Reasoning,
+                },
+                BenchmarkTask {
+                    id: "tool_fact_check".into(),
+                    name: "事実確認: ファイル存在".into(),
+                    input: "現在のディレクトリに `Cargo.toml` が存在するかツールで確認して".into(),
+                    expected_tools: vec!["file_read".into(), "shell".into()],
+                    expected_keywords: vec!["Cargo.toml".into(), "存在".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::ToolUse,
+                },
             ],
         }
     }
@@ -872,7 +1048,7 @@ mod tests {
     #[test]
     fn test_default_tasks_count() {
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 22);
+        assert_eq!(suite.tasks.len(), 40);
     }
 
     #[test]
@@ -1336,13 +1512,13 @@ mod tests {
         );
     }
 
-    // --- 追加タスク（22タスク化）テスト ---
+    // --- 追加タスク（40タスク化）テスト ---
 
     #[test]
     fn test_expanded_tasks_count() {
-        // 16→22タスクへの拡張を検証
+        // 22→40タスクへの拡張を検証（Phase C: +18タスク）
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 22, "タスク数は22であるべき");
+        assert_eq!(suite.tasks.len(), 40, "タスク数は40であるべき");
     }
 
     #[test]
@@ -1544,38 +1720,38 @@ mod tests {
     }
 
     // --- MultiFileEdit (×2) -------------------------------------------------
-    #[test] #[ignore] fn phase_c_rename_var_3files() { assert_task_present("rename_var_3files"); }
-    #[test] #[ignore] fn phase_c_sig_change_4files() { assert_task_present("sig_change_4files"); }
+    #[test] fn phase_c_rename_var_3files() { assert_task_present("rename_var_3files"); }
+    #[test] fn phase_c_sig_change_4files() { assert_task_present("sig_change_4files"); }
 
     // --- LongRun (×2) -------------------------------------------------------
-    #[test] #[ignore] fn phase_c_tool_chain_10steps() { assert_task_present("tool_chain_10steps"); }
-    #[test] #[ignore] fn phase_c_implement_50steps() { assert_task_present("implement_50steps"); }
+    #[test] fn phase_c_tool_chain_10steps() { assert_task_present("tool_chain_10steps"); }
+    #[test] fn phase_c_implement_50steps() { assert_task_present("implement_50steps"); }
 
     // --- ToolChain (×2) -----------------------------------------------------
-    #[test] #[ignore] fn phase_c_repomap_read_edit_test() { assert_task_present("repomap_read_edit_test"); }
-    #[test] #[ignore] fn phase_c_grep_multiedit() { assert_task_present("grep_multiedit"); }
+    #[test] fn phase_c_repomap_read_edit_test() { assert_task_present("repomap_read_edit_test"); }
+    #[test] fn phase_c_grep_multiedit() { assert_task_present("grep_multiedit"); }
 
     // --- ErrorRecovery (×2) -------------------------------------------------
-    #[test] #[ignore] fn phase_c_tool_fail_pivot() { assert_task_present("tool_fail_pivot"); }
-    #[test] #[ignore] fn phase_c_corrupt_file_repair() { assert_task_present("corrupt_file_repair"); }
+    #[test] fn phase_c_tool_fail_pivot() { assert_task_present("tool_fail_pivot"); }
+    #[test] fn phase_c_corrupt_file_repair() { assert_task_present("corrupt_file_repair"); }
 
     // --- McpInteg (×2) ------------------------------------------------------
-    #[test] #[ignore] fn phase_c_mcp_filesystem_list() { assert_task_present("mcp_filesystem_list"); }
-    #[test] #[ignore] fn phase_c_mcp_search_replace() { assert_task_present("mcp_search_replace"); }
+    #[test] fn phase_c_mcp_filesystem_list() { assert_task_present("mcp_filesystem_list"); }
+    #[test] fn phase_c_mcp_search_replace() { assert_task_present("mcp_search_replace"); }
 
     // --- Semantic (×2) ------------------------------------------------------
-    #[test] #[ignore] fn phase_c_vague_log_improve() { assert_task_present("vague_log_improve"); }
-    #[test] #[ignore] fn phase_c_refactor_intent() { assert_task_present("refactor_intent"); }
+    #[test] fn phase_c_vague_log_improve() { assert_task_present("vague_log_improve"); }
+    #[test] fn phase_c_refactor_intent() { assert_task_present("refactor_intent"); }
 
     // --- Reasoning (×2) -----------------------------------------------------
-    #[test] #[ignore] fn phase_c_nested_logic() { assert_task_present("nested_logic"); }
-    #[test] #[ignore] fn phase_c_ambiguous_calc() { assert_task_present("ambiguous_calc"); }
+    #[test] fn phase_c_nested_logic() { assert_task_present("nested_logic"); }
+    #[test] fn phase_c_ambiguous_calc() { assert_task_present("ambiguous_calc"); }
 
     // --- Summarization (×2) -------------------------------------------------
-    #[test] #[ignore] fn phase_c_multi_file_summary() { assert_task_present("multi_file_summary"); }
-    #[test] #[ignore] fn phase_c_git_log_summary() { assert_task_present("git_log_summary"); }
+    #[test] fn phase_c_multi_file_summary() { assert_task_present("multi_file_summary"); }
+    #[test] fn phase_c_git_log_summary() { assert_task_present("git_log_summary"); }
 
     // --- Verification (×2) --------------------------------------------------
-    #[test] #[ignore] fn phase_c_self_check_arithmetic() { assert_task_present("self_check_arithmetic"); }
-    #[test] #[ignore] fn phase_c_tool_fact_check() { assert_task_present("tool_fact_check"); }
+    #[test] fn phase_c_self_check_arithmetic() { assert_task_present("self_check_arithmetic"); }
+    #[test] fn phase_c_tool_fact_check() { assert_task_present("tool_fact_check"); }
 }
