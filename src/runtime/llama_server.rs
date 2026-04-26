@@ -532,6 +532,63 @@ mod tests {
         assert_eq!(backend.base_url, "http://localhost:8080");
     }
 
+    /// SSE チャンクタイムアウトのデフォルト（60秒）が config と backend で一致すること。
+    /// 設定退行検出: AppConfig::default と connect() の初期値ドリフト防止。
+    #[test]
+    fn test_sse_timeout_default_is_60() {
+        let config = crate::config::AppConfig::default();
+        assert_eq!(config.model.sse_chunk_timeout_secs, 60);
+
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "bonsai-8b");
+        assert_eq!(backend.sse_chunk_timeout_secs, 60);
+    }
+
+    /// MLX バックエンドの推奨値 180 秒を TOML から読み込み backend に伝播できること。
+    /// 項目112（CLAUDE.md）の MLX 推奨値の意図を退行検出。
+    #[test]
+    fn test_sse_timeout_mlx_recommended_180() {
+        let toml_str = r#"
+[model]
+sse_chunk_timeout_secs = 180
+"#;
+        let config: crate::config::AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.sse_chunk_timeout_secs, 180);
+
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "bonsai-8b")
+            .with_sse_timeout(config.model.sse_chunk_timeout_secs);
+        assert_eq!(backend.sse_chunk_timeout_secs, 180);
+
+        // 実際の `generate_streaming` と同じ条件式（line 333-337）を再現し、
+        // Duration 化が壊れないことを検証する。
+        let timeout = if backend.sse_chunk_timeout_secs > 0 {
+            Some(std::time::Duration::from_secs(backend.sse_chunk_timeout_secs))
+        } else {
+            None
+        };
+        assert_eq!(timeout, Some(std::time::Duration::from_secs(180)));
+    }
+
+    /// `sse_chunk_timeout_secs = 0` でタイムアウト無効化（None）になること。
+    /// `generate_streaming` の line 333-337 ガードと整合。
+    #[test]
+    fn test_sse_timeout_zero_disables_timeout() {
+        let toml_str = r#"
+[model]
+sse_chunk_timeout_secs = 0
+"#;
+        let config: crate::config::AppConfig = toml::from_str(toml_str).unwrap();
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "bonsai-8b")
+            .with_sse_timeout(config.model.sse_chunk_timeout_secs);
+        assert_eq!(backend.sse_chunk_timeout_secs, 0);
+
+        let timeout = if backend.sse_chunk_timeout_secs > 0 {
+            Some(std::time::Duration::from_secs(backend.sse_chunk_timeout_secs))
+        } else {
+            None
+        };
+        assert_eq!(timeout, None);
+    }
+
     #[test]
     fn test_build_request_body() {
         let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
