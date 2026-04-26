@@ -10,7 +10,7 @@ use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
 
-use super::detect_task_complexity;
+use super::outcome::detect_task_complexity;
 use super::state::StallDetector;
 
 /// アドバイザー応答解決の戻り値
