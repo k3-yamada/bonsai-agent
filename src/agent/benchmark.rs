@@ -192,6 +192,13 @@ pub struct MultiRunTaskScore {
     pub variance: f64,
     /// 個別スコア
     pub individual_scores: Vec<f64>,
+    /// 代表 run（通常は最終 run）の最終応答（Phase B2: judge gate 用）。
+    /// 既存ベンチマーク経路では `None` のまま、judge 統合時に `with_last_run()` で注入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_response: Option<String>,
+    /// 代表 run のツール軌跡（呼出されたツール名の順序、Phase B2: judge gate 用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_trajectory: Option<Vec<String>>,
 }
 
 impl MultiRunTaskScore {
@@ -206,6 +213,8 @@ impl MultiRunTaskScore {
                 mean_score: 0.0,
                 variance: 0.0,
                 individual_scores: vec![],
+                last_response: None,
+                last_trajectory: None,
             };
         }
 
@@ -239,7 +248,19 @@ impl MultiRunTaskScore {
             mean_score,
             variance,
             individual_scores: scores,
+            last_response: None,
+            last_trajectory: None,
         }
+    }
+
+    /// 代表 run の応答と軌跡を後付けで注入するビルダー（Phase B2: judge gate 用）
+    ///
+    /// `from_scores` のシグネチャ互換性を維持するため、judge 統合経路はこのメソッドで
+    /// trajectory を後付け enrich する。既存呼出側に影響しない。
+    pub fn with_last_run(mut self, response: String, trajectory: Vec<String>) -> Self {
+        self.last_response = Some(response);
+        self.last_trajectory = Some(trajectory);
+        self
     }
 }
 
@@ -1031,6 +1052,51 @@ mod tests {
         let mrt = MultiRunTaskScore::from_scores("empty".into(), vec![], 0.5);
         assert!((mrt.pass_at_k).abs() < f64::EPSILON);
         assert!((mrt.mean_score).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_multi_run_task_score_default_last_run_none() {
+        // Phase B2 Step 1: 既存経路では last_response/last_trajectory は None
+        let mrt = MultiRunTaskScore::from_scores("t".into(), vec![0.8], 0.5);
+        assert!(mrt.last_response.is_none());
+        assert!(mrt.last_trajectory.is_none());
+    }
+
+    #[test]
+    fn test_multi_run_task_score_with_last_run_builder() {
+        // Phase B2 Step 1: with_last_run() で trajectory を後付け enrich
+        let mrt = MultiRunTaskScore::from_scores("t".into(), vec![0.8], 0.5).with_last_run(
+            "答え: 42".to_string(),
+            vec!["shell".to_string(), "file_read".to_string()],
+        );
+        assert_eq!(mrt.last_response.as_deref(), Some("答え: 42"));
+        assert_eq!(
+            mrt.last_trajectory.as_deref().unwrap(),
+            &["shell", "file_read"]
+        );
+        // 既存スコアフィールドは無変化
+        assert!((mrt.mean_score - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_multi_run_task_score_serde_roundtrip_with_last_run() {
+        // Phase B2 Step 1: serde(skip_serializing_if = Option::is_none) の動作確認
+        let mrt = MultiRunTaskScore::from_scores("t".into(), vec![0.8], 0.5)
+            .with_last_run("ans".into(), vec!["s".into()]);
+        let json = serde_json::to_string(&mrt).unwrap();
+        assert!(json.contains("last_response"));
+        assert!(json.contains("last_trajectory"));
+        let restored: MultiRunTaskScore = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.last_response.as_deref(), Some("ans"));
+
+        // None 値はシリアライズ時に省略される
+        let mrt_none = MultiRunTaskScore::from_scores("t".into(), vec![0.8], 0.5);
+        let json_none = serde_json::to_string(&mrt_none).unwrap();
+        assert!(!json_none.contains("last_response"));
+        assert!(!json_none.contains("last_trajectory"));
+        // 省略された JSON も None として復元できる（後方互換）
+        let restored_none: MultiRunTaskScore = serde_json::from_str(&json_none).unwrap();
+        assert!(restored_none.last_response.is_none());
     }
 
     // --- 新タスク（コード生成/マルチステップ/エラー処理/要約）テスト ---
