@@ -377,6 +377,115 @@ impl AdvisorConfig {
             }
         }
     }
+
+    /// system+user の生プロンプトを取って外部API呼出（OpenAI互換 /chat/completions）
+    ///
+    /// `try_remote_advice` は AdvisorRole の固定プロンプトを使うが、本メソッドは
+    /// judge / 任意の用途で **完全カスタムプロンプト**を送れる。キャッシュは
+    /// `cache_key_for_prompt(system, user)` でハッシュキーを生成し共有する。
+    ///
+    /// 戻り値:
+    /// - `Ok(None)`: api_endpoint 未設定（フォールバック必要）
+    /// - `Ok(Some(advice))`: 外部APIから取得成功（キャッシュヒット含む）
+    /// - `Err(_)`: ネットワーク/JSON エラー
+    pub fn try_remote_with_prompt(
+        &mut self,
+        system: &str,
+        user: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let Some(endpoint) = self.api_endpoint.as_deref() else {
+            return Ok(None);
+        };
+        let key = Self::cache_key_for_prompt(system, user);
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(Some(cached.clone()));
+        }
+
+        let model = self.api_model.as_deref().unwrap_or("gpt-4o-mini");
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user }
+            ],
+            "max_tokens": self.max_advisor_tokens,
+            "temperature": 0.3,
+        });
+
+        let mut req = ureq::post(endpoint)
+            .header("Content-Type", "application/json")
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(self.timeout_secs)))
+            .build();
+        if let Some(api_key) = self.api_key.as_deref() {
+            req = req.header("Authorization", format!("Bearer {api_key}"));
+        }
+        let resp: serde_json::Value = req.send_json(&body)?.body_mut().read_json()?;
+        let content = resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if content.is_empty() {
+            anyhow::bail!("外部アドバイザー応答が空");
+        }
+        self.cache.insert(key, content.clone());
+        Ok(Some(content))
+    }
+
+    /// system+user の生プロンプトを取って Claude Code CLI 呼出
+    ///
+    /// `try_claude_code_advice` は AdvisorRole の固定プロンプトを使うが、本メソッドは
+    /// judge / 任意の用途で完全カスタムプロンプトを送れる。
+    pub fn try_claude_code_with_prompt(
+        &mut self,
+        system: &str,
+        user: &str,
+    ) -> anyhow::Result<Option<String>> {
+        if self.backend != AdvisorBackend::ClaudeCode {
+            return Ok(None);
+        }
+        let key = Self::cache_key_for_prompt(system, user);
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(Some(cached.clone()));
+        }
+
+        let prompt = format!("{system}\n\n{user}");
+        let output = std::process::Command::new("claude")
+            .args(["-p", &prompt, "--output-format", "text"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => {
+                let content = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if content.is_empty() {
+                    anyhow::bail!("Claude Code応答が空");
+                }
+                self.cache.insert(key, content.clone());
+                Ok(Some(content))
+            }
+            Ok(out) => {
+                anyhow::bail!("Claude Code終了コード: {:?}", out.status.code())
+            }
+            Err(e) => {
+                anyhow::bail!("Claude Code実行失敗: {e}")
+            }
+        }
+    }
+
+    /// 生プロンプト用のキャッシュキー（system+user の内容ハッシュ）
+    fn cache_key_for_prompt(system: &str, user: &str) -> u64 {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        // role-based key と衝突しないようマーカーを付与
+        "prompt:".hash(&mut h);
+        system.hash(&mut h);
+        "\x00".hash(&mut h); // system/user 境界
+        user.hash(&mut h);
+        h.finish()
+    }
 }
 
 /// タスクコンテキスト（モデル選択の入力）

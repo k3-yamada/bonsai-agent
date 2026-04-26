@@ -1,16 +1,18 @@
-//! LLM-as-judge 評価モジュール（ADK 知見 P0 取込、Phase A1: TDD Red）
+//! LLM-as-judge 評価モジュール（ADK 知見 P0 取込、Phase B1: Green）
 //!
 //! Google ADK の `rubric_based_final_response_quality_v1` メトリクスに対応する
-//! ルーブリックベース最終応答品質評価。`HttpAdvisor`（OpenAI 互換 / claude-code）を
+//! ルーブリックベース最終応答品質評価。`AdvisorConfig`（OpenAI 互換 / claude-code）を
 //! 流用して judge LLM を呼び出し、completeness / correctness / reasoning_quality の
 //! 3 軸を 0.0–1.0 で評価する。
 //!
-//! Phase A1 は型定義 + 純粋関数のみ実装し、`HttpAdvisorJudge::evaluate()` は
-//! Phase B1 で wire される（現時点では `not yet implemented` を返す）。
+//! Phase B1 では `try_remote_with_prompt` / `try_claude_code_with_prompt` を用いて
+//! rubric prompt を送信し、JSON 応答を `parse_judge_response` でパースする。
+//! どちらのバックエンドも未設定の場合は `Err` を返す（呼出側で skip 判断）。
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::model_router::AdvisorConfig;
 
 /// ルーブリック評価スコア
@@ -62,16 +64,16 @@ pub trait LlmJudge {
     ) -> Result<RubricScore>;
 }
 
-/// `HttpAdvisor` を流用した judge 実装
+/// `AdvisorConfig` を流用した judge 実装
 ///
-/// Phase A1（現時点）: `evaluate()` は stub（Err 返却）。
-/// Phase B1 で `try_remote_advice` / `try_claude_code_advice` を呼び出して
-/// rubric prompt を送信し、JSON 応答を `parse_judge_response` でパースする。
+/// `try_remote_with_prompt` → `try_claude_code_with_prompt` の順でフォールバックを試み、
+/// 成功した raw 応答を `parse_judge_response` でパースする。両方とも利用不可なら `Err`。
 ///
-/// **Phase B1 設計メモ**: 現在は `&'a mut AdvisorConfig` 借用。`Box<dyn LlmJudge + 'static>`
-/// で `BenchmarkSuite` に保持したい場合は、`AdvisorConfig` を値で保有する別実装
-/// （例: `OwnedHttpAdvisorJudge`）を追加するか、本構造体を `'static` 化する設計判断が必要。
-/// 借用は per-evaluation コール用、所有は per-suite コール用という両立も可。
+/// **設計判断: 借用維持**（`&'a mut AdvisorConfig`）
+/// AdvisorConfig は per-session 可変状態（max_uses カウンター + キャッシュ + AdvisorStats）。
+/// judge が値所有すると stats が判定経路と本流で分裂するため、`BenchmarkSuite::run_k`
+/// 経由の per-call 注入（`Option<&mut dyn LlmJudge>`）が想定される。
+/// `Box<dyn LlmJudge>` 化は将来 BenchmarkSuite が judge を「保有」したくなった時点で再検討。
 pub struct HttpAdvisorJudge<'a> {
     pub advisor: &'a mut AdvisorConfig,
     pub rubric_template: String,
@@ -96,15 +98,56 @@ impl<'a> HttpAdvisorJudge<'a> {
 impl<'a> LlmJudge for HttpAdvisorJudge<'a> {
     fn evaluate(
         &mut self,
-        _task_description: &str,
-        _response: &str,
-        _trajectory: &[String],
+        task_description: &str,
+        response: &str,
+        trajectory: &[String],
     ) -> Result<RubricScore> {
-        // Phase A1 Red: 実装は Phase B1 で wire される
-        Err(anyhow::anyhow!(
-            "HttpAdvisorJudge::evaluate is not yet implemented (Phase B1)"
-        ))
+        let system = self.rubric_template.clone();
+        let user = build_judge_user_prompt(task_description, response, trajectory);
+
+        // 1. リモート HTTP API を試行（api_endpoint 設定時のみ）
+        match self.advisor.try_remote_with_prompt(&system, &user) {
+            Ok(Some(raw)) => return Ok(parse_judge_response(&raw)),
+            Ok(None) => {} // 未設定 → 次のバックエンドへ
+            Err(e) => log_event(
+                LogLevel::Warn,
+                "judge",
+                &format!("remote judge failed: {e}, falling back to claude-code"),
+            ),
+        }
+
+        // 2. Claude Code CLI を試行（backend=ClaudeCode 時のみ）
+        match self.advisor.try_claude_code_with_prompt(&system, &user) {
+            Ok(Some(raw)) => return Ok(parse_judge_response(&raw)),
+            Ok(None) => {} // 未設定
+            Err(e) => log_event(
+                LogLevel::Warn,
+                "judge",
+                &format!("claude-code judge failed: {e}"),
+            ),
+        }
+
+        // 3. どのバックエンドも利用不可
+        anyhow::bail!(
+            "judge: no advisor backend available (api_endpoint or backend=claude-code が必要)"
+        )
     }
+}
+
+/// judge LLM への user メッセージを構築する純粋関数
+///
+/// system 側は `rubric_template`（採点指示）、user 側はタスク・応答・軌跡を構造化。
+/// テスト容易性のため evaluate() から分離。
+pub fn build_judge_user_prompt(task: &str, response: &str, trajectory: &[String]) -> String {
+    let trajectory_str = if trajectory.is_empty() {
+        "(なし)".to_string()
+    } else {
+        trajectory.join(" → ")
+    };
+    format!(
+        "タスク: {task}\n\n応答:\n{response}\n\n軌跡: {trajectory_str}\n\n\
+         上記を採点し、JSON のみを出力してください。"
+    )
 }
 
 /// judge LLM の JSON 応答をパースする
@@ -227,14 +270,42 @@ mod tests {
     }
 
     #[test]
-    fn test_judge_failure_returns_error() {
-        // Phase A1 Red: HttpAdvisorJudge::evaluate は未実装 → Err
+    fn test_judge_returns_err_when_no_backend_available() {
+        // Phase B1 Green: AdvisorConfig::default() は backend=Local かつ api_endpoint=None
+        // → try_remote_with_prompt も try_claude_code_with_prompt も None を返す
+        // → evaluate() は明示的なエラーを返す（呼出側で skip 判断）
         let mut advisor = AdvisorConfig::default();
         let mut judge = HttpAdvisorJudge::new(&mut advisor);
         let result = judge.evaluate("test task", "test response", &[]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("not yet implemented"));
+        assert!(
+            err.contains("no advisor backend available"),
+            "expected backend-unavailable error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_judge_user_prompt_empty_trajectory() {
+        let prompt = build_judge_user_prompt("ファイル一覧を取得", "ls 実行結果", &[]);
+        assert!(prompt.contains("タスク: ファイル一覧を取得"));
+        assert!(prompt.contains("応答:\nls 実行結果"));
+        assert!(prompt.contains("軌跡: (なし)"));
+        assert!(prompt.contains("JSON のみを出力"));
+    }
+
+    #[test]
+    fn test_build_judge_user_prompt_with_trajectory() {
+        let trajectory = vec![
+            "shell".to_string(),
+            "file_read".to_string(),
+            "shell".to_string(),
+        ];
+        let prompt = build_judge_user_prompt("バグ調査", "原因はXでした", &trajectory);
+        // 軌跡は " → " 区切りで連結される
+        assert!(prompt.contains("軌跡: shell → file_read → shell"));
+        assert!(prompt.contains("タスク: バグ調査"));
+        assert!(prompt.contains("応答:\n原因はXでした"));
     }
 
     #[test]
