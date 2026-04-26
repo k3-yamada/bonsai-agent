@@ -30,6 +30,14 @@ pub enum PipelineStage {
     Advise,
 }
 
+/// AdvisorConfig::cache の namespace 分離用 discriminant（Phase B1 監査対応）
+///
+/// `cache_key`（role-based）と `cache_key_for_prompt`（system+user prompt）が同じ
+/// `HashMap<u64, String>` を共有するため、両者のキー衝突を構造的に防ぐ。
+/// 値はランダムな u64 でよく、衝突確率を実質ゼロにする。
+const KEY_DISCRIMINANT_ROLE: u64 = 0x726F6C652D6B6579; // "role-key"
+const KEY_DISCRIMINANT_PROMPT: u64 = 0x70726F6D70742D6B; // "prompt-k"
+
 /// アドバイザー設定（Anthropic Advisor Tool パターン準拠）
 #[derive(Debug, Clone)]
 pub struct AdvisorConfig {
@@ -264,12 +272,15 @@ impl AdvisorConfig {
     }
 
     /// キャッシュキーを計算（role + task_context のハッシュ）
+    ///
+    /// `cache_key_for_prompt` と同じ HashMap を共有するため、衝突回避のため
+    /// `KEY_DISCRIMINANT_ROLE` 定数を XOR して namespace を明示分離する。
     fn cache_key(role: AdvisorRole, task_context: &str) -> u64 {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut h = DefaultHasher::new();
         (role as u8).hash(&mut h);
         task_context.hash(&mut h);
-        h.finish()
+        h.finish() ^ KEY_DISCRIMINANT_ROLE
     }
 
     /// 外部アドバイザーAPIから指示を取得（OpenAI互換 /chat/completions）
@@ -436,6 +447,12 @@ impl AdvisorConfig {
     ///
     /// `try_claude_code_advice` は AdvisorRole の固定プロンプトを使うが、本メソッドは
     /// judge / 任意の用途で完全カスタムプロンプトを送れる。
+    ///
+    /// **脅威モデル**: `.args(["-p", &prompt, ...])` 経由で渡すため OS シェル経由の
+    /// コマンド注入は不可能。ただし `user` にエージェント出力等の外部由来文字列が
+    /// 入る場合、判定 LLM への **prompt injection** リスクは呼出側の責務。
+    /// judge 用途では `build_judge_user_prompt` が構造化（タスク/応答/軌跡を別行）
+    /// するためそのまま渡してよいが、生エージェント出力を直接渡す経路は注意。
     pub fn try_claude_code_with_prompt(
         &mut self,
         system: &str,
@@ -476,15 +493,16 @@ impl AdvisorConfig {
     }
 
     /// 生プロンプト用のキャッシュキー（system+user の内容ハッシュ）
+    ///
+    /// `cache_key` と同じ HashMap を共有するため `KEY_DISCRIMINANT_PROMPT` を XOR して
+    /// namespace を構造的に分離する（rust-reviewer 監査 MEDIUM 対応）。
     fn cache_key_for_prompt(system: &str, user: &str) -> u64 {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut h = DefaultHasher::new();
-        // role-based key と衝突しないようマーカーを付与
-        "prompt:".hash(&mut h);
         system.hash(&mut h);
         "\x00".hash(&mut h); // system/user 境界
         user.hash(&mut h);
-        h.finish()
+        h.finish() ^ KEY_DISCRIMINANT_PROMPT
     }
 }
 
@@ -951,5 +969,35 @@ mod tests {
         cloned.cache.insert(1, "only in clone".to_string());
         assert!(!original.cache.contains_key(&1));
         assert!(cloned.cache.contains_key(&1));
+    }
+
+    #[test]
+    fn test_cache_for_prompt_returns_hit_without_http() {
+        // try_remote_with_prompt のキャッシュヒット経路: HTTP に行かずに既存値を返す
+        // （rust-reviewer 監査 LOW#3 対応）
+        let mut config = AdvisorConfig {
+            api_endpoint: Some("http://127.0.0.1:1/never-reached".to_string()),
+            timeout_secs: 1,
+            ..Default::default()
+        };
+        let key = AdvisorConfig::cache_key_for_prompt("sys-template", "user-payload");
+        config.cache.insert(key, "cached judge response".to_string());
+        let result = config
+            .try_remote_with_prompt("sys-template", "user-payload")
+            .unwrap();
+        assert_eq!(result.as_deref(), Some("cached judge response"));
+    }
+
+    #[test]
+    fn test_cache_key_namespaces_isolated() {
+        // role-based key と prompt-based key は同一文字列でも異なる namespace に属する
+        // （MEDIUM 監査対応: discriminant XOR で構造的分離）
+        let role_key = AdvisorConfig::cache_key(AdvisorRole::Verification, "shared-text");
+        let prompt_key = AdvisorConfig::cache_key_for_prompt("shared-text", "");
+        // 同じ入力（"shared-text"）でも namespace 分離により別キー
+        assert_ne!(
+            role_key, prompt_key,
+            "role と prompt の cache key は構造的に分離されるべき"
+        );
     }
 }

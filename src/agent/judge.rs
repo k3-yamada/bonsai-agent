@@ -75,7 +75,11 @@ pub trait LlmJudge {
 /// 経由の per-call 注入（`Option<&mut dyn LlmJudge>`）が想定される。
 /// `Box<dyn LlmJudge>` 化は将来 BenchmarkSuite が judge を「保有」したくなった時点で再検討。
 pub struct HttpAdvisorJudge<'a> {
+    /// per-session 可変状態（max_uses / cache / stats）を保持する advisor への借用。
+    /// `&'a mut` 維持判断は型ドキュメント参照（stats 分裂回避）。
     pub advisor: &'a mut AdvisorConfig,
+    /// system 側プロンプト（採点指示）。default は `default_rubric_template()`。
+    /// JSON 出力形式を必ず明示すること（`parse_judge_response` の期待形式に準拠）。
     pub rubric_template: String,
 }
 
@@ -104,33 +108,43 @@ impl<'a> LlmJudge for HttpAdvisorJudge<'a> {
     ) -> Result<RubricScore> {
         let system = self.rubric_template.clone();
         let user = build_judge_user_prompt(task_description, response, trajectory);
+        // 全バックエンド失敗時の診断用に各エラーを保持（rust-reviewer 監査 LOW#2 対応）。
+        let mut errors: Vec<String> = Vec::new();
 
         // 1. リモート HTTP API を試行（api_endpoint 設定時のみ）
         match self.advisor.try_remote_with_prompt(&system, &user) {
             Ok(Some(raw)) => return Ok(parse_judge_response(&raw)),
             Ok(None) => {} // 未設定 → 次のバックエンドへ
-            Err(e) => log_event(
-                LogLevel::Warn,
-                "judge",
-                &format!("remote judge failed: {e}, falling back to claude-code"),
-            ),
+            Err(e) => {
+                let msg = format!("remote: {e}");
+                log_event(
+                    LogLevel::Warn,
+                    "judge",
+                    &format!("{msg}, falling back to claude-code"),
+                );
+                errors.push(msg);
+            }
         }
 
         // 2. Claude Code CLI を試行（backend=ClaudeCode 時のみ）
         match self.advisor.try_claude_code_with_prompt(&system, &user) {
             Ok(Some(raw)) => return Ok(parse_judge_response(&raw)),
             Ok(None) => {} // 未設定
-            Err(e) => log_event(
-                LogLevel::Warn,
-                "judge",
-                &format!("claude-code judge failed: {e}"),
-            ),
+            Err(e) => {
+                let msg = format!("claude-code: {e}");
+                log_event(LogLevel::Warn, "judge", &msg);
+                errors.push(msg);
+            }
         }
 
-        // 3. どのバックエンドも利用不可
-        anyhow::bail!(
-            "judge: no advisor backend available (api_endpoint or backend=claude-code が必要)"
-        )
+        // 3. どのバックエンドも利用不可。エラーがあれば診断情報を含める。
+        if errors.is_empty() {
+            anyhow::bail!(
+                "judge: no advisor backend available (api_endpoint or backend=claude-code が必要)"
+            )
+        } else {
+            anyhow::bail!("judge: all backends failed: {}", errors.join("; "))
+        }
     }
 }
 
