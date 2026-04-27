@@ -10,10 +10,11 @@
 Lab v13 完了後の作業を 4 系統 × 7 ステップに整理:
 
 ```
-[A 系: 構造改善 v3]
-  Step 10  →  DiffStore (★★★)        4h  +91% トークン削減見込み
+[A 系: 構造改善 v3 — Lab v13 中断結果で優先度再編]
+  ★緊急  Step 13 →  Socket Timeout（新規）   1h  recvfrom hang 防止
+  ★緊急  Step 12 →  Fallback Chain (★★)     3h  Lab v13 で必須確認
   Step 11  →  Edit Cycle Detection (★★)  1h  +4 テスト
-  Step 12  →  Fallback Chain (★★)      3h  +6 テスト
+  Step 10  →  DiffStore (★★★)         4h  +91% トークン削減見込み
 
 [B 系: 品質強化]
   Step 8   →  依存最適化軽量実施       1h  ureq 重複削減
