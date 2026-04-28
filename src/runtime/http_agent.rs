@@ -48,6 +48,11 @@ impl AgentTimeouts {
     }
 
     /// SSE ストリーミング用（推論レスポンス、long body OK）
+    ///
+    /// MLX のように初トークンレイテンシが長いバックエンドでは
+    /// recv_response（ヘッダー受信〜最初のチャンク）も寛容にする必要がある。
+    /// recv_response を body と同等に取り、socket-level deadline は global
+    /// と recv_body で確保する。
     pub fn streaming(recv_body_secs: u64) -> Self {
         let body = if recv_body_secs == 0 {
             Duration::from_secs(DEFAULT_RECV_BODY_TIMEOUT_SECS)
@@ -55,9 +60,11 @@ impl AgentTimeouts {
             Duration::from_secs(recv_body_secs)
         };
         Self {
-            global: body + Duration::from_secs(60),
+            // body 受信完了 + 接続/ヘッダー/処理オーバーヘッドを 120s 見込む
+            global: body + Duration::from_secs(120),
             connect: Duration::from_secs(10),
-            recv_response: Duration::from_secs(30),
+            // 初トークンレイテンシ吸収のため body と同等に取る
+            recv_response: body,
             recv_body: body,
         }
     }

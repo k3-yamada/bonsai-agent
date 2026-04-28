@@ -668,7 +668,20 @@ pub fn run_experiment_loop(
     store: &MemoryStore,
     loop_config: &ExperimentLoopConfig,
 ) -> Result<Vec<Experiment>> {
-    let suite = BenchmarkSuite::default_tasks();
+    // BONSAI_LAB_SMOKE=1 で smoke タスク（5 件）に切替（dev iteration 用）
+    let suite = if std::env::var("BONSAI_LAB_SMOKE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+    {
+        log_event(
+            LogLevel::Info,
+            "lab",
+            "BONSAI_LAB_SMOKE=1 → smoke_tasks() 使用（5 タスク）",
+        );
+        BenchmarkSuite::smoke_tasks()
+    } else {
+        BenchmarkSuite::default_tasks()
+    };
     // 過去の試行済み変異detailをDBからロードし、重複回避
     let tried_details = load_tried_details(store.conn());
     let tried_count = tried_details.len();
