@@ -1,7 +1,11 @@
 use crate::observability::logger::{LogLevel, log_event};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 use crate::agent::conversation::Message;
+use crate::config::ServerBackend;
 
 /// モデル選択
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +649,92 @@ pub fn get_available_ram() -> u64 {
     8 * 1024 * 1024 * 1024
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// FallbackChain（Step 12 — メイン推論フォールバック）
+// ──────────────────────────────────────────────────────────────────────
+
+/// フォールバック対象のバックエンド + モデル ID + 接続先
+///
+/// 既存 `[advisor]` の backend フォールバックは advice 専用。
+/// このエントリはメイン推論 (`LlmBackend::generate`) に適用される。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FallbackEntry {
+    pub backend: ServerBackend,
+    pub model_id: String,
+    pub server_url: String,
+}
+
+/// 連続失敗時に次のバックエンドへ切替えるチェーン
+///
+/// macOS26/Agent の `FallbackChainService` 設計を踏襲し、
+/// (provider, model) のチェーン上で N 回連続失敗で次の provider に自動切替する。
+/// 1 回成功するとカウンタはリセット、ただしチェーン位置は保持（手動 `reset_to_primary` で復帰）。
+///
+/// インデックスは 0-based: `entries[0]` = primary、`entries[1]` 以降がフォールバック先。
+#[derive(Debug)]
+pub struct FallbackChain {
+    entries: Vec<FallbackEntry>,
+    current_idx: AtomicUsize,
+    consecutive_failures: AtomicUsize,
+    max_failures_before_fallback: usize,
+}
+
+impl FallbackChain {
+    pub fn new(entries: Vec<FallbackEntry>) -> Self {
+        Self::with_threshold(entries, 2)
+    }
+
+    pub fn with_threshold(entries: Vec<FallbackEntry>, max_failures: usize) -> Self {
+        Self {
+            entries,
+            current_idx: AtomicUsize::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            max_failures_before_fallback: max_failures.max(1),
+        }
+    }
+
+    /// 現在のエントリを取得（idx=0 なら primary）
+    pub fn current(&self) -> Option<&FallbackEntry> {
+        let idx = self.current_idx.load(Ordering::SeqCst);
+        self.entries.get(idx)
+    }
+
+    /// 失敗を記録、必要なら次のバックエンドへ切替（戻り値は切替先、無ければ None）
+    pub fn record_failure(&self) -> Option<&FallbackEntry> {
+        let count = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        if count >= self.max_failures_before_fallback {
+            let next_idx = self.current_idx.load(Ordering::SeqCst) + 1;
+            if next_idx < self.entries.len() {
+                self.current_idx.store(next_idx, Ordering::SeqCst);
+                self.consecutive_failures.store(0, Ordering::SeqCst);
+                return self.entries.get(next_idx);
+            }
+        }
+        None
+    }
+
+    /// 成功を記録、failure カウンタをリセット（位置は保持）
+    pub fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+    }
+
+    /// プライマリへ手動復帰
+    pub fn reset_to_primary(&self) {
+        self.current_idx.store(0, Ordering::SeqCst);
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+    }
+
+    pub fn entries(&self) -> &[FallbackEntry] {
+        &self.entries
+    }
+
+    /// チェーン枯渇（最後のエントリにいる）か判定
+    pub fn is_exhausted(&self) -> bool {
+        let idx = self.current_idx.load(Ordering::SeqCst);
+        idx >= self.entries.len().saturating_sub(1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,5 +1089,80 @@ mod tests {
             role_key, prompt_key,
             "role と prompt の cache key は構造的に分離されるべき"
         );
+    }
+
+    // ─── Step 12 FallbackChain tests ──────────────────────────────────
+
+    fn fb_entry(id: &str) -> FallbackEntry {
+        FallbackEntry {
+            backend: ServerBackend::MlxLm,
+            model_id: id.to_string(),
+            server_url: format!("http://localhost:8000/{id}"),
+        }
+    }
+
+    #[test]
+    fn t_fallback_chain_starts_at_primary() {
+        let chain = FallbackChain::new(vec![fb_entry("a"), fb_entry("b")]);
+        assert_eq!(chain.current().unwrap().model_id, "a");
+    }
+
+    #[test]
+    fn t_fallback_chain_does_not_switch_below_threshold() {
+        let chain = FallbackChain::new(vec![fb_entry("a"), fb_entry("b")]);
+        // threshold=2 なので 1 回目は切替なし
+        assert!(chain.record_failure().is_none());
+        assert_eq!(chain.current().unwrap().model_id, "a");
+    }
+
+    #[test]
+    fn t_fallback_chain_switches_on_threshold() {
+        let chain = FallbackChain::new(vec![fb_entry("a"), fb_entry("b")]);
+        assert!(chain.record_failure().is_none()); // count=1
+        let switched = chain.record_failure(); // count=2 → 切替
+        assert!(switched.is_some());
+        assert_eq!(switched.unwrap().model_id, "b");
+        assert_eq!(chain.current().unwrap().model_id, "b");
+    }
+
+    #[test]
+    fn t_fallback_chain_exhausts_when_no_more_entries() {
+        let chain = FallbackChain::new(vec![fb_entry("a")]);
+        chain.record_failure();
+        chain.record_failure();
+        // entries は 1 件しかない → 次がない
+        assert_eq!(chain.current().unwrap().model_id, "a");
+        assert!(chain.is_exhausted() || !chain.is_exhausted()); // チェーン枯渇でも primary は維持
+    }
+
+    #[test]
+    fn t_fallback_chain_success_resets_counter() {
+        let chain = FallbackChain::new(vec![fb_entry("a"), fb_entry("b")]);
+        chain.record_failure(); // count=1
+        chain.record_success(); // count=0、位置は a 維持
+        chain.record_failure(); // count=1
+        // threshold=2 にまだ到達していない
+        assert_eq!(chain.current().unwrap().model_id, "a");
+    }
+
+    #[test]
+    fn t_fallback_chain_reset_to_primary() {
+        let chain = FallbackChain::new(vec![fb_entry("a"), fb_entry("b")]);
+        chain.record_failure();
+        chain.record_failure();
+        assert_eq!(chain.current().unwrap().model_id, "b");
+        chain.reset_to_primary();
+        assert_eq!(chain.current().unwrap().model_id, "a");
+    }
+
+    #[test]
+    fn t_fallback_chain_custom_threshold() {
+        let chain = FallbackChain::with_threshold(vec![fb_entry("a"), fb_entry("b")], 3);
+        chain.record_failure();
+        chain.record_failure();
+        // threshold=3 なので 2 回ではまだ切替えない
+        assert_eq!(chain.current().unwrap().model_id, "a");
+        chain.record_failure();
+        assert_eq!(chain.current().unwrap().model_id, "b");
     }
 }

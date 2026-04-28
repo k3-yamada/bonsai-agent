@@ -13,7 +13,7 @@ use bonsai_agent::config::{AppConfig, ServerBackend};
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::cache::CachedBackend;
 use bonsai_agent::runtime::http_agent::{shared_agent, short_agent};
-use bonsai_agent::runtime::inference::{LlmBackend, MockLlmBackend};
+use bonsai_agent::runtime::inference::{FallbackBackend, LlmBackend, MockLlmBackend};
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::ToolRegistry;
 use bonsai_agent::tools::arxiv::ArxivTool;
@@ -441,35 +441,75 @@ fn setup_mcp_server(
 /// バックエンド生成（モック/実機の分岐を統合）
 fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
     if ctx.mock {
-        Box::new(MockLlmBackend::new(
+        return Box::new(MockLlmBackend::new(
             (0..10000)
                 .map(|_| "モックモードです。".to_string())
                 .collect(),
-        ))
-    } else {
-        let backend = &ctx.app_config.model.backend;
-        let b = LlamaServerBackend::connect_with_params(
-            &ctx.server_url,
-            &ctx.app_config.model.model_id,
-            ctx.app_config.model.inference.clone(),
-        )
-        .with_mlx_compatible(*backend == ServerBackend::MlxLm)
-        .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
-        if !b.is_healthy() {
-            let backend_name = match backend {
-                ServerBackend::LlamaServer => "llama-server",
-                ServerBackend::MlxLm => "mlx-lm",
-                ServerBackend::BitNet => "bitnet.cpp",
-            };
-            eprintln!(
-                "エラー: {} ({}) に接続できません。",
-                backend_name, ctx.server_url
-            );
-            eprintln!("--mock フラグでモックモードを使用するか、サーバーを起動してください。");
+        ));
+    }
+
+    // Step 12: フォールバックチェーンが設定されていれば FallbackBackend で wrap
+    if let Some(chain) = ctx.app_config.fallback_chain.build_chain() {
+        let sse_timeout = ctx.app_config.model.sse_chunk_timeout_secs;
+        let inference = &ctx.app_config.model.inference;
+        let mut backends: std::collections::HashMap<String, Box<dyn LlmBackend>> =
+            std::collections::HashMap::new();
+        let mut at_least_one_healthy = false;
+        for entry in chain.entries() {
+            let mlx_compat = entry.backend == ServerBackend::MlxLm;
+            let b = LlamaServerBackend::connect_with_params(
+                &entry.server_url,
+                &entry.model_id,
+                inference.clone(),
+            )
+            .with_mlx_compatible(mlx_compat)
+            .with_sse_timeout(sse_timeout);
+            if b.is_healthy() {
+                at_least_one_healthy = true;
+            } else {
+                eprintln!(
+                    "[fallback] 警告: エントリ {:?}/{} ({}) は応答していません。フォールバック対象として登録のみ続行。",
+                    entry.backend, entry.model_id, entry.server_url
+                );
+            }
+            backends.insert(FallbackBackend::key_for(entry), Box::new(b));
+        }
+        if !at_least_one_healthy {
+            eprintln!("エラー: フォールバックチェーン内のどのバックエンドにも接続できません。");
+            eprintln!("--mock を指定するか、少なくとも 1 つのサーバーを起動してください。");
             std::process::exit(1);
         }
-        Box::new(b)
+        eprintln!(
+            "[fallback] FallbackBackend を構築しました（{} entries、threshold={}）",
+            chain.entries().len(),
+            ctx.app_config.fallback_chain.max_failures.unwrap_or(2),
+        );
+        return Box::new(FallbackBackend::new(chain, backends));
     }
+
+    // 単一バックエンド経路（既存）
+    let backend = &ctx.app_config.model.backend;
+    let b = LlamaServerBackend::connect_with_params(
+        &ctx.server_url,
+        &ctx.app_config.model.model_id,
+        ctx.app_config.model.inference.clone(),
+    )
+    .with_mlx_compatible(*backend == ServerBackend::MlxLm)
+    .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
+    if !b.is_healthy() {
+        let backend_name = match backend {
+            ServerBackend::LlamaServer => "llama-server",
+            ServerBackend::MlxLm => "mlx-lm",
+            ServerBackend::BitNet => "bitnet.cpp",
+        };
+        eprintln!(
+            "エラー: {} ({}) に接続できません。",
+            backend_name, ctx.server_url
+        );
+        eprintln!("--mock フラグでモックモードを使用するか、サーバーを起動してください。");
+        std::process::exit(1);
+    }
+    Box::new(b)
 }
 
 // --- モードハンドラ ---

@@ -21,6 +21,38 @@ pub struct AppConfig {
     pub advisor: AdvisorSettings,
     #[serde(default)]
     pub experiment: ExperimentConfig,
+    #[serde(default)]
+    pub fallback_chain: FallbackChainSettings,
+}
+
+/// メイン推論フォールバックチェーンの設定（Step 12、opt-in）
+///
+/// `entries` が空ならフォールバックは無効、設定されていれば連続失敗時に
+/// 順次切替する `FallbackChain` を構築する。`AdvisorSettings` の backend
+/// フォールバック（advice 専用）とは独立。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FallbackChainSettings {
+    /// 連続失敗 N 回で次のエントリへ切替（デフォルト 2）
+    pub max_failures: Option<usize>,
+    /// プライマリ + フォールバック先のリスト（先頭がプライマリ）
+    pub entries: Vec<crate::runtime::model_router::FallbackEntry>,
+}
+
+impl FallbackChainSettings {
+    /// 設定値からランタイム用 `FallbackChain` を構築。
+    ///
+    /// `entries` が空なら `None`（フォールバック無効）。
+    pub fn build_chain(&self) -> Option<crate::runtime::model_router::FallbackChain> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let threshold = self.max_failures.unwrap_or(2);
+        Some(crate::runtime::model_router::FallbackChain::with_threshold(
+            self.entries.clone(),
+            threshold,
+        ))
+    }
 }
 
 /// アドバイザー設定（config.toml向け、AdvisorConfig::default()ベース）
@@ -817,5 +849,67 @@ model_id = "bitnet-3b"
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.model.backend, ServerBackend::BitNet);
         assert_eq!(config.model.server_url, "http://localhost:8090");
+    }
+
+    // ─── Step 12 FallbackChainSettings tests ──────────────────────────
+
+    #[test]
+    fn t_fallback_chain_default_is_empty() {
+        let config = AppConfig::default();
+        assert!(config.fallback_chain.entries.is_empty());
+        assert!(config.fallback_chain.build_chain().is_none());
+    }
+
+    #[test]
+    fn t_fallback_chain_parse_from_toml() {
+        let toml_str = r#"
+[fallback_chain]
+max_failures = 3
+
+[[fallback_chain.entries]]
+backend = "mlx-lm"
+model_id = "ternary-bonsai-8b"
+server_url = "http://localhost:8000"
+
+[[fallback_chain.entries]]
+backend = "llama-server"
+model_id = "bonsai-8b-gguf"
+server_url = "http://localhost:8080"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.fallback_chain.entries.len(), 2);
+        assert_eq!(config.fallback_chain.max_failures, Some(3));
+        assert_eq!(config.fallback_chain.entries[0].backend, ServerBackend::MlxLm);
+        assert_eq!(
+            config.fallback_chain.entries[1].backend,
+            ServerBackend::LlamaServer
+        );
+    }
+
+    #[test]
+    fn t_fallback_chain_build_chain_uses_threshold() {
+        let toml_str = r#"
+[fallback_chain]
+max_failures = 5
+
+[[fallback_chain.entries]]
+backend = "mlx-lm"
+model_id = "primary"
+server_url = "http://localhost:8000"
+
+[[fallback_chain.entries]]
+backend = "bitnet"
+model_id = "fallback"
+server_url = "http://localhost:8090"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        let chain = config.fallback_chain.build_chain().expect("should build");
+        // 5 回未満では切替しない
+        for _ in 0..4 {
+            chain.record_failure();
+        }
+        assert_eq!(chain.current().unwrap().model_id, "primary");
+        chain.record_failure(); // 5 回目で切替
+        assert_eq!(chain.current().unwrap().model_id, "fallback");
     }
 }
