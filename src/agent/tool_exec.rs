@@ -4,7 +4,7 @@
 //! ツール呼び出しの実行・並列化・結果反映を担う。
 
 use crate::agent::conversation::{Message, Session};
-use crate::agent::error_recovery::CircuitBreaker;
+use crate::agent::error_recovery::{CircuitBreaker, MultiFileEditCycleDetector};
 use crate::agent::event_store::EventType;
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::MemoryStore;
@@ -167,6 +167,36 @@ pub(crate) fn apply_tool_result(
     }
 }
 
+/// 編集ツール呼出から file_path を抽出
+///
+/// `file_write`/`multi_edit` のみ対象。`args["file_path"]` を返す。
+/// MultiEdit のように複数 path を扱うツールは args["file_path"] 単一値前提。
+fn extract_edit_path(name: &str, args: &serde_json::Value) -> Option<String> {
+    if name != "file_write" && name != "multi_edit" {
+        return None;
+    }
+    args.get("file_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// 成功した編集ツール呼出から path を抽出して cycle_detector に記録、
+/// 検出時 nudge を session に system message として追加する
+fn record_edit_and_nudge(
+    name: &str,
+    args: &serde_json::Value,
+    cycle_detector: &mut MultiFileEditCycleDetector,
+    session: &mut Session,
+) {
+    let Some(path) = extract_edit_path(name, args) else {
+        return;
+    };
+    if let Some(nudge) = cycle_detector.record_and_check(&path) {
+        log_event(LogLevel::Warn, "edit_cycle", &nudge);
+        session.add_message(Message::system(&nudge));
+    }
+}
+
 /// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
 pub(crate) fn execute_validated_calls(
     calls: &[ValidatedCall<'_>],
@@ -175,6 +205,7 @@ pub(crate) fn execute_validated_calls(
     secrets_filter: &SecretsFilter,
     store: Option<&MemoryStore>,
     cache: &mut ToolResultCache,
+    cycle_detector: &mut MultiFileEditCycleDetector,
 ) -> Vec<String> {
     let mut step_tools: Vec<String> = Vec::new();
     let mut i = 0;
@@ -252,7 +283,12 @@ pub(crate) fn execute_validated_calls(
             }
         }
         if i < calls.len() && !calls[i].is_read_only {
-            let r = execute_single_call(&calls[i]);
+            let write_call = &calls[i];
+            let r = execute_single_call(write_call);
+            // Step 11: 書き込み成功時に cycle 検出
+            if !r.is_error {
+                record_edit_and_nudge(&r.name, &write_call.coerced_args, cycle_detector, session);
+            }
             apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
             if !r.is_error {
                 step_tools.push(r.name);

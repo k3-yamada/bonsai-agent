@@ -7,7 +7,8 @@ use anyhow::Result;
 
 use crate::agent::conversation::{Message, Role, Session};
 use crate::agent::error_recovery::{
-    CircuitBreaker, FailureMode, LoopDetector, ParseErrorDetail, RecoveryAction, decide_recovery,
+    CircuitBreaker, FailureMode, LoopDetector, MultiFileEditCycleDetector, ParseErrorDetail,
+    RecoveryAction, decide_recovery,
 };
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
@@ -20,6 +21,7 @@ use super::state::{StepContext, StepOutcome};
 use super::support::build_answer;
 
 /// エージェントの1ステップを実行する（テスト容易性のためループの内側を分離）
+#[allow(clippy::too_many_arguments)]
 pub fn execute_step(
     session: &mut Session,
     ctx: &StepContext<'_>,
@@ -27,6 +29,7 @@ pub fn execute_step(
     loop_detector: &mut LoopDetector,
     attempt: usize,
     tool_cache: &mut ToolResultCache,
+    cycle_detector: &mut MultiFileEditCycleDetector,
 ) -> Result<StepOutcome> {
     if ctx.cancel.is_cancelled() {
         return Ok(StepOutcome::Aborted("キャンセルされました".to_string()));
@@ -176,6 +179,7 @@ pub fn execute_step(
         ctx.secrets_filter,
         ctx.store,
         tool_cache,
+        cycle_detector,
     );
     Ok(StepOutcome::Continue(step_tools))
 }

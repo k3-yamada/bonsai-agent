@@ -6,7 +6,9 @@
 //! ライフタイム伝播注意: `LoopState<'a>`/`StepContext<'a>` は
 //! `MiddlewareChain<'a>` 経由で借用元のミドルウェアにライフタイムを束縛する。
 
-use crate::agent::error_recovery::{CircuitBreaker, LoopDetector, TrialSummary};
+use crate::agent::error_recovery::{
+    CircuitBreaker, LoopDetector, MultiFileEditCycleDetector, TrialSummary,
+};
 use crate::agent::middleware::MiddlewareChain;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
@@ -57,6 +59,8 @@ pub struct LoopState<'a> {
     pub tool_cache: ToolResultCache,
     /// 試行サマリー記憶（GrandCode知見: 失敗履歴を保持し再計画時に注入）
     pub trial_summary: TrialSummary,
+    /// 複数ファイル交互編集検出（Step 11、macOS26/Agent知見）
+    pub cycle_detector: MultiFileEditCycleDetector,
 }
 
 impl<'a> LoopState<'a> {
@@ -73,6 +77,7 @@ impl<'a> LoopState<'a> {
             middleware_chain: MiddlewareChain::default(),
             tool_cache: ToolResultCache::new(),
             trial_summary: TrialSummary::default(),
+            cycle_detector: MultiFileEditCycleDetector::default(),
         }
     }
 }

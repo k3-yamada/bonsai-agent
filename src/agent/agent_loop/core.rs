@@ -218,6 +218,7 @@ pub fn run_agent_loop_with_session(
             &mut state.loop_detector,
             iteration,
             &mut state.tool_cache,
+            &mut state.cycle_detector,
         )?;
 
         let duration_ms = step_start.elapsed().as_millis() as u64;

@@ -750,6 +750,94 @@ impl Default for LoopDetector {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// MultiFileEditCycleDetector（Step 11 — 複数ファイル間の交互編集検出）
+// ──────────────────────────────────────────────────────────────────────
+
+/// 複数ファイル間の編集サイクル検出器（macOS26/Agent ★★ 候補 A）
+///
+/// 過去 N ターンで編集したファイルパスを window で記録し、2-3 ファイルが
+/// それぞれ 2 回以上出現すると cycle として検出する。
+///
+/// 既存 `LoopDetector` は同一 tool_call hash のみ検出するため、
+/// 「A 編集 → B 編集 → A 編集 → B 編集」のような交互編集は検出されない。
+/// 本検出器がそのギャップを埋める。
+#[derive(Debug)]
+pub struct MultiFileEditCycleDetector {
+    recent_paths: std::collections::VecDeque<String>,
+    window: usize,
+    min_files: usize,
+    max_files: usize,
+}
+
+impl MultiFileEditCycleDetector {
+    pub fn new(window: usize) -> Self {
+        Self {
+            recent_paths: std::collections::VecDeque::with_capacity(window),
+            window,
+            min_files: 2,
+            max_files: 3,
+        }
+    }
+
+    /// パスを記録し、cycle 検出時 nudge 文字列を返す
+    pub fn record_and_check(&mut self, path: &str) -> Option<String> {
+        self.recent_paths.push_back(path.to_string());
+        if self.recent_paths.len() > self.window {
+            self.recent_paths.pop_front();
+        }
+        // 最低 4 ターン経過後に判定
+        if self.recent_paths.len() < 4 {
+            return None;
+        }
+        let mut counts: HashMap<&String, usize> = HashMap::new();
+        for p in &self.recent_paths {
+            *counts.entry(p).or_default() += 1;
+        }
+        let unique = counts.len();
+        if unique < self.min_files || unique > self.max_files {
+            return None;
+        }
+        // 全てが 2 回以上出現していることを確認
+        if !counts.values().all(|&c| c >= 2) {
+            return None;
+        }
+        let names: Vec<String> = counts
+            .keys()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(p)
+                    .to_string()
+            })
+            .collect();
+        let nudge = format!(
+            "[edit-cycle] ファイル {} を交互に編集しています — 進捗が見られません。\n\
+             ステップバック: 全ファイルを再読込 → 全体計画を立てる → 一括編集してください。\n\
+             まだ衝突する場合は、より大きな構造変更が必要かもしれません。",
+            names.join(", ")
+        );
+        // 1 回 nudge を出したら window をクリア（連続 nudge 防止）
+        self.recent_paths.clear();
+        Some(nudge)
+    }
+
+    pub fn reset(&mut self) {
+        self.recent_paths.clear();
+    }
+
+    pub fn window(&self) -> usize {
+        self.window
+    }
+}
+
+impl Default for MultiFileEditCycleDetector {
+    fn default() -> Self {
+        Self::new(6)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,5 +1362,62 @@ mod tests {
         let fb = StructuredFeedback::from_trial_summary(&ts, "タスク");
         assert!(fb.confidence <= 1.0);
         assert!(fb.confidence >= 0.0);
+    }
+
+    // ─── Step 11 MultiFileEditCycleDetector tests ─────────────────────
+
+    #[test]
+    fn t_cycle_detector_no_cycle_under_4_steps() {
+        let mut det = MultiFileEditCycleDetector::new(6);
+        assert!(det.record_and_check("a.rs").is_none());
+        assert!(det.record_and_check("b.rs").is_none());
+        assert!(det.record_and_check("a.rs").is_none()); // 3 turn
+    }
+
+    #[test]
+    fn t_cycle_detector_detects_alternating() {
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("src/a.rs");
+        det.record_and_check("src/b.rs");
+        det.record_and_check("src/a.rs");
+        let nudge = det.record_and_check("src/b.rs"); // 4 turn、A=2 B=2
+        assert!(nudge.is_some(), "alternating A/B/A/B should be detected");
+        let msg = nudge.unwrap();
+        assert!(msg.contains("a.rs"));
+        assert!(msg.contains("b.rs"));
+    }
+
+    #[test]
+    fn t_cycle_detector_skips_too_many_files() {
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("c.rs");
+        det.record_and_check("d.rs"); // 4 unique > max_files=3
+        // 進捗ありの広範囲編集として nudge は出さない
+        assert!(det.record_and_check("a.rs").is_none());
+    }
+
+    #[test]
+    fn t_cycle_detector_resets_after_nudge() {
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("a.rs");
+        let _ = det.record_and_check("b.rs"); // nudge 出る、window クリア
+        // 次の判定はまた 4 ターン後まで None
+        assert!(det.record_and_check("a.rs").is_none());
+    }
+
+    #[test]
+    fn t_cycle_detector_three_files_each_twice() {
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("c.rs");
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        let nudge = det.record_and_check("c.rs"); // 6 turn、各 2 回
+        assert!(nudge.is_some(), "A/B/C/A/B/C should be detected");
     }
 }

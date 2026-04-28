@@ -929,12 +929,22 @@ fn test_repo_map_is_read_only() {
 // テスト: execute_validated_calls — 空リストでパニックしない
 #[test]
 fn test_execute_validated_calls_empty() {
+    use crate::agent::error_recovery::MultiFileEditCycleDetector;
     use crate::safety::secrets::SecretsFilter;
     let mut session = Session::new();
     let mut cb = CircuitBreaker::default();
     let sf = SecretsFilter::default();
     let mut cache = ToolResultCache::new();
-    let result = execute_validated_calls(&[], &mut session, &mut cb, &sf, None, &mut cache);
+    let mut cycle = MultiFileEditCycleDetector::default();
+    let result = execute_validated_calls(
+        &[],
+        &mut session,
+        &mut cb,
+        &sf,
+        None,
+        &mut cache,
+        &mut cycle,
+    );
     assert!(result.is_empty());
 }
 
