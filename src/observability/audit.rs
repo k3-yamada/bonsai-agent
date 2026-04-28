@@ -58,6 +58,15 @@ pub enum AuditAction {
         /// HTTP呼出時間（ms、ローカルは0）
         duration_ms: u64,
     },
+    /// Step 11 複数ファイル交互編集 nudge 発火（観測用、Phase 1.1）
+    MultiFileNudge {
+        /// 検出ウィンドウ内のファイル名（basename のみ、フルパスではない）
+        files: Vec<String>,
+        /// 発火時点での累積発火回数（セッション横断で集計可能）
+        fire_count: usize,
+        /// nudge 文字列の長さ（システムメッセージ追加トークン量の指標）
+        nudge_len: usize,
+    },
 }
 
 /// 監査ログライター（append-only）
@@ -80,6 +89,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::StepOutcome { .. } => "step_outcome",
             AuditAction::AdvisorCall { .. } => "advisor_call",
             AuditAction::TaskComplete { .. } => "task_complete",
+            AuditAction::MultiFileNudge { .. } => "multi_file_nudge",
         };
         let action_data = serde_json::to_string(action)?;
 

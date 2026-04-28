@@ -55,7 +55,10 @@ pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     let _ = std::fs::write(&overflow_path, output);
     format!(
         "{}...\n[全文保存: {} ({}文字、表示{}文字)]",
-        truncated, overflow_path, output.len(), safe_end
+        truncated,
+        overflow_path,
+        output.len(),
+        safe_end
     )
 }
 
@@ -120,8 +123,7 @@ pub(crate) fn apply_tool_result(
         store,
         &session.id,
         &EventType::ToolCallEnd,
-        &serde_json::json!({ "tool": r.name, "success": r.success && !r.is_error })
-            .to_string(),
+        &serde_json::json!({ "tool": r.name, "success": r.success && !r.is_error }).to_string(),
         None,
     );
 
@@ -182,19 +184,55 @@ fn extract_edit_path(name: &str, args: &serde_json::Value) -> Option<String> {
 
 /// 成功した編集ツール呼出から path を抽出して cycle_detector に記録、
 /// 検出時 nudge を session に system message として追加する
+///
+/// `store` 指定時は AuditAction::MultiFileNudge も記録（Phase 1.1 観測用）。
 fn record_edit_and_nudge(
     name: &str,
     args: &serde_json::Value,
     cycle_detector: &mut MultiFileEditCycleDetector,
     session: &mut Session,
+    store: Option<&MemoryStore>,
 ) {
     let Some(path) = extract_edit_path(name, args) else {
         return;
     };
     if let Some(nudge) = cycle_detector.record_and_check(&path) {
         log_event(LogLevel::Warn, "edit_cycle", &nudge);
+        let files = parse_nudge_files(&nudge);
+        let nudge_len = nudge.len();
         session.add_message(Message::system(&nudge));
+        if let Some(s) = store {
+            let audit = AuditLog::new(s.conn());
+            audit
+                .log(
+                    Some(&session.id),
+                    &AuditAction::MultiFileNudge {
+                        files,
+                        fire_count: cycle_detector.nudge_fire_count(),
+                        nudge_len,
+                    },
+                )
+                .ok();
+        }
     }
+}
+
+/// nudge 文字列の "ファイル <names> を交互に編集" から basename リストを抽出
+fn parse_nudge_files(nudge: &str) -> Vec<String> {
+    let prefix = "ファイル ";
+    let suffix = " を交互に";
+    let Some(start) = nudge.find(prefix) else {
+        return Vec::new();
+    };
+    let after = &nudge[start + prefix.len()..];
+    let Some(end) = after.find(suffix) else {
+        return Vec::new();
+    };
+    after[..end]
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
@@ -287,7 +325,13 @@ pub(crate) fn execute_validated_calls(
             let r = execute_single_call(write_call);
             // Step 11: 書き込み成功時に cycle 検出
             if !r.is_error {
-                record_edit_and_nudge(&r.name, &write_call.coerced_args, cycle_detector, session);
+                record_edit_and_nudge(
+                    &r.name,
+                    &write_call.coerced_args,
+                    cycle_detector,
+                    session,
+                    store,
+                );
             }
             apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
             if !r.is_error {
@@ -481,3 +525,107 @@ mod truncation_tests {
     }
 }
 
+#[cfg(test)]
+mod nudge_audit_tests {
+    use super::*;
+    use crate::agent::error_recovery::MultiFileEditCycleDetector;
+    use crate::memory::store::MemoryStore;
+
+    #[test]
+    fn t_parse_nudge_files_extracts_basenames() {
+        let nudge =
+            "[edit-cycle] ファイル a.rs, b.rs を交互に編集しています — 進捗が見られません。";
+        let files = parse_nudge_files(nudge);
+        assert_eq!(files, vec!["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn t_parse_nudge_files_handles_three_files() {
+        let nudge = "[edit-cycle] ファイル a.rs, b.rs, c.rs を交互に編集しています — ...";
+        let files = parse_nudge_files(nudge);
+        assert_eq!(files, vec!["a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn t_parse_nudge_files_returns_empty_on_unmatched() {
+        let files = parse_nudge_files("不明な形式の文字列");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn t_record_edit_and_nudge_logs_audit_action_when_cycle_detected() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        session.id = "test-session".to_string();
+        let mut det = MultiFileEditCycleDetector::new(6);
+
+        // 4 ターン交互編集で cycle 発火
+        let calls = [
+            ("file_write", "/tmp/a.rs"),
+            ("file_write", "/tmp/b.rs"),
+            ("file_write", "/tmp/a.rs"),
+            ("file_write", "/tmp/b.rs"),
+        ];
+        for (name, path) in &calls {
+            let args = serde_json::json!({"file_path": path});
+            record_edit_and_nudge(name, &args, &mut det, &mut session, Some(&store));
+        }
+
+        // AuditLog に MultiFileNudge が 1 件記録されているはず
+        let audit = AuditLog::new(store.conn());
+        let entries = audit.recent(10).unwrap();
+        let nudge_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.action_type == "multi_file_nudge")
+            .collect();
+        assert_eq!(nudge_entries.len(), 1, "1 件 nudge audit が記録されるべき");
+
+        let entry = &nudge_entries[0];
+        assert_eq!(entry.session_id.as_deref(), Some("test-session"));
+        let v: serde_json::Value = serde_json::from_str(&entry.action_data).unwrap();
+        assert_eq!(v["type"], "MultiFileNudge");
+        assert_eq!(v["fire_count"], 1);
+        assert!(v["nudge_len"].as_u64().unwrap() > 0);
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn t_record_edit_and_nudge_no_audit_without_store() {
+        let mut session = Session::new();
+        let mut det = MultiFileEditCycleDetector::new(6);
+        // store=None でも panic せず動作する（既存動作の後方互換）
+        let calls = [
+            ("file_write", "/tmp/a.rs"),
+            ("file_write", "/tmp/b.rs"),
+            ("file_write", "/tmp/a.rs"),
+            ("file_write", "/tmp/b.rs"),
+        ];
+        for (name, path) in &calls {
+            let args = serde_json::json!({"file_path": path});
+            record_edit_and_nudge(name, &args, &mut det, &mut session, None);
+        }
+        // session には system message が追加されているが、audit log は触れていない
+        assert_eq!(det.nudge_fire_count(), 1);
+    }
+
+    #[test]
+    fn t_record_edit_and_nudge_skips_non_edit_tools() {
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let mut det = MultiFileEditCycleDetector::new(6);
+        // file_read は編集ツールではないので何もしない
+        for _ in 0..6 {
+            let args = serde_json::json!({"file_path": "/tmp/a.rs"});
+            record_edit_and_nudge("file_read", &args, &mut det, &mut session, Some(&store));
+        }
+        let audit = AuditLog::new(store.conn());
+        let entries = audit.recent(10).unwrap();
+        let nudge_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.action_type == "multi_file_nudge")
+            .collect();
+        assert!(nudge_entries.is_empty());
+        assert_eq!(det.nudge_fire_count(), 0);
+    }
+}

@@ -768,6 +768,8 @@ pub struct MultiFileEditCycleDetector {
     window: usize,
     min_files: usize,
     max_files: usize,
+    /// nudge を出した累積回数。reset() でクリアされず、セッション横断集計に使用。
+    nudge_fire_count: usize,
 }
 
 impl MultiFileEditCycleDetector {
@@ -777,7 +779,13 @@ impl MultiFileEditCycleDetector {
             window,
             min_files: 2,
             max_files: 3,
+            nudge_fire_count: 0,
         }
+    }
+
+    /// nudge 発火の累積回数を返す（観測用、Phase 1.1）
+    pub fn nudge_fire_count(&self) -> usize {
+        self.nudge_fire_count
     }
 
     /// パスを記録し、cycle 検出時 nudge 文字列を返す
@@ -820,6 +828,8 @@ impl MultiFileEditCycleDetector {
         );
         // 1 回 nudge を出したら window をクリア（連続 nudge 防止）
         self.recent_paths.clear();
+        // 観測カウンタ更新（reset() でクリアしない、累積保持）
+        self.nudge_fire_count += 1;
         Some(nudge)
     }
 
@@ -1295,7 +1305,12 @@ mod tests {
     fn t_structured_feedback_from_trial_summary() {
         let mut ts = TrialSummary::new(10);
         ts.record_failure("shell", r#"{"command":"ls"}"#, "permission denied", 1);
-        ts.record_failure("shell", r#"{"command":"cat /etc/shadow"}"#, "permission denied", 2);
+        ts.record_failure(
+            "shell",
+            r#"{"command":"cat /etc/shadow"}"#,
+            "permission denied",
+            2,
+        );
         let fb = StructuredFeedback::from_trial_summary(&ts, "ファイル一覧を取得する");
         assert!(fb.confidence < 1.0);
         assert!(!fb.evaluation.is_empty());
@@ -1419,5 +1434,65 @@ mod tests {
         det.record_and_check("b.rs");
         let nudge = det.record_and_check("c.rs"); // 6 turn、各 2 回
         assert!(nudge.is_some(), "A/B/C/A/B/C should be detected");
+    }
+
+    // ─── Step 11 観測カウンタ tests（Phase 1.1） ──────────────────────
+
+    #[test]
+    fn t_cycle_detector_nudge_fire_count_starts_zero() {
+        // 初期化直後の発火カウンタはゼロ
+        let det = MultiFileEditCycleDetector::default();
+        assert_eq!(det.nudge_fire_count(), 0);
+    }
+
+    #[test]
+    fn t_cycle_detector_nudge_fire_count_increments_on_detection() {
+        // cycle 検出時に発火カウンタが +1 される
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("a.rs");
+        let _ = det.record_and_check("b.rs"); // 検出
+        assert_eq!(det.nudge_fire_count(), 1);
+    }
+
+    #[test]
+    fn t_cycle_detector_nudge_fire_count_does_not_increment_without_detection() {
+        // 検出されないターンではカウンタは増えない
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("a.rs"); // 3 ターン、検出なし
+        assert_eq!(det.nudge_fire_count(), 0);
+    }
+
+    #[test]
+    fn t_cycle_detector_nudge_fire_count_reset_preserves_counter() {
+        // reset() は window をクリアするが、発火カウンタは累積保持
+        // （セッション横断の集計を可能にするため）
+        let mut det = MultiFileEditCycleDetector::new(6);
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("a.rs");
+        let _ = det.record_and_check("b.rs"); // 検出 → カウンタ 1
+        det.reset();
+        assert_eq!(det.nudge_fire_count(), 1, "reset()は累積カウンタを保持する");
+    }
+
+    #[test]
+    fn t_cycle_detector_nudge_fire_count_increments_multiple_times() {
+        // 複数回発火するとカウンタも累積する
+        let mut det = MultiFileEditCycleDetector::new(6);
+        // 1 回目
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("a.rs");
+        let _ = det.record_and_check("b.rs"); // 1 回目
+        // 2 回目（window が clear されているので再度 4 ターン必要）
+        det.record_and_check("a.rs");
+        det.record_and_check("b.rs");
+        det.record_and_check("a.rs");
+        let _ = det.record_and_check("b.rs"); // 2 回目
+        assert_eq!(det.nudge_fire_count(), 2);
     }
 }
