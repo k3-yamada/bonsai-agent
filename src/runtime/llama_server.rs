@@ -9,6 +9,7 @@ use anyhow::Result;
 use crate::agent::conversation::Message;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
+use crate::runtime::http_agent::{shared_agent, short_agent, streaming_agent};
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 use crate::tools::ToolSchema;
 
@@ -72,13 +73,14 @@ impl LlamaServerBackend {
     ///
     /// llama-serverは/health、mlx-lm serverは/v1/modelsで応答する。
     pub fn is_healthy(&self) -> bool {
+        let agent = short_agent();
         let health_url = format!("{}/health", self.base_url);
-        if ureq::get(&health_url).call().is_ok() {
+        if agent.get(&health_url).call().is_ok() {
             return true;
         }
         // mlx-lm server は /health 未対応 → /v1/models で代替
         let models_url = format!("{}/v1/models", self.base_url);
-        ureq::get(&models_url).call().is_ok()
+        agent.get(&models_url).call().is_ok()
     }
 
     /// ヘルスチェック+待機リトライ（macOS26/Agent知見: 死活監視パターン）
@@ -278,7 +280,8 @@ impl LlamaServerBackend {
         // ストリーミングを無効化してフォールバック
         body["stream"] = serde_json::json!(false);
 
-        let response: serde_json::Value = ureq::post(&url)
+        let response: serde_json::Value = shared_agent()
+            .post(&url)
             .header("Content-Type", "application/json")
             .send_json(&body)?
             .body_mut()
@@ -329,14 +332,8 @@ impl LlmBackend for LlamaServerBackend {
         let start = Instant::now();
 
         // ストリーミングリクエスト送信
-        // SSEチャンクタイムアウト（OpenCode知見: wrapSSE的保護）
-        let timeout = if self.sse_chunk_timeout_secs > 0 {
-            Some(std::time::Duration::from_secs(self.sse_chunk_timeout_secs))
-        } else {
-            None
-        };
-        let config = ureq::config::Config::builder().timeout_recv_body(timeout).build();
-        let agent = ureq::Agent::new_with_config(config);
+        // SSEチャンクタイムアウト（OpenCode知見: wrapSSE的保護）+ socket-level deadline (Step 13)
+        let agent = streaming_agent(self.sse_chunk_timeout_secs);
         let response = match agent.post(&url)
             .header("Content-Type", "application/json")
             .send_json(&body)
@@ -452,7 +449,8 @@ impl LlamaServerProcess {
                 anyhow::bail!("サーバーの起動がタイムアウト（{}秒）", timeout.as_secs());
             }
             // /health → /v1/models フォールバック（MLX対応）
-            if ureq::get(&health_url).call().is_ok() || ureq::get(&models_url).call().is_ok() {
+            let agent = short_agent();
+            if agent.get(&health_url).call().is_ok() || agent.get(&models_url).call().is_ok() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(500));

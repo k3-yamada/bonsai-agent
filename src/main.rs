@@ -12,6 +12,7 @@ use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::{AppConfig, ServerBackend};
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::cache::CachedBackend;
+use bonsai_agent::runtime::http_agent::{shared_agent, short_agent};
 use bonsai_agent::runtime::inference::{LlmBackend, MockLlmBackend};
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::ToolRegistry;
@@ -265,8 +266,9 @@ fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
     let health_url = format!("{}/health", ctx.server_url);
     let models_url = format!("{}/v1/models", ctx.server_url);
 
-    let health_ok = ureq::get(&health_url).call().is_ok();
-    let models_resp = ureq::get(&models_url).call();
+    let agent = short_agent();
+    let health_ok = agent.get(&health_url).call().is_ok();
+    let models_resp = agent.get(&models_url).call();
 
     if health_ok {
         println!("  /health: ✓ OK");
@@ -298,7 +300,7 @@ fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
     }
 
     // テストプロンプト
-    if !health_ok && ureq::get(&models_url).call().is_err() {
+    if !health_ok && short_agent().get(&models_url).call().is_err() {
         println!("\nサーバーに接続できないため、テストプロンプトをスキップします。");
         return Ok(());
     }
@@ -313,7 +315,8 @@ fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
     });
 
     let start = std::time::Instant::now();
-    match ureq::post(&chat_url)
+    match shared_agent()
+        .post(&chat_url)
         .header("Content-Type", "application/json")
         .send_json(&request_body)
     {

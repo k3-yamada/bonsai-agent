@@ -30,7 +30,7 @@ impl TypedTool for WebSearchTool {
             urlencoding(query)
         );
 
-        match ureq::get(&url).call() {
+        match crate::runtime::http_agent::shared_agent().get(&url).call() {
             Ok(mut response) => {
                 let body: serde_json::Value = response.body_mut().read_json()?;
                 let result = format_ddg_response(&body, query);
