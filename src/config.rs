@@ -341,7 +341,9 @@ pub struct MemoryConfig {
     pub skill_promotion_threshold: usize,
 }
 
-fn default_sse_timeout() -> u64 { 60 }
+fn default_sse_timeout() -> u64 {
+    60
+}
 
 impl Default for ModelConfig {
     fn default() -> Self {
@@ -784,7 +786,6 @@ url = "http://localhost:3000/mcp"
         );
     }
 
-
     #[test]
     fn test_mcp_in_full_config_toml() {
         let toml_str = r#"
@@ -879,7 +880,10 @@ server_url = "http://localhost:8080"
         let config: AppConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.fallback_chain.entries.len(), 2);
         assert_eq!(config.fallback_chain.max_failures, Some(3));
-        assert_eq!(config.fallback_chain.entries[0].backend, ServerBackend::MlxLm);
+        assert_eq!(
+            config.fallback_chain.entries[0].backend,
+            ServerBackend::MlxLm
+        );
         assert_eq!(
             config.fallback_chain.entries[1].backend,
             ServerBackend::LlamaServer

@@ -211,7 +211,11 @@ impl<'a> SubAgentExecutor<'a> {
         let mut results = Vec::with_capacity(subtask_goals.len());
         for (i, goal) in subtask_goals.iter().enumerate() {
             if self.cancel.is_cancelled() {
-                log_event(LogLevel::Warn, "subagent", "キャンセルにより残りのサブタスクをスキップ");
+                log_event(
+                    LogLevel::Warn,
+                    "subagent",
+                    "キャンセルにより残りのサブタスクをスキップ",
+                );
                 break;
             }
 
@@ -280,9 +284,8 @@ impl<'a> SubAgentExecutor<'a> {
                             "subagent",
                             &format!("並列サブタスク {}/{}: {}", i + 1, total, goal),
                         );
-                        let local_store: Option<MemoryStore> = store_path
-                            .as_ref()
-                            .and_then(|p| MemoryStore::open(p).ok());
+                        let local_store: Option<MemoryStore> =
+                            store_path.as_ref().and_then(|p| MemoryStore::open(p).ok());
                         execute_single_subtask(
                             backend,
                             tools,
@@ -646,9 +649,7 @@ mod tests {
     #[test]
     fn test_cancellation_stops_subtasks() {
         let store = test_store();
-        let backend = MockLlmBackend::new(vec![
-            "サブタスク1完了".to_string(),
-        ]);
+        let backend = MockLlmBackend::new(vec!["サブタスク1完了".to_string()]);
         let tools = ToolRegistry::default();
         let path_guard = test_path_guard();
         let cancel = CancellationToken::new();
@@ -666,10 +667,7 @@ mod tests {
         );
 
         let result = executor
-            .execute(
-                "parent-1",
-                &["task1".to_string(), "task2".to_string()],
-            )
+            .execute("parent-1", &["task1".to_string(), "task2".to_string()])
             .unwrap();
         assert!(result.results.is_empty());
     }
@@ -762,16 +760,16 @@ mod tests {
         // 日本語依存マーカー検出 → false
         let cases = vec![
             vec!["タスクA".to_string(), "前の結果を使ってタスクB".to_string()],
-            vec!["上記の内容を元にまとめる".to_string(), "別タスク".to_string()],
+            vec![
+                "上記の内容を元にまとめる".to_string(),
+                "別タスク".to_string(),
+            ],
             vec!["最初にA".to_string(), "次にB".to_string()],
             vec!["ステップ1".to_string(), "ステップ2".to_string()],
             vec!["タスクα".to_string(), "その後にβ".to_string()],
         ];
         for goals in cases {
-            assert!(
-                !check_independence(&goals),
-                "依存マーカー含有: {goals:?}"
-            );
+            assert!(!check_independence(&goals), "依存マーカー含有: {goals:?}");
         }
     }
 
@@ -784,10 +782,7 @@ mod tests {
             vec!["first, compile".to_string(), "run tests".to_string()],
         ];
         for goals in cases {
-            assert!(
-                !check_independence(&goals),
-                "dep marker: {goals:?}"
-            );
+            assert!(!check_independence(&goals), "dep marker: {goals:?}");
         }
     }
 
@@ -798,7 +793,10 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let db_path = tmp.path().to_str().unwrap();
         let store = MemoryStore::open(db_path).unwrap();
-        assert!(store.path().is_some(), "file-backed store should expose path");
+        assert!(
+            store.path().is_some(),
+            "file-backed store should expose path"
+        );
 
         // 並列タスク2つ、それぞれの応答を事前準備
         let backend = MockLlmBackend::new(vec![
@@ -845,10 +843,7 @@ mod tests {
         let store = test_store();
         assert!(store.path().is_none());
 
-        let backend = MockLlmBackend::new(vec![
-            "A完了".to_string(),
-            "B完了".to_string(),
-        ]);
+        let backend = MockLlmBackend::new(vec!["A完了".to_string(), "B完了".to_string()]);
         let tools = ToolRegistry::default();
         let path_guard = test_path_guard();
         let cancel = CancellationToken::new();

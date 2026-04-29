@@ -81,9 +81,8 @@ impl MemoryStore {
 
     /// セッション関連データをリセット（ベンチマークのk回実行間で使用）
     pub fn reset_session_data(&self) -> Result<()> {
-        self.conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM sessions; DELETE FROM memories;",
-        )?;
+        self.conn
+            .execute_batch("DELETE FROM messages; DELETE FROM sessions; DELETE FROM memories;")?;
         Ok(())
     }
 
@@ -236,7 +235,13 @@ impl MemoryStore {
                 crate::agent::conversation::Role::Assistant => "assistant",
                 crate::agent::conversation::Role::Tool => "tool",
             };
-            stmt.execute(params![&session.id, role, &msg.content, &msg.tool_call_id, now])?;
+            stmt.execute(params![
+                &session.id,
+                role,
+                &msg.content,
+                &msg.tool_call_id,
+                now
+            ])?;
         }
         Ok(())
     }

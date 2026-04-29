@@ -98,12 +98,10 @@ impl ModelCapability {
     pub fn allowed_tools(&self) -> Option<&[&str]> {
         match self {
             ModelCapability::Full => None,
-            ModelCapability::EditFocused => Some(&[
-                "file_read", "file_write", "multi_edit", "repo_map", "shell",
-            ]),
-            ModelCapability::ReadExecute => Some(&[
-                "file_read", "repo_map", "shell", "git",
-            ]),
+            ModelCapability::EditFocused => {
+                Some(&["file_read", "file_write", "multi_edit", "repo_map", "shell"])
+            }
+            ModelCapability::ReadExecute => Some(&["file_read", "repo_map", "shell", "git"]),
         }
     }
 }
@@ -259,7 +257,9 @@ impl ToolRegistry {
     /// モデルCapabilityに基づくツールフィルタリング（OpenCode知見）
     pub fn select_for_capability(&self, capability: ModelCapability) -> Vec<&dyn Tool> {
         match capability.allowed_tools() {
-            Some(allowed) => self.tools.values()
+            Some(allowed) => self
+                .tools
+                .values()
                 .filter(|t| allowed.contains(&t.name()))
                 .map(|t| t.as_ref())
                 .collect(),
@@ -368,8 +368,11 @@ impl ToolRegistry {
         builtin.sort_by(sort_fn);
         mcp.sort_by(sort_fn);
 
-        let mut result: Vec<&dyn Tool> =
-            builtin.into_iter().take(builtin_max).map(|(t, _)| t).collect();
+        let mut result: Vec<&dyn Tool> = builtin
+            .into_iter()
+            .take(builtin_max)
+            .map(|(t, _)| t)
+            .collect();
         result.extend(mcp.into_iter().take(mcp_max).map(|(t, _)| t));
         result
     }
@@ -1235,7 +1238,10 @@ mod tests {
         // MCPツール（コロン付き名前）を追加
         reg.register(Box::new(DummyTool::new("fs:read_file", "ファイルを読む")));
         reg.register(Box::new(DummyTool::new("fs:write_file", "ファイルに書く")));
-        reg.register(Box::new(DummyTool::new("fs:list_dir", "ディレクトリを一覧")));
+        reg.register(Box::new(DummyTool::new(
+            "fs:list_dir",
+            "ディレクトリを一覧",
+        )));
         reg.register(Box::new(DummyTool::new("fs:search", "ファイルを検索")));
         reg.register(Box::new(DummyTool::new("db:query", "DBクエリ実行")));
         reg

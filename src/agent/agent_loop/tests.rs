@@ -1,6 +1,5 @@
 use anyhow::Result;
 
-use super::*;
 use super::advisor_inject::{
     AdvisorResolution, inject_planning_step, inject_replan_on_stall, inject_verification_step,
     log_advisor_call, resolve_advisor_prompt,
@@ -8,6 +7,7 @@ use super::advisor_inject::{
 use super::core::create_task_start_checkpoint;
 use super::outcome::{detect_task_complexity, handle_outcome};
 use super::support::{check_invariants, compute_output_hash};
+use super::*;
 
 use crate::agent::context_inject::inject_experience_context;
 use crate::agent::conversation::{Message, Role, Session};
@@ -345,8 +345,7 @@ fn test_load_soul_missing_is_none() {
 fn test_load_soul_from_explicit_path() {
     let path = format!("/tmp/bonsai-test-soul-{}.md", uuid::Uuid::new_v4());
     std::fs::write(&path, "私はテスト用ペルソナです").unwrap();
-    let result =
-        crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
+    let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
     assert!(result.is_some());
     assert!(result.unwrap().contains("ペルソナ"));
     std::fs::remove_file(&path).ok();
@@ -356,8 +355,7 @@ fn test_load_soul_from_explicit_path() {
 fn test_load_soul_empty_file_is_none() {
     let path = format!("/tmp/bonsai-test-soul-empty-{}.md", uuid::Uuid::new_v4());
     std::fs::write(&path, "   ").unwrap();
-    let result =
-        crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
+    let result = crate::agent::context_inject::load_soul(&Some(std::path::PathBuf::from(&path)));
     assert!(result.is_none());
     std::fs::remove_file(&path).ok();
 }
@@ -898,8 +896,7 @@ fn test_create_task_start_checkpoint_with_store() {
     // git stash が成功する場合（リポ内）は Some、失敗してもエラーなし
     if let Some(id) = id_opt {
         assert!(id > 0, "永続IDは正");
-        let loaded =
-            CheckpointManager::load_persisted(store.conn(), Some(&session.id)).unwrap();
+        let loaded = CheckpointManager::load_persisted(store.conn(), Some(&session.id)).unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(loaded[0].description.contains("auto-start"));
     }

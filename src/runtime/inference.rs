@@ -366,7 +366,10 @@ mod tests {
             let remaining = self.fail_remaining.load(Ordering::SeqCst);
             if remaining > 0 {
                 self.fail_remaining.fetch_sub(1, Ordering::SeqCst);
-                anyhow::bail!("flaky: forced failure ({remaining} remaining) for {}", self.id);
+                anyhow::bail!(
+                    "flaky: forced failure ({remaining} remaining) for {}",
+                    self.id
+                );
             }
             Ok(GenerateResult {
                 text: self.success_text.clone(),
@@ -388,10 +391,7 @@ mod tests {
         }
     }
 
-    fn build_fallback(
-        primary_fails: usize,
-        secondary_fails: usize,
-    ) -> FallbackBackend {
+    fn build_fallback(primary_fails: usize, secondary_fails: usize) -> FallbackBackend {
         let entries = vec![fb_entry("primary"), fb_entry("secondary")];
         let chain = FallbackChain::new(entries.clone());
         let mut backends: HashMap<String, Box<dyn LlmBackend>> = HashMap::new();
@@ -401,7 +401,11 @@ mod tests {
         );
         backends.insert(
             FallbackBackend::key_for(&entries[1]),
-            Box::new(FlakyBackend::new("secondary", secondary_fails, "from-secondary")),
+            Box::new(FlakyBackend::new(
+                "secondary",
+                secondary_fails,
+                "from-secondary",
+            )),
         );
         FallbackBackend::new(chain, backends)
     }

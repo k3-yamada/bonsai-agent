@@ -590,7 +590,9 @@ mod tests {
 
     struct BeforeInjectMw;
     impl Middleware for BeforeInjectMw {
-        fn name(&self) -> &str { "before_inject" }
+        fn name(&self) -> &str {
+            "before_inject"
+        }
         fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
             MiddlewareSignal::Ok
         }
@@ -601,7 +603,9 @@ mod tests {
 
     struct BeforeAbortMw;
     impl Middleware for BeforeAbortMw {
-        fn name(&self) -> &str { "before_abort" }
+        fn name(&self) -> &str {
+            "before_abort"
+        }
         fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
             MiddlewareSignal::Ok
         }
@@ -617,7 +621,12 @@ mod tests {
         let mut session = Session::new();
         let result = chain.run_before_step(&mut session, 0);
         assert!(result.is_none(), "Inject does not abort");
-        assert!(session.messages.iter().any(|m| m.content.contains("pre-step context")));
+        assert!(
+            session
+                .messages
+                .iter()
+                .any(|m| m.content.contains("pre-step context"))
+        );
     }
 
     #[test]
@@ -631,7 +640,9 @@ mod tests {
 
     struct DefaultBeforeMw;
     impl Middleware for DefaultBeforeMw {
-        fn name(&self) -> &str { "default_before" }
+        fn name(&self) -> &str {
+            "default_before"
+        }
         fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
             MiddlewareSignal::Ok
         }
@@ -656,6 +667,9 @@ mod tests {
         let mut session = Session::new();
         let result = chain.run_before_step(&mut session, 0);
         assert!(result.is_some(), "abort stops chain");
-        assert!(session.messages.is_empty(), "inject after abort not reached");
+        assert!(
+            session.messages.is_empty(),
+            "inject after abort not reached"
+        );
     }
 }

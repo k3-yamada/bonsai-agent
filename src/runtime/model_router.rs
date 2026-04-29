@@ -1071,7 +1071,9 @@ mod tests {
             ..Default::default()
         };
         let key = AdvisorConfig::cache_key_for_prompt("sys-template", "user-payload");
-        config.cache.insert(key, "cached judge response".to_string());
+        config
+            .cache
+            .insert(key, "cached judge response".to_string());
         let result = config
             .try_remote_with_prompt("sys-template", "user-payload")
             .unwrap();

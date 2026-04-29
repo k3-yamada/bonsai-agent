@@ -103,9 +103,7 @@ impl McpConnection {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|e| {
-                    anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command)
-                })?;
+                .map_err(|e| anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command))?;
 
             let stdin = child
                 .stdin
@@ -158,9 +156,7 @@ impl McpConnection {
         };
 
         match &mut self.transport {
-            McpTransport::Stdio {
-                stdin, reader, ..
-            } => {
+            McpTransport::Stdio { stdin, reader, .. } => {
                 let request_json = serde_json::to_string(&request)?;
                 writeln!(stdin, "{request_json}")?;
                 stdin.flush()?;
@@ -195,8 +191,9 @@ impl McpConnection {
                     .text()
                     .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンス読取失敗: {e}"))?;
 
-                let response: JsonRpcResponse = serde_json::from_str(&text)
-                    .map_err(|e| anyhow::anyhow!("MCP HTTPレスポンスパース失敗: {e}, ボディ: {text}"))?;
+                let response: JsonRpcResponse = serde_json::from_str(&text).map_err(|e| {
+                    anyhow::anyhow!("MCP HTTPレスポンスパース失敗: {e}, ボディ: {text}")
+                })?;
 
                 if let Some(error) = response.error {
                     anyhow::bail!("MCPエラー: {error}");
@@ -582,10 +579,7 @@ url = "https://mcp.example.com/rpc"
         assert_eq!(parsed["id"], 42);
         assert_eq!(parsed["method"], "tools/call");
         assert_eq!(parsed["params"]["name"], "read_file");
-        assert_eq!(
-            parsed["params"]["arguments"]["path"],
-            "/tmp/test.txt"
-        );
+        assert_eq!(parsed["params"]["arguments"]["path"], "/tmp/test.txt");
     }
 
     #[test]
@@ -692,7 +686,8 @@ url = "http://localhost:9090/mcp"
 
     #[test]
     fn test_json_rpc_response_both_result_and_error() {
-        let json = r#"{"id": 1, "result": {"tools": []}, "error": {"code": -1, "message": "partial"}}"#;
+        let json =
+            r#"{"id": 1, "result": {"tools": []}, "error": {"code": -1, "message": "partial"}}"#;
         let response: JsonRpcResponse = serde_json::from_str(json).unwrap();
         assert!(response.error.is_some());
         assert!(response.result.is_some());

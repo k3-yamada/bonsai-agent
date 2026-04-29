@@ -116,8 +116,10 @@ pub fn parse_functiongemma_output(raw: &str) -> Result<ParsedOutput> {
     let text = if text_parts.is_empty() {
         None
     } else {
-        Some(text_parts.join("
-"))
+        Some(text_parts.join(
+            "
+",
+        ))
     };
 
     Ok(ParsedOutput {
@@ -152,10 +154,7 @@ fn parse_fg_call(content: &str) -> Result<ToolCall> {
                     .unwrap_or(val)
                     .strip_suffix("<escape>")
                     .unwrap_or(val);
-                arguments.insert(
-                    key.to_string(),
-                    serde_json::Value::String(val.to_string()),
-                );
+                arguments.insert(key.to_string(), serde_json::Value::String(val.to_string()));
             }
         }
     }
@@ -432,7 +431,13 @@ mod tests {
         let input = "<start_function_call>call:list_tools{}<end_function_call>";
         let result = parse_functiongemma_output(input).unwrap();
         assert_eq!(result.tool_calls[0].name, "list_tools");
-        assert!(result.tool_calls[0].arguments.as_object().unwrap().is_empty());
+        assert!(
+            result.tool_calls[0]
+                .arguments
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -503,5 +508,4 @@ mod tests {
         assert!(prompt.contains("declaration:shell"));
         assert!(prompt.contains("declaration:file_read"));
     }
-
 }

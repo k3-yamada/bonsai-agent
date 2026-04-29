@@ -22,7 +22,9 @@ pub fn search_arxiv(query: &str, max_results: usize) -> Result<Vec<ArxivEntry>> 
         max_results
     );
 
-    let mut response = crate::runtime::http_agent::shared_agent().get(&url).call()?;
+    let mut response = crate::runtime::http_agent::shared_agent()
+        .get(&url)
+        .call()?;
     let body = response.body_mut().read_to_string()?;
     let entries = parse_arxiv_xml(&body);
     Ok(entries)

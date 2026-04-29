@@ -126,12 +126,7 @@ impl<'a> CheckpointManager<'a> {
         let now = chrono::Utc::now().to_rfc3339();
         let git_ref = if is_git() && !cfg!(test) {
             let o = Command::new("git")
-                .args([
-                    "stash",
-                    "push",
-                    "-m",
-                    &format!("bonsai-cp-{desc}"),
-                ])
+                .args(["stash", "push", "-m", &format!("bonsai-cp-{desc}")])
                 .output()?;
             if o.status.success()
                 && !String::from_utf8_lossy(&o.stdout).contains("No local changes")

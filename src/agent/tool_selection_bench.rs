@@ -137,7 +137,8 @@ pub fn bonsai_tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "repo_map".to_string(),
-            description: "Generate a repository map showing file structure and key symbols".to_string(),
+            description: "Generate a repository map showing file structure and key symbols"
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -246,10 +247,7 @@ pub fn default_cases() -> Vec<ToolSelectionCase> {
 fn normalize_tool_name(name: &str) -> String {
     // スペースで分割し、最初の語をツール名とみなす
     // （FunctionGemmaが `call:git status{}` のようにサブコマンドを名前に含めるケース対応）
-    name.split_whitespace()
-        .next()
-        .unwrap_or(name)
-        .to_string()
+    name.split_whitespace().next().unwrap_or(name).to_string()
 }
 
 /// FunctionGemma形式でllama-serverに問い合わせ、ツール選択を1件実行

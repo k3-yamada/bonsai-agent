@@ -908,10 +908,8 @@ impl BenchmarkSuite {
                 let score = match result {
                     Ok(ref loop_result) => {
                         // judge gate 用: 最終 run の応答 + トラジェクトリを保持
-                        last_run_capture = Some((
-                            loop_result.answer.clone(),
-                            loop_result.tools_called.clone(),
-                        ));
+                        last_run_capture =
+                            Some((loop_result.answer.clone(), loop_result.tools_called.clone()));
                         evaluate_task_response(task, loop_result).score()
                     }
                     Err(_) => 0.0,
@@ -1219,15 +1217,18 @@ mod tests {
     #[test]
     fn test_extended_tasks_count_18() {
         let suite = BenchmarkSuite::extended_tasks();
-        assert_eq!(suite.tasks.len(), 18, "extended tier (Phase C) は 18 タスク");
+        assert_eq!(
+            suite.tasks.len(),
+            18,
+            "extended tier (Phase C) は 18 タスク"
+        );
     }
 
     #[test]
     fn test_default_equals_core_plus_extended() {
         let all = BenchmarkSuite::default_tasks();
         assert_eq!(all.tasks.len(), 40, "default は core + extended = 40");
-        let ids: std::collections::HashSet<_> =
-            all.tasks.iter().map(|t| t.id.clone()).collect();
+        let ids: std::collections::HashSet<_> = all.tasks.iter().map(|t| t.id.clone()).collect();
         assert_eq!(ids.len(), 40, "重複なし");
     }
 
@@ -1276,8 +1277,7 @@ mod tests {
 
         // 該当 tier ゼロなら None
         let core_only_tasks = vec![make_task("c1", TaskTier::Core)];
-        let core_only_scores =
-            vec![MultiRunTaskScore::from_scores("c1".into(), vec![1.0], 0.5)];
+        let core_only_scores = vec![MultiRunTaskScore::from_scores("c1".into(), vec![1.0], 0.5)];
         assert!(
             compute_tier_avg(&core_only_tasks, &core_only_scores, TaskTier::Extended).is_none(),
             "extended 該当なしなら None"
@@ -1308,7 +1308,10 @@ mod tests {
         let mut cats: Vec<TaskCategory> = smoke.tasks.iter().map(|t| t.category.clone()).collect();
         cats.sort_by_key(|c| format!("{c:?}"));
         cats.dedup();
-        assert!(cats.len() >= 5, "smoke は 5+ カテゴリをカバー: got {cats:?}");
+        assert!(
+            cats.len() >= 5,
+            "smoke は 5+ カテゴリをカバー: got {cats:?}"
+        );
     }
 
     fn mock_result(answer: &str, tools: Vec<&str>, iterations: usize) -> AgentLoopResult {
@@ -1812,17 +1815,41 @@ mod tests {
     fn test_new_task_categories_expanded() {
         let suite = BenchmarkSuite::default_tasks();
         // 各追加タスクのカテゴリが正しいことを検証
-        let rename = suite.tasks.iter().find(|t| t.id == "multi_step_rename").unwrap();
+        let rename = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "multi_step_rename")
+            .unwrap();
         assert_eq!(rename.category, TaskCategory::MultiStep);
-        let diff = suite.tasks.iter().find(|t| t.id == "git_diff_analysis").unwrap();
+        let diff = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "git_diff_analysis")
+            .unwrap();
         assert_eq!(diff.category, TaskCategory::ToolUse);
-        let perm = suite.tasks.iter().find(|t| t.id == "error_recovery_permission").unwrap();
+        let perm = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "error_recovery_permission")
+            .unwrap();
         assert_eq!(perm.category, TaskCategory::ErrorRecovery);
-        let json = suite.tasks.iter().find(|t| t.id == "reasoning_json_parse").unwrap();
+        let json = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "reasoning_json_parse")
+            .unwrap();
         assert_eq!(json.category, TaskCategory::Reasoning);
-        let sort = suite.tasks.iter().find(|t| t.id == "code_gen_sort").unwrap();
+        let sort = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "code_gen_sort")
+            .unwrap();
         assert_eq!(sort.category, TaskCategory::CodeGeneration);
-        let search = suite.tasks.iter().find(|t| t.id == "multi_file_search").unwrap();
+        let search = suite
+            .tasks
+            .iter()
+            .find(|t| t.id == "multi_file_search")
+            .unwrap();
         assert_eq!(search.category, TaskCategory::MultiStep);
     }
 
@@ -1834,7 +1861,12 @@ mod tests {
             name: "権限エラー回復".into(),
             input: "test".into(),
             expected_tools: vec!["file_write".into()],
-            expected_keywords: vec!["permission".into(), "denied".into(), "error".into(), "cannot".into()],
+            expected_keywords: vec![
+                "permission".into(),
+                "denied".into(),
+                "error".into(),
+                "cannot".into(),
+            ],
             max_iterations: 4,
             category: TaskCategory::ErrorRecovery,
             tier: TaskTier::Core,
@@ -1901,8 +1933,16 @@ mod tests {
 
     #[test]
     fn t_trajectory_score_perfect_match() {
-        let expected = vec!["file_read".to_string(), "shell".to_string(), "file_write".to_string()];
-        let actual = vec!["file_read".to_string(), "shell".to_string(), "file_write".to_string()];
+        let expected = vec![
+            "file_read".to_string(),
+            "shell".to_string(),
+            "file_write".to_string(),
+        ];
+        let actual = vec![
+            "file_read".to_string(),
+            "shell".to_string(),
+            "file_write".to_string(),
+        ];
         let ts = TrajectoryScore::compute(&expected, &actual);
         assert!((ts.sequence_accuracy - 1.0).abs() < f64::EPSILON);
         assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON);
@@ -1920,7 +1960,11 @@ mod tests {
 
     #[test]
     fn t_trajectory_score_partial_match() {
-        let expected = vec!["file_read".to_string(), "shell".to_string(), "file_write".to_string()];
+        let expected = vec![
+            "file_read".to_string(),
+            "shell".to_string(),
+            "file_write".to_string(),
+        ];
         let actual = vec!["file_read".to_string(), "file_write".to_string()];
         let ts = TrajectoryScore::compute(&expected, &actual);
         assert!(ts.tool_coverage > 0.5);
@@ -1934,13 +1978,20 @@ mod tests {
         let actual = vec!["shell".to_string(), "file_read".to_string()];
         let ts = TrajectoryScore::compute(&expected, &actual);
         assert!(ts.sequence_accuracy < 1.0, "逆順はsequence_accuracy < 1.0");
-        assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON, "ツールは全カバー");
+        assert!(
+            (ts.tool_coverage - 1.0).abs() < f64::EPSILON,
+            "ツールは全カバー"
+        );
     }
 
     #[test]
     fn t_trajectory_score_extra_calls() {
         let expected = vec!["file_read".to_string()];
-        let actual = vec!["shell".to_string(), "file_read".to_string(), "shell".to_string()];
+        let actual = vec![
+            "shell".to_string(),
+            "file_read".to_string(),
+            "shell".to_string(),
+        ];
         let ts = TrajectoryScore::compute(&expected, &actual);
         assert_eq!(ts.extra_calls, 2);
         assert!((ts.tool_coverage - 1.0).abs() < f64::EPSILON);
@@ -1967,7 +2018,11 @@ mod tests {
     #[test]
     fn t_trajectory_composite_with_extras() {
         let expected = vec!["file_read".to_string()];
-        let actual = vec!["file_read".to_string(), "shell".to_string(), "shell".to_string()];
+        let actual = vec![
+            "file_read".to_string(),
+            "shell".to_string(),
+            "shell".to_string(),
+        ];
         let ts = TrajectoryScore::compute(&expected, &actual);
         let composite = ts.composite();
         assert!(composite < 1.0, "余分呼出でペナルティ");
@@ -1991,38 +2046,92 @@ mod tests {
     }
 
     // --- MultiFileEdit (×2) -------------------------------------------------
-    #[test] fn phase_c_rename_var_3files() { assert_task_present("rename_var_3files"); }
-    #[test] fn phase_c_sig_change_4files() { assert_task_present("sig_change_4files"); }
+    #[test]
+    fn phase_c_rename_var_3files() {
+        assert_task_present("rename_var_3files");
+    }
+    #[test]
+    fn phase_c_sig_change_4files() {
+        assert_task_present("sig_change_4files");
+    }
 
     // --- LongRun (×2) -------------------------------------------------------
-    #[test] fn phase_c_tool_chain_10steps() { assert_task_present("tool_chain_10steps"); }
-    #[test] fn phase_c_implement_50steps() { assert_task_present("implement_50steps"); }
+    #[test]
+    fn phase_c_tool_chain_10steps() {
+        assert_task_present("tool_chain_10steps");
+    }
+    #[test]
+    fn phase_c_implement_50steps() {
+        assert_task_present("implement_50steps");
+    }
 
     // --- ToolChain (×2) -----------------------------------------------------
-    #[test] fn phase_c_repomap_read_edit_test() { assert_task_present("repomap_read_edit_test"); }
-    #[test] fn phase_c_grep_multiedit() { assert_task_present("grep_multiedit"); }
+    #[test]
+    fn phase_c_repomap_read_edit_test() {
+        assert_task_present("repomap_read_edit_test");
+    }
+    #[test]
+    fn phase_c_grep_multiedit() {
+        assert_task_present("grep_multiedit");
+    }
 
     // --- ErrorRecovery (×2) -------------------------------------------------
-    #[test] fn phase_c_tool_fail_pivot() { assert_task_present("tool_fail_pivot"); }
-    #[test] fn phase_c_corrupt_file_repair() { assert_task_present("corrupt_file_repair"); }
+    #[test]
+    fn phase_c_tool_fail_pivot() {
+        assert_task_present("tool_fail_pivot");
+    }
+    #[test]
+    fn phase_c_corrupt_file_repair() {
+        assert_task_present("corrupt_file_repair");
+    }
 
     // --- McpInteg (×2) ------------------------------------------------------
-    #[test] fn phase_c_mcp_filesystem_list() { assert_task_present("mcp_filesystem_list"); }
-    #[test] fn phase_c_mcp_search_replace() { assert_task_present("mcp_search_replace"); }
+    #[test]
+    fn phase_c_mcp_filesystem_list() {
+        assert_task_present("mcp_filesystem_list");
+    }
+    #[test]
+    fn phase_c_mcp_search_replace() {
+        assert_task_present("mcp_search_replace");
+    }
 
     // --- Semantic (×2) ------------------------------------------------------
-    #[test] fn phase_c_vague_log_improve() { assert_task_present("vague_log_improve"); }
-    #[test] fn phase_c_refactor_intent() { assert_task_present("refactor_intent"); }
+    #[test]
+    fn phase_c_vague_log_improve() {
+        assert_task_present("vague_log_improve");
+    }
+    #[test]
+    fn phase_c_refactor_intent() {
+        assert_task_present("refactor_intent");
+    }
 
     // --- Reasoning (×2) -----------------------------------------------------
-    #[test] fn phase_c_nested_logic() { assert_task_present("nested_logic"); }
-    #[test] fn phase_c_ambiguous_calc() { assert_task_present("ambiguous_calc"); }
+    #[test]
+    fn phase_c_nested_logic() {
+        assert_task_present("nested_logic");
+    }
+    #[test]
+    fn phase_c_ambiguous_calc() {
+        assert_task_present("ambiguous_calc");
+    }
 
     // --- Summarization (×2) -------------------------------------------------
-    #[test] fn phase_c_multi_file_summary() { assert_task_present("multi_file_summary"); }
-    #[test] fn phase_c_git_log_summary() { assert_task_present("git_log_summary"); }
+    #[test]
+    fn phase_c_multi_file_summary() {
+        assert_task_present("multi_file_summary");
+    }
+    #[test]
+    fn phase_c_git_log_summary() {
+        assert_task_present("git_log_summary");
+    }
 
     // --- Verification (×2) --------------------------------------------------
-    #[test] fn phase_c_self_check_arithmetic() { assert_task_present("self_check_arithmetic"); }
-    #[test] fn phase_c_tool_fact_check() { assert_task_present("tool_fact_check"); }
+    #[test]
+    fn phase_c_self_check_arithmetic() {
+        assert_task_present("self_check_arithmetic");
+    }
+    #[test]
+    fn phase_c_tool_fact_check() {
+        assert_task_present("tool_fact_check");
+    }
 }

@@ -24,12 +24,12 @@ impl MutationTheme {
     /// サイクル番号からテーマを決定（固定マッピング）
     pub fn from_cycle(cycle: usize) -> Self {
         match cycle % 14 {
-            0..=3 => Self::Precision,   // プロンプトルール（8候補ローテーション）
-            4..=5 => Self::Efficiency,  // max_iterations ±2
-            6..=7 => Self::Exploration, // max_tools_selected ±2
-            8..=9 => Self::Robustness,  // max_retries ±2
+            0..=3 => Self::Precision,     // プロンプトルール（8候補ローテーション）
+            4..=5 => Self::Efficiency,    // max_iterations ±2
+            6..=7 => Self::Exploration,   // max_tools_selected ±2
+            8..=9 => Self::Robustness,    // max_retries ±2
             10..=11 => Self::Exploration, // temperature変更（探索軸）
-            _ => Self::Efficiency,      // 12, 13: max_tool_output_chars変更
+            _ => Self::Efficiency,        // 12, 13: max_tool_output_chars変更
         }
     }
 

@@ -79,22 +79,70 @@ struct ParamMutation {
 /// 全パラメータ変異候補（拡張版: 16種）
 fn param_mutations() -> Vec<ParamMutation> {
     vec![
-        ParamMutation { detail: "max_iterations: 12 (+2)", action: MutationAction::SetMaxIterations(12) },
-        ParamMutation { detail: "max_iterations: 8 (-2)", action: MutationAction::SetMaxIterations(8) },
-        ParamMutation { detail: "max_iterations: 15 (+5)", action: MutationAction::SetMaxIterations(15) },
-        ParamMutation { detail: "max_tools_selected: 3 (-2)", action: MutationAction::SetMaxToolsSelected(3) },
-        ParamMutation { detail: "max_tools_selected: 7 (+2)", action: MutationAction::SetMaxToolsSelected(7) },
-        ParamMutation { detail: "max_tools_selected: 4 (-1)", action: MutationAction::SetMaxToolsSelected(4) },
-        ParamMutation { detail: "max_retries: 1 (-2)", action: MutationAction::SetMaxRetries(1) },
-        ParamMutation { detail: "max_retries: 5 (+2)", action: MutationAction::SetMaxRetries(5) },
-        ParamMutation { detail: "max_retries: 4 (+1)", action: MutationAction::SetMaxRetries(4) },
-        ParamMutation { detail: "temperature: 0.2 (超精密)", action: MutationAction::SetTemperature(0.2) },
-        ParamMutation { detail: "temperature: 0.5 (低め)", action: MutationAction::SetTemperature(0.5) },
-        ParamMutation { detail: "temperature: 0.7 (バランス)", action: MutationAction::SetTemperature(0.7) },
-        ParamMutation { detail: "temperature: 0.9 (探索的)", action: MutationAction::SetTemperature(0.9) },
-        ParamMutation { detail: "max_tool_output_chars: 2000 (コンパクト)", action: MutationAction::SetMaxToolOutputChars(2000) },
-        ParamMutation { detail: "max_tool_output_chars: 6000 (増量)", action: MutationAction::SetMaxToolOutputChars(6000) },
-        ParamMutation { detail: "max_tool_output_chars: 8000 (大容量)", action: MutationAction::SetMaxToolOutputChars(8000) },
+        ParamMutation {
+            detail: "max_iterations: 12 (+2)",
+            action: MutationAction::SetMaxIterations(12),
+        },
+        ParamMutation {
+            detail: "max_iterations: 8 (-2)",
+            action: MutationAction::SetMaxIterations(8),
+        },
+        ParamMutation {
+            detail: "max_iterations: 15 (+5)",
+            action: MutationAction::SetMaxIterations(15),
+        },
+        ParamMutation {
+            detail: "max_tools_selected: 3 (-2)",
+            action: MutationAction::SetMaxToolsSelected(3),
+        },
+        ParamMutation {
+            detail: "max_tools_selected: 7 (+2)",
+            action: MutationAction::SetMaxToolsSelected(7),
+        },
+        ParamMutation {
+            detail: "max_tools_selected: 4 (-1)",
+            action: MutationAction::SetMaxToolsSelected(4),
+        },
+        ParamMutation {
+            detail: "max_retries: 1 (-2)",
+            action: MutationAction::SetMaxRetries(1),
+        },
+        ParamMutation {
+            detail: "max_retries: 5 (+2)",
+            action: MutationAction::SetMaxRetries(5),
+        },
+        ParamMutation {
+            detail: "max_retries: 4 (+1)",
+            action: MutationAction::SetMaxRetries(4),
+        },
+        ParamMutation {
+            detail: "temperature: 0.2 (超精密)",
+            action: MutationAction::SetTemperature(0.2),
+        },
+        ParamMutation {
+            detail: "temperature: 0.5 (低め)",
+            action: MutationAction::SetTemperature(0.5),
+        },
+        ParamMutation {
+            detail: "temperature: 0.7 (バランス)",
+            action: MutationAction::SetTemperature(0.7),
+        },
+        ParamMutation {
+            detail: "temperature: 0.9 (探索的)",
+            action: MutationAction::SetTemperature(0.9),
+        },
+        ParamMutation {
+            detail: "max_tool_output_chars: 2000 (コンパクト)",
+            action: MutationAction::SetMaxToolOutputChars(2000),
+        },
+        ParamMutation {
+            detail: "max_tool_output_chars: 6000 (増量)",
+            action: MutationAction::SetMaxToolOutputChars(6000),
+        },
+        ParamMutation {
+            detail: "max_tool_output_chars: 8000 (大容量)",
+            action: MutationAction::SetMaxToolOutputChars(8000),
+        },
     ]
 }
 
@@ -225,7 +273,8 @@ fn default_prompt_rules() -> Vec<PromptRuleCandidate> {
         },
         // --- ロバスト性系 ---
         PromptRuleCandidate {
-            rule: "10. ツールが失敗した場合、同じツールを2回まで再試行してから別の方法を試す".into(),
+            rule: "10. ツールが失敗した場合、同じツールを2回まで再試行してから別の方法を試す"
+                .into(),
             description: "リトライ上限付き再試行".into(),
         },
         PromptRuleCandidate {
@@ -438,7 +487,13 @@ pub fn estimate_mutation_effect(
 ) -> Result<f64> {
     // 旧APIラッパー: ベースラインスコア0.0を渡すが、内部でサンプル独自計測するため無関係
     estimate_mutation_effect_with_baseline(
-        base_config, mutation, 0.0, backend, tools, path_guard, cancel,
+        base_config,
+        mutation,
+        0.0,
+        backend,
+        tools,
+        path_guard,
+        cancel,
     )
 }
 
@@ -573,7 +628,11 @@ impl LabStagnationDetector {
         // 2. VarianceCollapse: 直近deltas分散が閾値未満
         if self.recent_deltas.len() >= self.window_size {
             let mean = self.recent_deltas.iter().sum::<f64>() / self.recent_deltas.len() as f64;
-            let variance = self.recent_deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>()
+            let variance = self
+                .recent_deltas
+                .iter()
+                .map(|d| (d - mean).powi(2))
+                .sum::<f64>()
                 / self.recent_deltas.len() as f64;
             if variance < self.variance_collapse_threshold {
                 return LabTrigger::VarianceCollapse;
@@ -966,7 +1025,8 @@ pub fn run_experiment_loop(
 
         // g. 停滞検出+Dreamer早期起動（NAT知見、項目141）
         let last_exp = experiments.last().unwrap();
-        let trigger = stagnation_detector.record_and_check(last_exp.delta, last_exp.experiment_score);
+        let trigger =
+            stagnation_detector.record_and_check(last_exp.delta, last_exp.experiment_score);
         if trigger != LabTrigger::None {
             log_event(
                 LogLevel::Info,
@@ -980,7 +1040,10 @@ pub fn run_experiment_loop(
                 log_event(
                     LogLevel::Info,
                     "lab",
-                    &format!("oracle feedback: {}件の失敗パターンから逆向き変異追加", worst.len()),
+                    &format!(
+                        "oracle feedback: {}件の失敗パターンから逆向き変異追加",
+                        worst.len()
+                    ),
                 );
             }
             // Dreamer早期起動
@@ -1084,7 +1147,10 @@ pub fn judge_gate_check(
                 log_event(
                     LogLevel::Warn,
                     "judge",
-                    &format!("judge_gate evaluate failed (task={}): {e}", task_score.task_id),
+                    &format!(
+                        "judge_gate evaluate failed (task={}): {e}",
+                        task_score.task_id
+                    ),
                 );
                 // fail-open: scores に積まない
             }
@@ -1095,8 +1161,7 @@ pub fn judge_gate_check(
     let (mean_composite, passed) = if scores.is_empty() {
         (0.0, true)
     } else {
-        let mean: f64 =
-            scores.iter().map(|s| s.composite()).sum::<f64>() / scores.len() as f64;
+        let mean: f64 = scores.iter().map(|s| s.composite()).sum::<f64>() / scores.len() as f64;
         (mean, mean >= threshold)
     };
 
@@ -1201,8 +1266,8 @@ mod tests {
         let m0 = hyp_gen.next_mutation(0);
         let m0_detail = m0.detail.clone();
         // 同じdetailをtriedに入れて再生成
-        let mut hyp_gen2 = HypothesisGenerator::default()
-            .with_tried_details(vec![m0_detail.clone()]);
+        let mut hyp_gen2 =
+            HypothesisGenerator::default().with_tried_details(vec![m0_detail.clone()]);
         let m0_retry = hyp_gen2.next_mutation(0);
         // スキップされて別の変異が返る
         assert_ne!(m0_retry.detail, m0_detail);
@@ -1405,7 +1470,10 @@ mod tests {
     #[test]
     fn test_experiment_loop_config_prescreening_defaults() {
         let config = ExperimentLoopConfig::default();
-        assert!(config.enable_prescreening, "プリスクリーニングはデフォルト有効");
+        assert!(
+            config.enable_prescreening,
+            "プリスクリーニングはデフォルト有効"
+        );
         assert!(
             (config.prescreening_threshold - (-0.01)).abs() < f64::EPSILON,
             "閾値のデフォルトは-0.01"
@@ -1417,10 +1485,7 @@ mod tests {
         // 推定deltaが閾値を下回る場合、棄却されるべき
         let threshold = -0.01;
         let estimated_delta = -0.05;
-        assert!(
-            estimated_delta < threshold,
-            "大きな悪化は閾値を下回る"
-        );
+        assert!(estimated_delta < threshold, "大きな悪化は閾値を下回る");
     }
 
     #[test]
@@ -1428,10 +1493,7 @@ mod tests {
         // 推定deltaが閾値以上の場合、通過するべき
         let threshold = -0.01;
         let estimated_delta = 0.02;
-        assert!(
-            estimated_delta >= threshold,
-            "改善は閾値以上で通過"
-        );
+        assert!(estimated_delta >= threshold, "改善は閾値以上で通過");
         // 閾値ちょうどの場合も通過
         let estimated_delta_border = -0.01;
         assert!(
@@ -1550,27 +1612,48 @@ mod tests {
         use std::collections::HashMap;
         let experiments = vec![
             Experiment {
-                experiment_id: "e1".into(), mutation_type: MutationType::PromptRule,
-                mutation_detail: "rule_a".into(), baseline_score: 0.8,
-                experiment_score: 0.75, delta: -0.05, accepted: false,
-                duration_secs: 10.0, config_snapshot: HashMap::new(),
-                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                experiment_id: "e1".into(),
+                mutation_type: MutationType::PromptRule,
+                mutation_detail: "rule_a".into(),
+                baseline_score: 0.8,
+                experiment_score: 0.75,
+                delta: -0.05,
+                accepted: false,
+                duration_secs: 10.0,
+                config_snapshot: HashMap::new(),
+                pass_at_k: None,
+                pass_consecutive_k: None,
+                score_variance: None,
                 prescreened: false,
             },
             Experiment {
-                experiment_id: "e2".into(), mutation_type: MutationType::PromptRule,
-                mutation_detail: "rule_b".into(), baseline_score: 0.8,
-                experiment_score: 0.82, delta: 0.02, accepted: true,
-                duration_secs: 10.0, config_snapshot: HashMap::new(),
-                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                experiment_id: "e2".into(),
+                mutation_type: MutationType::PromptRule,
+                mutation_detail: "rule_b".into(),
+                baseline_score: 0.8,
+                experiment_score: 0.82,
+                delta: 0.02,
+                accepted: true,
+                duration_secs: 10.0,
+                config_snapshot: HashMap::new(),
+                pass_at_k: None,
+                pass_consecutive_k: None,
+                score_variance: None,
                 prescreened: false,
             },
             Experiment {
-                experiment_id: "e3".into(), mutation_type: MutationType::AgentParam,
-                mutation_detail: "param_x".into(), baseline_score: 0.8,
-                experiment_score: 0.7, delta: -0.10, accepted: false,
-                duration_secs: 10.0, config_snapshot: HashMap::new(),
-                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                experiment_id: "e3".into(),
+                mutation_type: MutationType::AgentParam,
+                mutation_detail: "param_x".into(),
+                baseline_score: 0.8,
+                experiment_score: 0.7,
+                delta: -0.10,
+                accepted: false,
+                duration_secs: 10.0,
+                config_snapshot: HashMap::new(),
+                pass_at_k: None,
+                pass_consecutive_k: None,
+                score_variance: None,
                 prescreened: false,
             },
         ];
@@ -1585,11 +1668,18 @@ mod tests {
         use std::collections::HashMap;
         let experiments: Vec<Experiment> = (0..10)
             .map(|i| Experiment {
-                experiment_id: format!("e{i}"), mutation_type: MutationType::PromptRule,
-                mutation_detail: format!("rule_{i}"), baseline_score: 0.8,
-                experiment_score: 0.8 - (i as f64 * 0.01), delta: -(i as f64 * 0.01),
-                accepted: false, duration_secs: 10.0, config_snapshot: HashMap::new(),
-                pass_at_k: None, pass_consecutive_k: None, score_variance: None,
+                experiment_id: format!("e{i}"),
+                mutation_type: MutationType::PromptRule,
+                mutation_detail: format!("rule_{i}"),
+                baseline_score: 0.8,
+                experiment_score: 0.8 - (i as f64 * 0.01),
+                delta: -(i as f64 * 0.01),
+                accepted: false,
+                duration_secs: 10.0,
+                config_snapshot: HashMap::new(),
+                pass_at_k: None,
+                pass_consecutive_k: None,
+                score_variance: None,
                 prescreened: false,
             })
             .collect();
@@ -1613,7 +1703,11 @@ mod tests {
         det.record_and_check(-0.02, 0.78); // unchanged=1
         det.record_and_check(-0.03, 0.77); // unchanged=2
         let t = det.record_and_check(-0.01, 0.76); // unchanged=3 -> trigger
-        assert_eq!(t, LabTrigger::Stagnation, "4th non-improvement triggers at threshold=3");
+        assert_eq!(
+            t,
+            LabTrigger::Stagnation,
+            "4th non-improvement triggers at threshold=3"
+        );
     }
 
     #[test]
@@ -1650,10 +1744,7 @@ mod tests {
     #[test]
     fn t_add_worst_reasoning_insights() {
         let mut hypo = HypothesisGenerator::default();
-        let worst = vec![
-            ("rule_a".to_string(), -0.05),
-            ("rule_b".to_string(), -0.03),
-        ];
+        let worst = vec![("rule_a".to_string(), -0.05), ("rule_b".to_string(), -0.03)];
         hypo.add_worst_reasoning_insights(&worst);
         // 20 rules + 2 insights = 22 rules, 22 + 16 params = 38 total
         // slot 20 and 21 should be insight-derived
@@ -1712,7 +1803,10 @@ mod tests {
         }
     }
 
-    fn make_task_score(task_id: &str, with_run: bool) -> crate::agent::benchmark::MultiRunTaskScore {
+    fn make_task_score(
+        task_id: &str,
+        with_run: bool,
+    ) -> crate::agent::benchmark::MultiRunTaskScore {
         let s = crate::agent::benchmark::MultiRunTaskScore::from_scores(
             task_id.into(),
             vec![1.0, 1.0, 1.0],

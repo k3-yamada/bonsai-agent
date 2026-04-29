@@ -334,7 +334,8 @@ impl LlmBackend for LlamaServerBackend {
         // ストリーミングリクエスト送信
         // SSEチャンクタイムアウト（OpenCode知見: wrapSSE的保護）+ socket-level deadline (Step 13)
         let agent = streaming_agent(self.sse_chunk_timeout_secs);
-        let response = match agent.post(&url)
+        let response = match agent
+            .post(&url)
             .header("Content-Type", "application/json")
             .send_json(&body)
         {
@@ -559,7 +560,9 @@ sse_chunk_timeout_secs = 180
         // 実際の `generate_streaming` と同じ条件式（line 333-337）を再現し、
         // Duration 化が壊れないことを検証する。
         let timeout = if backend.sse_chunk_timeout_secs > 0 {
-            Some(std::time::Duration::from_secs(backend.sse_chunk_timeout_secs))
+            Some(std::time::Duration::from_secs(
+                backend.sse_chunk_timeout_secs,
+            ))
         } else {
             None
         };
@@ -580,7 +583,9 @@ sse_chunk_timeout_secs = 0
         assert_eq!(backend.sse_chunk_timeout_secs, 0);
 
         let timeout = if backend.sse_chunk_timeout_secs > 0 {
-            Some(std::time::Duration::from_secs(backend.sse_chunk_timeout_secs))
+            Some(std::time::Duration::from_secs(
+                backend.sse_chunk_timeout_secs,
+            ))
         } else {
             None
         };

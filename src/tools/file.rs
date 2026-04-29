@@ -187,7 +187,6 @@ impl TypedTool for FileWriteTool {
     }
 }
 
-
 /// 複数箇所同時編集ツール（OpenCode知見: アトミック操作でp^n問題緩和）
 pub struct MultiEditTool;
 
@@ -272,7 +271,10 @@ impl TypedTool for MultiEditTool {
                     format!(" ({})", warnings.join("; "))
                 };
                 Ok(ToolResult {
-                    output: format!("{}件の編集を一括適用しました{}: {}", applied, warn_msg, path),
+                    output: format!(
+                        "{}件の編集を一括適用しました{}: {}",
+                        applied, warn_msg, path
+                    ),
                     success: true,
                 })
             }
@@ -556,7 +558,6 @@ fn replace_lines(
     }
 }
 
-
 /// 戦略8: Levenshtein距離ベースBlockアンカー（OpenCode知見）
 /// 先頭行/末尾行が類似（距離≤行長の30%）かつ中間行の50%以上が類似
 fn try_levenshtein_block(content: &str, old_text: &str, new_text: &str) -> Option<String> {
@@ -611,8 +612,12 @@ fn line_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     let (m, n) = (a.len(), b.len());
-    if m == 0 { return n; }
-    if n == 0 { return m; }
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
     let mut prev = (0..=n).collect::<Vec<_>>();
     let mut curr = vec![0; n + 1];
     for i in 1..=m {
@@ -651,10 +656,15 @@ fn try_context_aware(content: &str, old_text: &str, new_text: &str) -> Option<St
     // 複数候補: コンテキスト行（直前1行）で区別
     for &start in &candidates {
         // 中間行の50%以上が一致するか
-        let matched = old_lines.iter().enumerate().filter(|&(j, ol)| {
-            content_lines.get(start + j)
-                .is_some_and(|cl| cl.trim() == ol.trim())
-        }).count();
+        let matched = old_lines
+            .iter()
+            .enumerate()
+            .filter(|&(j, ol)| {
+                content_lines
+                    .get(start + j)
+                    .is_some_and(|cl| cl.trim() == ol.trim())
+            })
+            .count();
         let threshold = (old_lines.len() as f64 * 0.5).ceil() as usize;
         if matched < threshold {
             continue;
@@ -675,19 +685,18 @@ fn try_context_aware(content: &str, old_text: &str, new_text: &str) -> Option<St
 
     // 最良候補（最大一致数）を選択
     let best = candidates.iter().max_by_key(|&&start| {
-        old_lines.iter().enumerate().filter(|&(j, ol)| {
-            content_lines.get(start + j)
-                .is_some_and(|cl| cl.trim() == ol.trim())
-        }).count()
+        old_lines
+            .iter()
+            .enumerate()
+            .filter(|&(j, ol)| {
+                content_lines
+                    .get(start + j)
+                    .is_some_and(|cl| cl.trim() == ol.trim())
+            })
+            .count()
     });
 
-    best.map(|&start| replace_lines(
-        content,
-        &content_lines,
-        start,
-        old_lines.len(),
-        new_text,
-    ))
+    best.map(|&start| replace_lines(content, &content_lines, start, old_lines.len(), new_text))
 }
 
 #[cfg(test)]
@@ -908,13 +917,15 @@ mod tests {
         let path = temp_path("multiedit");
         fs::write(&path, "aaa\nbbb\nccc").unwrap();
         let tool = MultiEditTool;
-        let result = tool.call(serde_json::json!({
-            "path": path,
-            "edits": [
-                {"old_text": "aaa", "new_text": "AAA"},
-                {"old_text": "ccc", "new_text": "CCC"}
-            ]
-        })).unwrap();
+        let result = tool
+            .call(serde_json::json!({
+                "path": path,
+                "edits": [
+                    {"old_text": "aaa", "new_text": "AAA"},
+                    {"old_text": "ccc", "new_text": "CCC"}
+                ]
+            }))
+            .unwrap();
         assert!(result.success);
         assert!(result.output.contains("2件"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "AAA\nbbb\nCCC");
@@ -926,13 +937,15 @@ mod tests {
         let path = temp_path("multiedit-rb");
         fs::write(&path, "aaa\nbbb\nccc").unwrap();
         let tool = MultiEditTool;
-        let result = tool.call(serde_json::json!({
-            "path": path,
-            "edits": [
-                {"old_text": "aaa", "new_text": "AAA"},
-                {"old_text": "NOTFOUND", "new_text": "XXX"}
-            ]
-        })).unwrap();
+        let result = tool
+            .call(serde_json::json!({
+                "path": path,
+                "edits": [
+                    {"old_text": "aaa", "new_text": "AAA"},
+                    {"old_text": "NOTFOUND", "new_text": "XXX"}
+                ]
+            }))
+            .unwrap();
         assert!(!result.success);
         assert!(result.output.contains("ロールバック"));
         // ロールバックされているので元のまま
@@ -945,10 +958,12 @@ mod tests {
         let path = temp_path("multiedit-empty");
         fs::write(&path, "hello").unwrap();
         let tool = MultiEditTool;
-        let result = tool.call(serde_json::json!({
-            "path": path,
-            "edits": []
-        })).unwrap();
+        let result = tool
+            .call(serde_json::json!({
+                "path": path,
+                "edits": []
+            }))
+            .unwrap();
         assert!(!result.success);
         fs::remove_file(&path).ok();
     }
@@ -965,7 +980,10 @@ mod tests {
         assert!(result.is_some(), "空白正規化で一致すべき");
         let (replaced, msg) = result.unwrap();
         assert!(msg.contains("空白正規化"), "空白正規化戦略が使用されること");
-        assert!(replaced.contains("let x = 2"), "置換後の内容が反映されること");
+        assert!(
+            replaced.contains("let x = 2"),
+            "置換後の内容が反映されること"
+        );
     }
 
     /// 戦略2: 末尾/先頭の空白を含むテキストがtrimで一致すること
@@ -1007,7 +1025,10 @@ mod tests {
         // 全角混在old_textが半角contentと一致するケース
         if result.is_some() {
             let (_, msg) = result.unwrap();
-            assert!(msg.contains("Unicode") || msg.contains("模糊"), "Unicode戦略が使われること");
+            assert!(
+                msg.contains("Unicode") || msg.contains("模糊"),
+                "Unicode戦略が使われること"
+            );
         }
         // normalize_unicode関数単体テスト
         assert_eq!(normalize_unicode("\u{FF21}\u{FF22}\u{FF23}"), "ABC");
@@ -1024,9 +1045,15 @@ mod tests {
         let old_text = "fn test() {\n    let a = 1;\n    let b = 999;\n    let c = 3;\n}";
         let new_text = "fn replaced() {\n    // new\n}";
         let result = fuzzy_find_replace(content, old_text, new_text);
-        assert!(result.is_some(), "Blockアンカーで一致すべき（中間行50%以上一致）");
+        assert!(
+            result.is_some(),
+            "Blockアンカーで一致すべき（中間行50%以上一致）"
+        );
         let (replaced, msg) = result.unwrap();
-        assert!(msg.contains("Block") || msg.contains("模糊"), "Blockアンカー戦略が使用されること");
+        assert!(
+            msg.contains("Block") || msg.contains("模糊"),
+            "Blockアンカー戦略が使用されること"
+        );
         assert!(replaced.contains("replaced"), "置換が反映されること");
     }
 
@@ -1158,7 +1185,10 @@ mod tests {
             .unwrap();
         assert!(result.success);
         let content = fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "QUX bar foo baz foo", "最初の1箇所のみ置換されること");
+        assert_eq!(
+            content, "QUX bar foo baz foo",
+            "最初の1箇所のみ置換されること"
+        );
         fs::remove_file(&path).ok();
     }
 
@@ -1169,7 +1199,10 @@ mod tests {
         let old_text = "line1\\n\\tindented\\nline3";
         let new_text = "replaced";
         let result = try_escape_normalized(content, old_text, new_text);
-        assert!(result.is_some(), "エスケープシーケンスが実際の文字に変換されて一致すること");
+        assert!(
+            result.is_some(),
+            "エスケープシーケンスが実際の文字に変換されて一致すること"
+        );
     }
 
     /// 戦略7: 境界Trim（先頭/末尾の空行除去）のテスト
@@ -1200,7 +1233,10 @@ mod tests {
         let content = "line1\nline2\nline3\n";
         let lines: Vec<&str> = content.lines().collect();
         let result = replace_lines(content, &lines, 1, 1, "NEW");
-        assert!(result.ends_with('\n'), "元テキストの末尾改行が保持されること");
+        assert!(
+            result.ends_with('\n'),
+            "元テキストの末尾改行が保持されること"
+        );
         assert!(result.contains("NEW"), "置換が反映されること");
     }
 
@@ -1219,7 +1255,10 @@ mod tests {
         let content = "a\nb";
         let old_text = "a\nb";
         let result = try_levenshtein_block(content, old_text, "new");
-        assert!(result.is_none(), "3行未満ではLevenshteinブロックは適用されない");
+        assert!(
+            result.is_none(),
+            "3行未満ではLevenshteinブロックは適用されない"
+        );
     }
 
     /// 戦略9: 2行未満のContextAwareはスキップ
@@ -1239,5 +1278,4 @@ mod tests {
         let result = try_context_aware(content, old_text, "new");
         assert!(result.is_none(), "重複なしではContextAwareは適用されない");
     }
-
 }

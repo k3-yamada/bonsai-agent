@@ -198,8 +198,8 @@ impl<'a> SkillStore<'a> {
             candidate.total_steps,
             candidate.duration_ms
         );
-        let triggers = serde_json::to_string(&candidate.tool_sequence)
-            .unwrap_or_else(|_| "[]".to_string());
+        let triggers =
+            serde_json::to_string(&candidate.tool_sequence).unwrap_or_else(|_| "[]".to_string());
 
         let id = self.save(&name, &description, &tool_chain, &triggers)?;
         Ok(Some(id))

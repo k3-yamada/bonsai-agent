@@ -420,8 +420,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        es.append("s1", &EventType::SessionEnd, "{}", None)
-            .unwrap();
+        es.append("s1", &EventType::SessionEnd, "{}", None).unwrap();
 
         let cs = es.extract_successful_trajectories(0.8, 1).unwrap();
         assert!(cs.is_empty(), "success_rate=0.5 は閾値0.8未満で除外");
@@ -479,10 +478,7 @@ mod tests {
 
     #[test]
     fn test_compute_duration_ms() {
-        let d = compute_duration_ms(
-            "2026-04-24T10:00:00Z",
-            "2026-04-24T10:00:02.500Z",
-        );
+        let d = compute_duration_ms("2026-04-24T10:00:00Z", "2026-04-24T10:00:02.500Z");
         assert_eq!(d, 2500);
         // 不正フォーマットは 0
         assert_eq!(compute_duration_ms("bad", "2026-04-24T10:00:00Z"), 0);

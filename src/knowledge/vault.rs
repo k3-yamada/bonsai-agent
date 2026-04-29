@@ -304,7 +304,10 @@ mod tests {
         vault.record_to_graph(&entry, &graph).unwrap();
 
         let neighbors = graph.neighbors("decisions", 1).unwrap();
-        assert!(!neighbors.is_empty(), "カテゴリ→エントリのエッジが存在すべき");
+        assert!(
+            !neighbors.is_empty(),
+            "カテゴリ→エントリのエッジが存在すべき"
+        );
     }
 
     #[test]

@@ -193,9 +193,11 @@ pub(super) fn inject_verification_step(
         let structured = StructuredFeedback::from_trial_summary(trial_summary, task_context);
         let injection = structured.format_for_injection();
         if !injection.is_empty() {
-            checklist.push_str("
+            checklist.push_str(
+                "
 
-");
+",
+            );
             checklist.push_str(&injection);
         }
     }
