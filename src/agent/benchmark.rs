@@ -1088,6 +1088,45 @@ mod tests {
         assert_eq!(ids.len(), suite.tasks.len());
     }
 
+    // --- Tier 分割テスト (Red, 項目 172 P1: ベンチマーク階層分離) -----------------
+    // 仮説 X (Bench 拡張主因) / 仮説 Y (MLX 環境主因) を 1 セッションで分離するため、
+    // core (22) / extended (18) tier を導入し full baseline を計測可能にする。
+
+    #[test]
+    fn test_core_tasks_count_22() {
+        let suite = BenchmarkSuite::core_tasks();
+        assert_eq!(suite.tasks.len(), 22, "core tier は 22 タスク");
+    }
+
+    #[test]
+    fn test_extended_tasks_count_18() {
+        let suite = BenchmarkSuite::extended_tasks();
+        assert_eq!(suite.tasks.len(), 18, "extended tier (Phase C) は 18 タスク");
+    }
+
+    #[test]
+    fn test_default_equals_core_plus_extended() {
+        let all = BenchmarkSuite::default_tasks();
+        assert_eq!(all.tasks.len(), 40, "default は core + extended = 40");
+        let ids: std::collections::HashSet<_> =
+            all.tasks.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(ids.len(), 40, "重複なし");
+    }
+
+    #[test]
+    fn test_task_tier_field_set() {
+        let core = BenchmarkSuite::core_tasks();
+        let ext = BenchmarkSuite::extended_tasks();
+        assert!(
+            core.tasks.iter().all(|t| t.tier == TaskTier::Core),
+            "core tier の全タスクは TaskTier::Core"
+        );
+        assert!(
+            ext.tasks.iter().all(|t| t.tier == TaskTier::Extended),
+            "extended tier の全タスクは TaskTier::Extended"
+        );
+    }
+
     #[test]
     fn test_smoke_tasks_subset_of_default() {
         let smoke = BenchmarkSuite::smoke_tasks();
