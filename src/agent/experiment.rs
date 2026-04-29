@@ -668,7 +668,7 @@ pub fn run_experiment_loop(
     store: &MemoryStore,
     loop_config: &ExperimentLoopConfig,
 ) -> Result<Vec<Experiment>> {
-    // BONSAI_LAB_SMOKE=1 で smoke タスク（5 件）に切替（dev iteration 用）
+    // BONSAI_LAB_SMOKE=1 → smoke (5 件), BONSAI_BENCH_TIER=core/extended → tier 別 (項目 172 P1)
     let suite = if std::env::var("BONSAI_LAB_SMOKE")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false)
@@ -680,7 +680,29 @@ pub fn run_experiment_loop(
         );
         BenchmarkSuite::smoke_tasks()
     } else {
-        BenchmarkSuite::default_tasks()
+        match std::env::var("BONSAI_BENCH_TIER")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("core") => {
+                log_event(
+                    LogLevel::Info,
+                    "lab",
+                    "BONSAI_BENCH_TIER=core → core_tasks() 使用（22 タスク）",
+                );
+                BenchmarkSuite::core_tasks()
+            }
+            Some("extended") => {
+                log_event(
+                    LogLevel::Info,
+                    "lab",
+                    "BONSAI_BENCH_TIER=extended → extended_tasks() 使用（18 タスク）",
+                );
+                BenchmarkSuite::extended_tasks()
+            }
+            _ => BenchmarkSuite::default_tasks(),
+        }
     };
     // 過去の試行済み変異detailをDBからロードし、重複回避
     let tried_details = load_tried_details(store.conn());
@@ -1704,6 +1726,8 @@ mod tests {
         let result = MultiRunBenchmarkResult {
             task_scores: vec![make_task_score("t1", true), make_task_score("t2", true)],
             duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
         };
         let descs = make_descs(&["t1", "t2"]);
 
@@ -1724,6 +1748,8 @@ mod tests {
         let result = MultiRunBenchmarkResult {
             task_scores: vec![make_task_score("t1", true), make_task_score("t2", true)],
             duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
         };
         let descs = make_descs(&["t1", "t2"]);
 
@@ -1746,6 +1772,8 @@ mod tests {
                 make_task_score("t2", true),  // judged
             ],
             duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
         };
         let descs = make_descs(&["t1", "t2"]);
 
@@ -1762,6 +1790,8 @@ mod tests {
         let result = MultiRunBenchmarkResult {
             task_scores: vec![make_task_score("t1", true)],
             duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
         };
         let descs = make_descs(&["t1"]);
 
@@ -1782,6 +1812,8 @@ mod tests {
                 .map(|i| make_task_score(&format!("t{i}"), true))
                 .collect(),
             duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
         };
         let descs = make_descs(&["t0", "t1", "t2", "t3", "t4"]);
 

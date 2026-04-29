@@ -284,6 +284,34 @@ impl MultiRunTaskScore {
 pub struct MultiRunBenchmarkResult {
     pub task_scores: Vec<MultiRunTaskScore>,
     pub duration_secs: f64,
+    /// Core tier タスクの平均 mean_score (項目 172 P1)。該当タスクなしなら None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub core_avg_score: Option<f64>,
+    /// Extended tier タスクの平均 mean_score (項目 172 P1)。該当タスクなしなら None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_avg_score: Option<f64>,
+}
+
+/// tier 別平均 mean_score を算出（項目 172 P1）。
+///
+/// `tasks` と `scores` は同順で対応している前提（`run_k` 内で生成順を維持）。
+/// 該当 tier のタスクが 1 件もないなら None を返す。
+fn compute_tier_avg(
+    tasks: &[BenchmarkTask],
+    scores: &[MultiRunTaskScore],
+    tier: TaskTier,
+) -> Option<f64> {
+    let filtered: Vec<f64> = tasks
+        .iter()
+        .zip(scores.iter())
+        .filter(|(t, _)| t.tier == tier)
+        .map(|(_, s)| s.mean_score)
+        .collect();
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered.iter().sum::<f64>() / filtered.len() as f64)
+    }
 }
 
 impl MultiRunBenchmarkResult {
@@ -899,9 +927,15 @@ impl BenchmarkSuite {
             task_scores.push(task_score);
         }
 
+        // 項目 172 P1: tier 別平均 mean_score 集計（仮説 X / Y 分離用）
+        let core_avg_score = compute_tier_avg(&self.tasks, &task_scores, TaskTier::Core);
+        let extended_avg_score = compute_tier_avg(&self.tasks, &task_scores, TaskTier::Extended);
+
         Ok(MultiRunBenchmarkResult {
             task_scores,
             duration_secs: start.elapsed().as_secs_f64(),
+            core_avg_score,
+            extended_avg_score,
         })
     }
 
@@ -1212,6 +1246,45 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_run_result_tier_aggregation() {
+        // モックタスク: Core 2 件 + Extended 1 件
+        let make_task = |id: &str, tier: TaskTier| BenchmarkTask {
+            id: id.into(),
+            name: id.into(),
+            input: String::new(),
+            expected_tools: vec![],
+            expected_keywords: vec![],
+            max_iterations: 1,
+            category: TaskCategory::ToolUse,
+            tier,
+        };
+        let tasks = vec![
+            make_task("c1", TaskTier::Core),
+            make_task("c2", TaskTier::Core),
+            make_task("e1", TaskTier::Extended),
+        ];
+        let scores = vec![
+            MultiRunTaskScore::from_scores("c1".into(), vec![0.8, 0.8], 0.5),
+            MultiRunTaskScore::from_scores("c2".into(), vec![0.6, 0.6], 0.5),
+            MultiRunTaskScore::from_scores("e1".into(), vec![0.4, 0.4], 0.5),
+        ];
+
+        let core_avg = compute_tier_avg(&tasks, &scores, TaskTier::Core).unwrap();
+        let ext_avg = compute_tier_avg(&tasks, &scores, TaskTier::Extended).unwrap();
+        assert!((core_avg - 0.7).abs() < 0.001, "core_avg={core_avg}");
+        assert!((ext_avg - 0.4).abs() < 0.001, "ext_avg={ext_avg}");
+
+        // 該当 tier ゼロなら None
+        let core_only_tasks = vec![make_task("c1", TaskTier::Core)];
+        let core_only_scores =
+            vec![MultiRunTaskScore::from_scores("c1".into(), vec![1.0], 0.5)];
+        assert!(
+            compute_tier_avg(&core_only_tasks, &core_only_scores, TaskTier::Extended).is_none(),
+            "extended 該当なしなら None"
+        );
+    }
+
+    #[test]
     fn test_smoke_tasks_subset_of_default() {
         let smoke = BenchmarkSuite::smoke_tasks();
         let default = BenchmarkSuite::default_tasks();
@@ -1412,6 +1485,8 @@ mod tests {
                 MultiRunTaskScore::from_scores("b".into(), vec![0.0, 0.0, 0.0], 0.5),
             ],
             duration_secs: 10.0,
+            core_avg_score: None,
+            extended_avg_score: None,
         };
         assert!((result.composite_pass_at_k() - 0.5).abs() < 0.001);
         assert!((result.composite_score() - 0.5).abs() < 0.001);
