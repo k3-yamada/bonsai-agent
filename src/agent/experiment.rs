@@ -680,11 +680,13 @@ pub fn run_experiment_loop(
         );
         BenchmarkSuite::smoke_tasks()
     } else {
-        match std::env::var("BONSAI_BENCH_TIER")
+        // 大文字小文字を吸収し、未対応値はワーニングを出して default に明示フォールバック
+        // (Phase 5 の長時間 baseline 計測中にタイポによる silent fallback を防ぐ。Codex audit LOW finding 対応)
+        let bench_tier = std::env::var("BONSAI_BENCH_TIER")
             .ok()
-            .as_deref()
-            .map(str::trim)
-        {
+            .map(|v| v.trim().to_ascii_lowercase());
+
+        match bench_tier.as_deref() {
             Some("core") => {
                 log_event(
                     LogLevel::Info,
@@ -701,7 +703,17 @@ pub fn run_experiment_loop(
                 );
                 BenchmarkSuite::extended_tasks()
             }
-            _ => BenchmarkSuite::default_tasks(),
+            Some("") | None => BenchmarkSuite::default_tasks(),
+            Some(other) => {
+                log_event(
+                    LogLevel::Warn,
+                    "lab",
+                    &format!(
+                        "BONSAI_BENCH_TIER={other} は未対応のため default_tasks() 使用（core/extended のみ対応）"
+                    ),
+                );
+                BenchmarkSuite::default_tasks()
+            }
         }
     };
     // 過去の試行済み変異detailをDBからロードし、重複回避
