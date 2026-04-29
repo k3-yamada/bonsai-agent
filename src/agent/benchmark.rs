@@ -22,6 +22,18 @@ pub enum TaskCategory {
     Summarization,
 }
 
+/// ベンチマークタスクの tier (項目 172 P1: ベンチマーク階層分離)
+///
+/// Lab v14 baseline -35% 退行の原因仮説 X (Bench 拡張) / Y (MLX 環境) を分離するため、
+/// 既存 22 タスクを `Core`、Phase C 追加 18 タスクを `Extended` として階層管理する。
+/// `BONSAI_BENCH_TIER` env で実行時に tier を切替可能 (Phase 3 で実装)。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum TaskTier {
+    #[default]
+    Core,
+    Extended,
+}
+
 /// 単一のベンチマークタスク定義
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkTask {
@@ -32,6 +44,9 @@ pub struct BenchmarkTask {
     pub expected_keywords: Vec<String>,
     pub max_iterations: usize,
     pub category: TaskCategory,
+    /// tier (項目 172 P1: ベンチマーク階層分離)。旧データとの serde 互換のため default を持つ。
+    #[serde(default)]
+    pub tier: TaskTier,
 }
 
 /// タスク実行結果のスコア
@@ -343,6 +358,35 @@ impl BenchmarkSuite {
         }
     }
 
+    /// Core tier のみ (22 タスク、項目 172 P1: ベンチマーク階層分離)。
+    ///
+    /// Lab v9/v10 当時の 22 タスクと同等。MLX 環境劣化 (仮説 Y) の
+    /// 切り分けに使用する。`BONSAI_BENCH_TIER=core` で Lab 起動可。
+    pub fn core_tasks() -> Self {
+        Self {
+            tasks: Self::default_tasks()
+                .tasks
+                .into_iter()
+                .filter(|t| t.tier == TaskTier::Core)
+                .collect(),
+        }
+    }
+
+    /// Extended tier (Phase C 追加分、18 タスク、項目 172 P1)。
+    ///
+    /// MultiFileEdit/LongRun/ToolChain/McpInteg/Semantic/Reasoning/
+    /// Summarization/Verification の 9 領域 ×2 = 18 タスク。
+    /// Bench 拡張による退行 (仮説 X) の切り分けに使用する。
+    pub fn extended_tasks() -> Self {
+        Self {
+            tasks: Self::default_tasks()
+                .tasks
+                .into_iter()
+                .filter(|t| t.tier == TaskTier::Extended)
+                .collect(),
+        }
+    }
+
     /// デフォルトのベンチマークタスクセット（40タスク）
     pub fn default_tasks() -> Self {
         Self {
@@ -355,6 +399,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["README".into()],
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "shell_ls".into(),
@@ -364,6 +409,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["src".into()],
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "git_status".into(),
@@ -373,6 +419,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["branch".into()],
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "multi_step_write_read".into(),
@@ -382,6 +429,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["Hello World".into()],
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "reasoning_calc".into(),
@@ -391,6 +439,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["1024".into()],
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "error_recovery".into(),
@@ -400,6 +449,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["存在".into()],
                     max_iterations: 3,
                     category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "tool_selection_git".into(),
@@ -409,6 +459,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["commit".into()],
                     max_iterations: 3,
                     category: TaskCategory::ToolSelection,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "direct_answer".into(),
@@ -418,6 +469,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["Ferris".into()],
                     max_iterations: 2,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "code_gen_fizzbuzz".into(),
@@ -427,6 +479,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
                     max_iterations: 3,
                     category: TaskCategory::CodeGeneration,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "multi_step_field_count".into(),
@@ -436,6 +489,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "error_handling_nonexistent".into(),
@@ -445,6 +499,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 3,
                     category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "summarize_agent_loop".into(),
@@ -454,6 +509,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 4,
                     category: TaskCategory::Summarization,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "repo_structure".into(),
@@ -463,6 +519,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "multi_file_compare".into(),
@@ -472,6 +529,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "conditional_file_op".into(),
@@ -481,6 +539,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["benchmark".into()],
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "code_review".into(),
@@ -490,6 +549,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec![],
                     max_iterations: 4,
                     category: TaskCategory::Summarization,
+                    tier: TaskTier::Core,
                 },
                 // --- 追加タスク（変異評価の多様性向上） ---
                 BenchmarkTask {
@@ -500,6 +560,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["rename".into(), "replaced".into(), "updated".into()],
                     max_iterations: 6,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "git_diff_analysis".into(),
@@ -509,6 +570,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["diff".into(), "commit".into(), "changed".into()],
                     max_iterations: 4,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "error_recovery_permission".into(),
@@ -518,6 +580,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["permission".into(), "denied".into(), "error".into(), "cannot".into()],
                     max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "reasoning_json_parse".into(),
@@ -527,6 +590,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["bonsai".into()],
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "code_gen_sort".into(),
@@ -536,6 +600,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["sort".into(), "fn".into(), "vec".into()],
                     max_iterations: 5,
                     category: TaskCategory::CodeGeneration,
+                    tier: TaskTier::Core,
                 },
                 BenchmarkTask {
                     id: "multi_file_search".into(),
@@ -545,6 +610,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["found".into(), "file".into()],
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Core,
                 },
                 // ============================================================
                 // Phase C 追加タスク（22→40, .claude/plan/phase-c-and-refactor-draft.md Part 1）
@@ -560,6 +626,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["new_name".into(), "リネーム".into()],
                     max_iterations: 8,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "sig_change_4files".into(),
@@ -569,6 +636,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["b: bool".into(), "呼出".into()],
                     max_iterations: 8,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Extended,
                 },
                 // --- LongRun (×2) -------------------------------------------
                 BenchmarkTask {
@@ -579,6 +647,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["要約".into(), "構造".into()],
                     max_iterations: 10,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "implement_50steps".into(),
@@ -588,6 +657,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["Bazz".into(), "Lazz".into(), "FizzBuzz".into()],
                     max_iterations: 6,
                     category: TaskCategory::CodeGeneration,
+                    tier: TaskTier::Extended,
                 },
                 // --- ToolChain (×2) -----------------------------------------
                 BenchmarkTask {
@@ -598,6 +668,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["parse_v2".into(), "改名".into()],
                     max_iterations: 8,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "grep_multiedit".into(),
@@ -607,6 +678,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["grep".into(), "置換".into()],
                     max_iterations: 6,
                     category: TaskCategory::MultiStep,
+                    tier: TaskTier::Extended,
                 },
                 // --- ErrorRecovery (×2) -------------------------------------
                 BenchmarkTask {
@@ -617,6 +689,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["代替".into(), "ls".into()],
                     max_iterations: 5,
                     category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "corrupt_file_repair".into(),
@@ -626,6 +699,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["}".into(), "name".into()],
                     max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Extended,
                 },
                 // --- McpInteg (×2) — MCP 未接続時はツール不在で keyword 評価のみ ---
                 BenchmarkTask {
@@ -636,6 +710,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["filesystem".into(), "list".into()],
                     max_iterations: 4,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "mcp_search_replace".into(),
@@ -645,6 +720,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["foo".into(), "bar".into()],
                     max_iterations: 5,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Extended,
                 },
                 // --- Semantic (×2) — 曖昧な指示への構造化応答 ---------------
                 BenchmarkTask {
@@ -655,6 +731,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["ログ".into(), "改善".into()],
                     max_iterations: 4,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "refactor_intent".into(),
@@ -664,6 +741,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["リファクタ".into(), "指針".into()],
                     max_iterations: 4,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Extended,
                 },
                 // --- Reasoning (×2) -----------------------------------------
                 BenchmarkTask {
@@ -674,6 +752,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["false".into(), "偽".into()],
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "ambiguous_calc".into(),
@@ -683,6 +762,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["1".into(), "256".into()],
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Extended,
                 },
                 // --- Summarization (×2) -------------------------------------
                 BenchmarkTask {
@@ -693,6 +773,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["agent_loop".into(), "tool_exec".into()],
                     max_iterations: 5,
                     category: TaskCategory::Summarization,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "git_log_summary".into(),
@@ -702,6 +783,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["commit".into(), "要約".into()],
                     max_iterations: 5,
                     category: TaskCategory::Summarization,
+                    tier: TaskTier::Extended,
                 },
                 // --- Verification (×2) — 自己検証 / 事実確認 ----------------
                 BenchmarkTask {
@@ -712,6 +794,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["391".into(), "検算".into()],
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
+                    tier: TaskTier::Extended,
                 },
                 BenchmarkTask {
                     id: "tool_fact_check".into(),
@@ -721,6 +804,7 @@ impl BenchmarkSuite {
                     expected_keywords: vec!["Cargo.toml".into(), "存在".into()],
                     max_iterations: 4,
                     category: TaskCategory::ToolUse,
+                    tier: TaskTier::Extended,
                 },
             ],
         }
@@ -1172,6 +1256,7 @@ mod tests {
             expected_keywords: vec!["hello".into(), "world".into()],
             max_iterations: 3,
             category: TaskCategory::Reasoning,
+            tier: TaskTier::Core,
         };
         let result = mock_result("hello there", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1189,6 +1274,7 @@ mod tests {
             expected_keywords: vec!["1024".into()],
             max_iterations: 3,
             category: TaskCategory::Reasoning,
+            tier: TaskTier::Core,
         };
         let result = mock_result("2の10乗は1024です", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1205,6 +1291,7 @@ mod tests {
             expected_keywords: vec!["README".into()],
             max_iterations: 3,
             category: TaskCategory::ToolUse,
+            tier: TaskTier::Core,
         };
         let result = mock_result("READMEの内容は...", vec!["file_read"], 2);
         let score = evaluate_task_response(&task, &result);
@@ -1222,6 +1309,7 @@ mod tests {
             expected_keywords: vec!["commit".into()],
             max_iterations: 3,
             category: TaskCategory::ToolUse,
+            tier: TaskTier::Core,
         };
         let result = mock_result("エラーが発生しました", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1238,6 +1326,7 @@ mod tests {
             expected_keywords: vec!["ok".into()],
             max_iterations: 5,
             category: TaskCategory::Reasoning,
+            tier: TaskTier::Core,
         };
         let fast = mock_result("ok", vec![], 1);
         let slow = mock_result("ok", vec![], 4);
@@ -1259,6 +1348,7 @@ mod tests {
             expected_keywords: vec!["ok".into()],
             max_iterations: 3,
             category: TaskCategory::MultiStep,
+            tier: TaskTier::Core,
         };
         let partial = mock_result("ok", vec!["shell"], 1);
         let full = mock_result("ok", vec!["shell", "file_read"], 1);
@@ -1408,6 +1498,7 @@ mod tests {
             expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
             max_iterations: 3,
             category: TaskCategory::CodeGeneration,
+            tier: TaskTier::Core,
         };
         // FizzBuzz出力を含む回答 → 全キーワードヒット
         let result = mock_result(
@@ -1432,6 +1523,7 @@ mod tests {
             expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
             max_iterations: 3,
             category: TaskCategory::CodeGeneration,
+            tier: TaskTier::Core,
         };
         // fizzのみ含む回答 → 部分ヒット
         let result = mock_result("fizz only", vec![], 1);
@@ -1452,6 +1544,7 @@ mod tests {
             expected_keywords: vec![],
             max_iterations: 5,
             category: TaskCategory::MultiStep,
+            tier: TaskTier::Core,
         };
         // 数値を含む回答 → 成功
         let result = mock_result(
@@ -1476,6 +1569,7 @@ mod tests {
             expected_keywords: vec![],
             max_iterations: 5,
             category: TaskCategory::MultiStep,
+            tier: TaskTier::Core,
         };
         // 数値なし回答 → 失敗
         let result = mock_result("フィールドがいくつかあります", vec!["file_read"], 2);
@@ -1496,6 +1590,7 @@ mod tests {
             expected_keywords: vec![],
             max_iterations: 3,
             category: TaskCategory::ErrorRecovery,
+            tier: TaskTier::Core,
         };
         // エラー報告を含む回答 → 成功
         let result = mock_result(
@@ -1520,6 +1615,7 @@ mod tests {
             expected_keywords: vec![],
             max_iterations: 3,
             category: TaskCategory::ErrorRecovery,
+            tier: TaskTier::Core,
         };
         // エラー報告なし → 失敗
         let result = mock_result("ファイルの内容は以下の通りです", vec!["file_read"], 1);
@@ -1540,6 +1636,7 @@ mod tests {
             expected_keywords: vec![],
             max_iterations: 4,
             category: TaskCategory::Summarization,
+            tier: TaskTier::Core,
         };
         // 50文字以上の回答 → 成功
         let long_answer = "このファイルはエージェントループの主要な実装を含んでおり、Reflexionパターンを使用して自律的な推論と行動のサイクルを管理しています。";
@@ -1561,6 +1658,7 @@ mod tests {
             expected_keywords: vec![],
             max_iterations: 4,
             category: TaskCategory::Summarization,
+            tier: TaskTier::Core,
         };
         // 短すぎる回答 → 部分スコア
         let result = mock_result("ループ処理です", vec!["file_read"], 1);
@@ -1597,6 +1695,7 @@ mod tests {
             expected_keywords: vec!["fizz".into(), "buzz".into(), "fizzbuzz".into()],
             max_iterations: 3,
             category: TaskCategory::CodeGeneration,
+            tier: TaskTier::Core,
         };
         let result = mock_result("FizzBuzz: Fizz, Buzz, FizzBuzz", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1663,6 +1762,7 @@ mod tests {
             expected_keywords: vec!["permission".into(), "denied".into(), "error".into(), "cannot".into()],
             max_iterations: 4,
             category: TaskCategory::ErrorRecovery,
+            tier: TaskTier::Core,
         };
         let result = mock_result(
             "permission deniedエラーが発生しました。書き込みできません",
@@ -1687,6 +1787,7 @@ mod tests {
             expected_keywords: vec!["bonsai".into()],
             max_iterations: 3,
             category: TaskCategory::Reasoning,
+            tier: TaskTier::Core,
         };
         let result = mock_result("nameフィールドの値は\"bonsai\"です", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1707,6 +1808,7 @@ mod tests {
             expected_keywords: vec!["sort".into(), "fn".into(), "vec".into()],
             max_iterations: 5,
             category: TaskCategory::CodeGeneration,
+            tier: TaskTier::Core,
         };
         let result = mock_result(
             "fn bubble_sort(mut vec: Vec<i32>) -> Vec<i32> { /* sort logic */ }",
