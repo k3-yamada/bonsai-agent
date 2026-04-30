@@ -516,33 +516,14 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
 
 fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
     let store = MemoryStore::open(&get_db_path())?;
-    // create_backend()を使わない理由: labモックは"1024"を返す特殊応答が必要
-    // （ベンチマークタスクのキーワード評価で数値が必要なため）
+    // Lab モックは "1024" を返す特殊応答が必要（ベンチマークのキーワード評価で数値が必要）
+    // 非モック経路は create_backend() に委譲し、FallbackChain wrap を享受する
     let backend: Box<dyn LlmBackend> = if ctx.mock {
         Box::new(MockLlmBackend::new(
             (0..10000).map(|_| "1024".to_string()).collect(),
         ))
     } else {
-        let b = LlamaServerBackend::connect_with_params(
-            &ctx.server_url,
-            &ctx.app_config.model.model_id,
-            ctx.app_config.model.inference.clone(),
-        )
-        .with_mlx_compatible(ctx.app_config.model.backend == ServerBackend::MlxLm)
-        .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
-        if !b.is_healthy() {
-            let backend_name = match ctx.app_config.model.backend {
-                ServerBackend::LlamaServer => "llama-server",
-                ServerBackend::MlxLm => "mlx-lm",
-                ServerBackend::BitNet => "bitnet.cpp",
-            };
-            eprintln!(
-                "エラー: {} ({}) に接続できません。",
-                backend_name, ctx.server_url
-            );
-            std::process::exit(1);
-        }
-        Box::new(b)
+        create_backend(ctx)
     };
     let tsv_path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
