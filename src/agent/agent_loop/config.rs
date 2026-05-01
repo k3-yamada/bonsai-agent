@@ -3,7 +3,7 @@
 //! 元 `agent_loop.rs` から分離（refactor commit 2/8）。
 //! 公開 API: `AgentConfig`, `inference_for_task`（mod.rs から `pub use`）。
 
-use crate::config::InferenceParams;
+use crate::config::{InferenceParams, MemoryBlockConfig};
 use crate::runtime::model_router::AdvisorConfig;
 use crate::tools::TaskType;
 
@@ -28,6 +28,10 @@ pub struct AgentConfig {
     pub base_inference: InferenceParams,
     /// タスク単位のウォールクロックタイムアウト（None=無制限）
     pub task_timeout: Option<std::time::Duration>,
+    /// 項目 179: SOUL.md ペルソナパス（label="persona" として注入、3 段 fallback 検索）
+    pub soul_path: Option<std::path::PathBuf>,
+    /// 項目 179: 追加メモリブロック（[[memory.blocks]] config 由来）
+    pub memory_blocks: Vec<MemoryBlockConfig>,
 }
 
 impl Default for AgentConfig {
@@ -44,6 +48,8 @@ impl Default for AgentConfig {
             max_mcp_tools_in_context: 3,
             base_inference: InferenceParams::default(),
             task_timeout: None,
+            soul_path: None,
+            memory_blocks: Vec::new(),
         }
     }
 }

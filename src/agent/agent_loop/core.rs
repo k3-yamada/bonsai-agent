@@ -6,7 +6,7 @@
 use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;
-use crate::agent::context_inject::inject_contextual_memories;
+use crate::agent::context_inject::{inject_contextual_memories, inject_memory_blocks};
 use crate::agent::conversation::{Message, Role, Session};
 use crate::agent::event_store::{EventStore, EventType};
 use crate::agent::validate::PathGuard;
@@ -128,6 +128,9 @@ pub fn run_agent_loop_with_session(
         None,
     );
 
+    // 項目 179: Letta candidate 3 完成形 — SOUL.md persona + [[memory.blocks]] extras を
+    // system prompt 直後に <context type="block:{label}"> タグで注入。
+    inject_memory_blocks(session, &config.soul_path, &config.memory_blocks);
     inject_contextual_memories(session, &task_context, store);
     inject_planning_step(session, &task_context);
 

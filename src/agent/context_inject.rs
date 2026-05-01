@@ -146,13 +146,28 @@ impl MemoryBlock {
     }
 }
 
-/// SOUL.md を含むメモリブロックを読み込む。
-/// 現状は load_soul() を内部で呼び単一の "persona" block を返すラッパー。
-/// 後続セッションで [[memory.blocks]] 設定追加時にここを拡張する。
-pub fn load_blocks(soul_path: &Option<std::path::PathBuf>) -> Vec<MemoryBlock> {
+/// SOUL.md および追加メモリブロックを読み込む（項目 179: Letta candidate 3 完成形）。
+///
+/// SOUL.md は label="persona" として最初に読込まれる (system prompt 先頭順序維持)。
+/// その後 [[memory.blocks]] config で指定された extras を順次読込む。
+/// 各 extras について:
+///   - ファイル不在: 静かにスキップ (graceful degradation)
+///   - 内容が空白のみ: スキップ (load_soul と同方針)
+///   - 正常読込: MemoryBlock として追加
+pub fn load_blocks(
+    soul_path: &Option<std::path::PathBuf>,
+    extras: &[crate::config::MemoryBlockConfig],
+) -> Vec<MemoryBlock> {
     let mut blocks = Vec::new();
     if let Some(persona) = load_soul(soul_path) {
         blocks.push(MemoryBlock::new("persona", persona));
+    }
+    for cfg in extras {
+        if let Ok(content) = std::fs::read_to_string(&cfg.path)
+            && !content.trim().is_empty()
+        {
+            blocks.push(MemoryBlock::new(cfg.label.clone(), content));
+        }
     }
     blocks
 }
@@ -160,6 +175,26 @@ pub fn load_blocks(soul_path: &Option<std::path::PathBuf>) -> Vec<MemoryBlock> {
 /// ラベル指定で MemoryBlock を取得。重複ラベルがある場合は最初のヒットを返す。
 pub fn find_block<'a>(blocks: &'a [MemoryBlock], label: &str) -> Option<&'a MemoryBlock> {
     blocks.iter().find(|b| b.label == label)
+}
+
+/// MemoryBlock をセッションに注入（項目 179: Letta candidate 3 完成形）。
+///
+/// 各 block を `<context type="block:{label}">` タグで system message として追加。
+/// 項目 80 のタグ統一方針に準拠 (memory/experience/vault-rules 等と同フォーマット)。
+/// SOUL.md persona は最初の block として読込まれるため、system prompt 直後に配置される。
+pub(crate) fn inject_memory_blocks(
+    session: &mut Session,
+    soul_path: &Option<std::path::PathBuf>,
+    extras: &[crate::config::MemoryBlockConfig],
+) {
+    let blocks = load_blocks(soul_path, extras);
+    for block in &blocks {
+        session.add_message(Message::system(format!(
+            "<context type=\"block:{}\">\n{}\n</context>",
+            block.label,
+            block.value.trim()
+        )));
+    }
 }
 
 /// コンテキストメモリ・経験・スキルをセッションに注入
@@ -336,7 +371,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("SOUL.md");
         std::fs::write(&path, "# Test Persona\nI am a test agent.").unwrap();
-        let blocks = load_blocks(&Some(path));
+        // 項目 179: extras 引数追加（空配列で persona のみ取得）
+        let blocks = load_blocks(&Some(path), &[]);
         assert_eq!(blocks.len(), 1, "SOUL.md があれば 1 block 返却");
         assert_eq!(blocks[0].label, "persona");
         assert!(blocks[0].value.contains("Test Persona"));
@@ -344,7 +380,8 @@ mod tests {
 
     #[test]
     fn t_load_blocks_empty_when_no_soul() {
-        let blocks = load_blocks(&Some(std::path::PathBuf::from("/nonexistent/SOUL.md")));
+        // 項目 179: extras 引数追加
+        let blocks = load_blocks(&Some(std::path::PathBuf::from("/nonexistent/SOUL.md")), &[]);
         // 3 段 fallback path も全て存在しない場合のみ空。本テスト環境ではこれが期待される
         // が、実環境で .bonsai/SOUL.md または ~/.config/bonsai-agent/SOUL.md がある場合は
         // 1 block 返却される。両方の挙動を許容（panic しないことが本質）。
@@ -361,5 +398,143 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().value, "user profile");
         assert!(find_block(&blocks, "nonexistent").is_none());
+    }
+
+    // --- 項目 179: load_blocks extras 対応テスト群 ---
+
+    #[test]
+    fn t_load_blocks_with_persona_and_extras() {
+        use crate::config::MemoryBlockConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let soul = dir.path().join("SOUL.md");
+        let human = dir.path().join("human.md");
+        std::fs::write(&soul, "# Persona\nagent identity").unwrap();
+        std::fs::write(&human, "# Human\nuser profile data").unwrap();
+        let extras = vec![MemoryBlockConfig {
+            label: "human".into(),
+            path: human.clone(),
+        }];
+        let blocks = load_blocks(&Some(soul), &extras);
+        assert_eq!(blocks.len(), 2, "persona + 1 extra = 2 blocks");
+        assert_eq!(blocks[0].label, "persona", "persona は先頭");
+        assert_eq!(blocks[1].label, "human");
+        assert!(blocks[1].value.contains("user profile data"));
+    }
+
+    #[test]
+    fn t_load_blocks_extras_skip_missing_file() {
+        use crate::config::MemoryBlockConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let soul = dir.path().join("SOUL.md");
+        std::fs::write(&soul, "persona").unwrap();
+        let extras = vec![MemoryBlockConfig {
+            label: "missing".into(),
+            path: std::path::PathBuf::from("/nonexistent/file.md"),
+        }];
+        let blocks = load_blocks(&Some(soul), &extras);
+        assert_eq!(blocks.len(), 1, "ファイル不在 extra はスキップ");
+        assert_eq!(blocks[0].label, "persona");
+    }
+
+    #[test]
+    fn t_load_blocks_extras_skip_empty_content() {
+        use crate::config::MemoryBlockConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let soul = dir.path().join("SOUL.md");
+        let empty = dir.path().join("empty.md");
+        std::fs::write(&soul, "persona").unwrap();
+        std::fs::write(&empty, "   \n\t\n  ").unwrap();
+        let extras = vec![MemoryBlockConfig {
+            label: "scratchpad".into(),
+            path: empty,
+        }];
+        let blocks = load_blocks(&Some(soul), &extras);
+        assert_eq!(blocks.len(), 1, "空白のみの extra はスキップ");
+    }
+
+    #[test]
+    fn t_load_blocks_extras_only_no_soul() {
+        use crate::config::MemoryBlockConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = dir.path().join("scratchpad.md");
+        std::fs::write(&scratch, "scratch notes").unwrap();
+        let extras = vec![MemoryBlockConfig {
+            label: "scratchpad".into(),
+            path: scratch,
+        }];
+        // SOUL.md なし、extras のみ → extras のみ返却
+        let blocks = load_blocks(&Some(std::path::PathBuf::from("/nonexistent/SOUL.md")), &extras);
+        // 環境依存で 0 or 1 (SOUL.md 3 段 fallback) + 1 extra
+        assert!(
+            blocks.iter().any(|b| b.label == "scratchpad"),
+            "extras は読込まれる"
+        );
+    }
+
+    // --- 項目 179: inject_memory_blocks 注入テスト群 ---
+
+    #[test]
+    fn t_inject_memory_blocks_persona_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let soul = dir.path().join("SOUL.md");
+        std::fs::write(&soul, "# Persona\nI am bonsai.").unwrap();
+        let mut session = Session::new();
+        let before = session.messages.len();
+        inject_memory_blocks(&mut session, &Some(soul), &[]);
+        assert_eq!(
+            session.messages.len(),
+            before + 1,
+            "persona block 1 件が注入される"
+        );
+        let injected = &session.messages[before].content;
+        assert!(
+            injected.contains("<context type=\"block:persona\">"),
+            "block:persona タグ含む"
+        );
+        assert!(injected.contains("I am bonsai."));
+    }
+
+    #[test]
+    fn t_inject_memory_blocks_persona_and_extras() {
+        use crate::config::MemoryBlockConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let soul = dir.path().join("SOUL.md");
+        let human = dir.path().join("human.md");
+        std::fs::write(&soul, "agent persona").unwrap();
+        std::fs::write(&human, "user is a Rust dev").unwrap();
+        let extras = vec![MemoryBlockConfig {
+            label: "human".into(),
+            path: human,
+        }];
+        let mut session = Session::new();
+        let before = session.messages.len();
+        inject_memory_blocks(&mut session, &Some(soul), &extras);
+        assert_eq!(session.messages.len(), before + 2, "2 block 注入");
+        assert!(
+            session.messages[before]
+                .content
+                .contains("<context type=\"block:persona\">"),
+            "persona は最初"
+        );
+        assert!(
+            session.messages[before + 1]
+                .content
+                .contains("<context type=\"block:human\">"),
+            "human は次"
+        );
+    }
+
+    #[test]
+    fn t_inject_memory_blocks_no_persona_no_extras() {
+        let mut session = Session::new();
+        let before = session.messages.len();
+        // 存在しない SOUL path + 空 extras → 何も注入されない
+        inject_memory_blocks(
+            &mut session,
+            &Some(std::path::PathBuf::from("/nonexistent/SOUL.md")),
+            &[],
+        );
+        // 環境次第（.bonsai/SOUL.md があれば 1）だが、≤ before+1 を保証
+        assert!(session.messages.len() <= before + 1);
     }
 }

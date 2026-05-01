@@ -328,6 +328,8 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         max_mcp_tools_in_context: base_config.max_mcp_tools_in_context,
         base_inference: base_config.base_inference.clone(),
         task_timeout: base_config.task_timeout,
+        soul_path: base_config.soul_path.clone(),
+        memory_blocks: base_config.memory_blocks.clone(),
     };
 
     match &mutation.apply {
@@ -1189,6 +1191,8 @@ mod tests {
             max_mcp_tools_in_context: 3,
             base_inference: crate::config::InferenceParams::default(),
             task_timeout: None,
+            soul_path: None,
+            memory_blocks: Vec::new(),
         }
     }
 

@@ -168,6 +168,9 @@ fn main() -> Result<()> {
                     None
                 }
             },
+            // 項目 179: SOUL.md ペルソナ + 追加メモリブロックを config から伝播
+            soul_path: app_config.agent.soul_path.clone(),
+            memory_blocks: app_config.memory.blocks.clone(),
             ..Default::default()
         },
         cancel,

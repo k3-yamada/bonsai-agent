@@ -894,6 +894,8 @@ impl BenchmarkSuite {
                     max_mcp_tools_in_context: config.max_mcp_tools_in_context,
                     base_inference: config.base_inference.clone(),
                     task_timeout: config.task_timeout,
+                    soul_path: config.soul_path.clone(),
+                    memory_blocks: config.memory_blocks.clone(),
                 };
                 let result = run_agent_loop(
                     &task.input,
@@ -969,6 +971,8 @@ impl BenchmarkSuite {
                 max_mcp_tools_in_context: config.max_mcp_tools_in_context,
                 base_inference: config.base_inference.clone(),
                 task_timeout: config.task_timeout,
+                soul_path: config.soul_path.clone(),
+                memory_blocks: config.memory_blocks.clone(),
             };
 
             let store = MemoryStore::in_memory()?;

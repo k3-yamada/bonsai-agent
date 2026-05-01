@@ -339,6 +339,22 @@ pub struct MemoryConfig {
     pub max_memories: usize,
     pub decay_days: i64,
     pub skill_promotion_threshold: usize,
+    /// 項目 179: 追加メモリブロック (Letta candidate 3 完成形)
+    ///
+    /// SOUL.md (label="persona") は [agent].soul_path で別途扱われる。
+    /// ここでは human / scratchpad / system_state 等の追加 block を設定する。
+    /// `[[memory.blocks]]` TOML セクションで複数定義可能。
+    #[serde(default)]
+    pub blocks: Vec<MemoryBlockConfig>,
+}
+
+/// 追加メモリブロック設定 (項目 179)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryBlockConfig {
+    /// ブロック識別ラベル (例: "human", "scratchpad", "system_state")
+    pub label: String,
+    /// ブロック内容のファイルパス
+    pub path: PathBuf,
 }
 
 fn default_sse_timeout() -> u64 {
@@ -399,6 +415,7 @@ impl Default for MemoryConfig {
             max_memories: 1000,
             decay_days: 90,
             skill_promotion_threshold: 3,
+            blocks: Vec::new(),
         }
     }
 }
@@ -915,5 +932,52 @@ server_url = "http://localhost:8090"
         assert_eq!(chain.current().unwrap().model_id, "primary");
         chain.record_failure(); // 5 回目で切替
         assert_eq!(chain.current().unwrap().model_id, "fallback");
+    }
+
+    // --- 項目 179: [[memory.blocks]] 設定対応テスト群 ---
+
+    #[test]
+    fn test_memory_blocks_default_empty() {
+        let config = AppConfig::default();
+        assert!(
+            config.memory.blocks.is_empty(),
+            "デフォルトでは追加 block なし"
+        );
+    }
+
+    #[test]
+    fn test_memory_blocks_from_toml() {
+        let toml_str = r#"
+[[memory.blocks]]
+label = "human"
+path = "/tmp/human.md"
+
+[[memory.blocks]]
+label = "scratchpad"
+path = "/tmp/scratchpad.md"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.memory.blocks.len(), 2, "2 block 定義される");
+        assert_eq!(config.memory.blocks[0].label, "human");
+        assert_eq!(
+            config.memory.blocks[0].path.to_str().unwrap(),
+            "/tmp/human.md"
+        );
+        assert_eq!(config.memory.blocks[1].label, "scratchpad");
+    }
+
+    #[test]
+    fn test_memory_blocks_backward_compat_no_section() {
+        // 旧 config (memory セクションも blocks も指定なし) でパース成功
+        let toml_str = r#"
+[agent]
+max_iterations = 20
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            config.memory.blocks.is_empty(),
+            "旧 config でも blocks フィールドはデフォルト空"
+        );
+        assert_eq!(config.memory.max_memories, 1000, "他フィールドもデフォルト");
     }
 }
