@@ -732,8 +732,10 @@ mod tests {
 
     #[test]
     fn test_sub_config_min_iterations() {
-        let mut parent = AgentConfig::default();
-        parent.max_iterations = 4;
+        let parent = AgentConfig {
+            max_iterations: 4,
+            ..Default::default()
+        };
         let sub = SubAgentConfig::from_parent(&parent, 0);
         assert_eq!(sub.max_iterations, 3);
     }

@@ -334,7 +334,7 @@ mod tests {
         let mut session = Session::new();
         inject_vault_knowledge(&mut session, "hello", &vault);
         // Decision(Rule)があるのでメッセージ追加される
-        assert!(session.messages.len() > 0);
+        assert!(!session.messages.is_empty());
         let has_rules = session
             .messages
             .iter()

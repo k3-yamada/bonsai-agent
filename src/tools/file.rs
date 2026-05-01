@@ -1023,8 +1023,7 @@ mod tests {
         let new_text = "let value = 99;";
         let result = fuzzy_find_replace(content, old_text, new_text);
         // 全角混在old_textが半角contentと一致するケース
-        if result.is_some() {
-            let (_, msg) = result.unwrap();
+        if let Some((_, msg)) = result {
             assert!(
                 msg.contains("Unicode") || msg.contains("模糊"),
                 "Unicode戦略が使われること"

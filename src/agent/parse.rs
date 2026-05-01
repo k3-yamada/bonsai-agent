@@ -393,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // テスト入力として "3.14" 文字列を float 変換確認、PI 意図ではない
     fn test_coerce_string_to_float() {
         let mut v = serde_json::json!({"ratio": "3.14"});
         coerce_tool_arguments(&mut v);

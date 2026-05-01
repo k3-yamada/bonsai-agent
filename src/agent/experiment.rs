@@ -1501,7 +1501,7 @@ mod tests {
         // 閾値ちょうどの場合も通過
         let estimated_delta_border = -0.01;
         assert!(
-            !(estimated_delta_border < threshold),
+            estimated_delta_border >= threshold,
             "閾値ちょうどは通過（<で判定するため）"
         );
     }

@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_schema_version_is_positive() {
-        assert!(SCHEMA_VERSION > 0);
+        const { assert!(SCHEMA_VERSION > 0) };
     }
 
     #[test]
