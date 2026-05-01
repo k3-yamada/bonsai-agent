@@ -28,9 +28,17 @@ pub(super) fn check_invariants(session: &Session, task_context: &str) -> Vec<Str
         .filter(|m| m.role == Role::Tool)
         .collect();
     if !tool_msgs.is_empty() {
+        // tool_exec.rs:78 の実エラー format ("ツール実行エラー: ...") を prefix で照合。
+        // 旧実装 `content.contains("エラー")` は file_read で読んだソース内の
+        // 「エラー」「失敗」単語に偽陽性反応し、Lab 中に常時 0% 警告を出していた。
         let success_count = tool_msgs
             .iter()
-            .filter(|m| !m.content.contains("エラー") && !m.content.contains("失敗"))
+            .filter(|m| {
+                let trimmed = m.content.trim_start();
+                !trimmed.starts_with("ツール実行エラー")
+                    && !trimmed.starts_with("Error:")
+                    && !trimmed.starts_with("[Tool error]")
+            })
             .count();
         let rate = success_count as f64 / tool_msgs.len() as f64;
         if rate < 0.5 {

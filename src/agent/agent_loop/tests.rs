@@ -1279,15 +1279,16 @@ fn t_check_invariants_no_violations() {
 }
 
 // テスト: check_invariants — ツール失敗多い場合に違反検出
+// fixture を実エラー format ("ツール実行エラー: ...") に更新（tool_exec.rs:78 と一致）
 #[test]
 fn t_check_invariants_low_success_rate() {
     let mut session = Session::new();
     session.add_message(Message::user("テストを書いて"));
-    // ツール失敗メッセージ3件
+    // ツール失敗メッセージ3件（tool_exec.rs:78 の実 format）
     for _ in 0..3 {
         session.add_message(Message {
             role: Role::Tool,
-            content: "エラー: ファイルが見つかりません".to_string(),
+            content: "ツール実行エラー: ファイルが見つかりません".to_string(),
             attachments: Vec::new(),
             tool_call_id: None,
         });
@@ -1305,6 +1306,35 @@ fn t_check_invariants_low_success_rate() {
         violations[0].contains("ツール成功率が低い"),
         "成功率警告: {}",
         violations[0]
+    );
+}
+
+// テスト: check_invariants — file_read で「エラー」含むコメントを読んでも偽陽性にならない
+// 既存ヒューリスティック（content.contains("エラー")）の偽陽性除去を確認
+#[test]
+fn t_check_invariants_no_false_positive_on_file_content_with_error_word() {
+    let mut session = Session::new();
+    session.add_message(Message::user("ファイルを読んで"));
+    // file_read で読んだ Rust コード片に "エラー" が含まれる典型例
+    session.add_message(Message {
+        role: Role::Tool,
+        content: "// エラーハンドリング\nfn handle(e: Error) -> Result<()> { Err(e) }"
+            .to_string(),
+        attachments: Vec::new(),
+        tool_call_id: None,
+    });
+    // ドキュメントに「失敗」という単語が含まれる典型例
+    session.add_message(Message {
+        role: Role::Tool,
+        content: "テストの失敗時はリトライしてください".to_string(),
+        attachments: Vec::new(),
+        tool_call_id: None,
+    });
+    let violations = check_invariants(&session, "ファイルを読んで");
+    assert!(
+        violations.is_empty(),
+        "成功した file_read（エラー/失敗を単語として含む）で違反検出されてはならない: {:?}",
+        violations
     );
 }
 
