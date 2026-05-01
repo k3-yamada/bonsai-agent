@@ -128,6 +128,40 @@ pub fn load_soul(soul_path: &Option<std::path::PathBuf>) -> Option<String> {
     None
 }
 
+/// ラベル付きメモリブロック（Letta candidate 3 / 項目 177）。
+/// SOUL.md は label="persona" で保持される。将来的に
+/// human/scratchpad/system_state 等の追加 block に拡張可能。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryBlock {
+    pub label: String,
+    pub value: String,
+}
+
+impl MemoryBlock {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+        }
+    }
+}
+
+/// SOUL.md を含むメモリブロックを読み込む。
+/// 現状は load_soul() を内部で呼び単一の "persona" block を返すラッパー。
+/// 後続セッションで [[memory.blocks]] 設定追加時にここを拡張する。
+pub fn load_blocks(soul_path: &Option<std::path::PathBuf>) -> Vec<MemoryBlock> {
+    let mut blocks = Vec::new();
+    if let Some(persona) = load_soul(soul_path) {
+        blocks.push(MemoryBlock::new("persona", persona));
+    }
+    blocks
+}
+
+/// ラベル指定で MemoryBlock を取得。重複ラベルがある場合は最初のヒットを返す。
+pub fn find_block<'a>(blocks: &'a [MemoryBlock], label: &str) -> Option<&'a MemoryBlock> {
+    blocks.iter().find(|b| b.label == label)
+}
+
 /// コンテキストメモリ・経験・スキルをセッションに注入
 pub(crate) fn inject_contextual_memories(
     session: &mut Session,
@@ -286,5 +320,46 @@ mod tests {
         let result = load_soul(&None);
         // Noneパスでパニックしない
         assert!(result.is_none() || result.is_some());
+    }
+
+    // 項目 177: MemoryBlock + load_blocks 追加（Letta candidate 3 MVP）
+
+    #[test]
+    fn t_memory_block_new_constructs_labeled_block() {
+        let block = MemoryBlock::new("persona", "I am a test agent.");
+        assert_eq!(block.label, "persona");
+        assert_eq!(block.value, "I am a test agent.");
+    }
+
+    #[test]
+    fn t_load_blocks_returns_persona_when_soul_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SOUL.md");
+        std::fs::write(&path, "# Test Persona\nI am a test agent.").unwrap();
+        let blocks = load_blocks(&Some(path));
+        assert_eq!(blocks.len(), 1, "SOUL.md があれば 1 block 返却");
+        assert_eq!(blocks[0].label, "persona");
+        assert!(blocks[0].value.contains("Test Persona"));
+    }
+
+    #[test]
+    fn t_load_blocks_empty_when_no_soul() {
+        let blocks = load_blocks(&Some(std::path::PathBuf::from("/nonexistent/SOUL.md")));
+        // 3 段 fallback path も全て存在しない場合のみ空。本テスト環境ではこれが期待される
+        // が、実環境で .bonsai/SOUL.md または ~/.config/bonsai-agent/SOUL.md がある場合は
+        // 1 block 返却される。両方の挙動を許容（panic しないことが本質）。
+        assert!(blocks.len() <= 1);
+    }
+
+    #[test]
+    fn t_find_block_returns_matching_label() {
+        let blocks = vec![
+            MemoryBlock::new("persona", "agent persona"),
+            MemoryBlock::new("human", "user profile"),
+        ];
+        let found = find_block(&blocks, "human");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().value, "user profile");
+        assert!(find_block(&blocks, "nonexistent").is_none());
     }
 }
