@@ -177,6 +177,19 @@ fn strip_think_tags(s: &str) -> String {
     result
 }
 
+/// Tool メッセージが実際のツール実行エラーかを判定（項目 178）
+///
+/// tool_exec.rs:78 の format `"ツール実行エラー: {e}"` を prefix で照合。
+/// 旧実装 `content.contains("エラー")` は file_read で読んだソース内の
+/// 「エラーハンドリング」コメント等で偽陽性を起こしていた (項目 175 と同症状)。
+/// support.rs:31-42 の `check_invariants` と整合する prefix セットを使用。
+fn is_tool_error_message(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("ツール実行エラー")
+        || trimmed.starts_with("Error:")
+        || trimmed.starts_with("[Tool error]")
+}
+
 /// メッセージの重要度スコアを計算（GLM-5.1 DSA知見）
 ///
 /// トークン重要度による動的注意配分。重要度が低いメッセージから優先的に削除。
@@ -198,12 +211,7 @@ pub fn score_message_importance(msg: &Message) -> f64 {
             }
         }
         Role::Tool => {
-            if msg.content.contains("error")
-                || msg.content.contains("Error")
-                || msg.content.contains("エラー")
-                || msg.content.contains("failed")
-                || msg.content.contains("Failed")
-            {
+            if is_tool_error_message(&msg.content) {
                 0.2
             } else {
                 0.5
@@ -262,11 +270,14 @@ impl SemanticScorer {
 }
 
 /// Toolメッセージからエラー（未解決事項）を検出
+///
+/// 項目 178: 実エラー prefix のみで照合 (`is_tool_error_message`)、
+/// ソース内コメントの「エラー」を偽陽性として拾わない。
 fn collect_unresolved(messages: &[Message], boundary: usize) -> Vec<String> {
     let mut errors = Vec::new();
     // 圧縮対象の末尾付近のエラーを優先的に収集
     for msg in messages[..boundary].iter().rev().take(boundary) {
-        if matches!(msg.role, Role::Tool) && msg.content.contains("エラー") {
+        if matches!(msg.role, Role::Tool) && is_tool_error_message(&msg.content) {
             let preview: String = msg.content.chars().take(100).collect();
             if !errors.contains(&preview) {
                 errors.push(preview);
@@ -1037,7 +1048,8 @@ mod tests {
 
     #[test]
     fn t_score_importance_error() {
-        let msg = Message::tool("error: file not found", "t1");
+        // 項目 178: 実エラー format (tool_exec.rs:78 prefix) のみ低スコア扱い
+        let msg = Message::tool("ツール実行エラー: file not found", "t1");
         assert_eq!(score_message_importance(&msg), 0.2, "エラーToolは低スコア");
     }
 
@@ -1132,7 +1144,8 @@ mod tests {
         use crate::runtime::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "write unit tests").unwrap();
-        let error_tool = Message::tool("error: compile failed", "t1");
+        // 項目 178: 実エラー format (tool_exec.rs:78 prefix) を使用
+        let error_tool = Message::tool("ツール実行エラー: compile failed", "t1");
         let ok_tool = Message::tool("write unit tests completed successfully", "t2");
         // エラーToolはベース0.2、成功Toolはベース0.5 → 成功の方が高いはず
         assert!(
@@ -1178,5 +1191,63 @@ mod tests {
             &scorer,
         );
         assert_eq!(m.len(), orig_len, "短いセッションは圧縮されない");
+    }
+
+    // --- 項目 178: compaction.rs 偽陽性除去テスト群 ---
+    // file_read で読んだソース内コメントの「エラー」を実エラー扱いせず、
+    // tool_exec.rs:78 形式 prefix のみを真のエラーとして扱う (support.rs:31-42 と整合)。
+
+    #[test]
+    fn t_score_importance_no_false_positive_on_source_code_error_word() {
+        let msg = Message::tool(
+            "fn handle() {\n    // エラーハンドリング: 失敗時のフォールバック\n    Ok(())\n}",
+            "t1",
+        );
+        assert_eq!(
+            score_message_importance(&msg),
+            0.5,
+            "ソース内コメントの「エラー」は失敗扱いしない"
+        );
+    }
+
+    #[test]
+    fn t_score_importance_real_tool_error_prefix() {
+        let msg = Message::tool("ツール実行エラー: file not found", "t1");
+        assert_eq!(
+            score_message_importance(&msg),
+            0.2,
+            "実エラー format (ツール実行エラー: prefix) は低スコア"
+        );
+    }
+
+    #[test]
+    fn t_score_importance_real_error_capital_prefix() {
+        let msg = Message::tool("Error: connection refused", "t1");
+        assert_eq!(
+            score_message_importance(&msg),
+            0.2,
+            "Error: 大文字 prefix も実エラー扱い"
+        );
+    }
+
+    #[test]
+    fn t_collect_unresolved_no_false_positive_on_source_code_error_word() {
+        let messages = vec![Message::tool(
+            "fn handle() { // エラーハンドリング\n    Ok(()) }",
+            "t1",
+        )];
+        let unresolved = collect_unresolved(&messages, 1);
+        assert!(
+            unresolved.is_empty(),
+            "ソース内コメントの「エラー」は未解決事項として収集しない"
+        );
+    }
+
+    #[test]
+    fn t_collect_unresolved_collects_real_tool_error() {
+        let messages = vec![Message::tool("ツール実行エラー: file not found", "t1")];
+        let unresolved = collect_unresolved(&messages, 1);
+        assert_eq!(unresolved.len(), 1, "実エラーは未解決事項として収集する");
+        assert!(unresolved[0].contains("ツール実行エラー"));
     }
 }
