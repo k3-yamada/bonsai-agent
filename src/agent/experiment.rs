@@ -477,6 +477,13 @@ impl MetaMutationGenerator {
 }
 
 // ─── smoke 補正係数（項目 184 由来、Lab smoke→core 42% retention） ───────────
+//
+// Pessimistic Prescreening 戦略: smoke は positive delta を体系的に inflate するため
+// (項目 184: smoke +0.0969 → core +0.0405、retention ~42%)、positive のみ scaling、
+// negative は保持。inflated win を疑い、loss signal は信頼する非対称設計。
+//
+// WARNING: BONSAI_LAB_SMOKE / BONSAI_LAB_SMOKE_CORRECTION を実験中に変更すると、
+// 同一 Lab セッション内で評価基準が揺れ計測整合性が崩れる。Lab 開始前に固定すること。
 
 /// Lab smoke モード判定（既存 `BONSAI_LAB_SMOKE` と同セマンティクス）
 fn lab_smoke_enabled() -> bool {
@@ -928,16 +935,24 @@ pub fn run_experiment_loop(
             )?;
 
             // smoke モード時のみ補正を適用 (sign-aware ×0.42、項目 184)
-            let estimated_delta = apply_smoke_correction_to_delta(raw_estimated_delta);
+            // env を 1 回だけ読んで以降のロジックとログに使い、計測整合性を保証
+            // (Codex audit Low #1: 2 回 read で値が乖離するレースウィンドウを除去)
+            let smoke_enabled = lab_smoke_enabled();
+            let smoke_coeff = smoke_correction_coefficient();
+            let estimated_delta = if smoke_enabled && raw_estimated_delta > 0.0 {
+                raw_estimated_delta * smoke_coeff
+            } else {
+                raw_estimated_delta
+            };
 
-            if lab_smoke_enabled() {
+            if smoke_enabled {
                 log_event(
                     LogLevel::Info,
                     "lab",
                     &format!(
                         "pre-screen smoke correction: raw_delta={:+.4} coeff={:.2} adjusted_delta={:+.4} threshold={:+.4}",
                         raw_estimated_delta,
-                        smoke_correction_coefficient(),
+                        smoke_coeff,
                         estimated_delta,
                         loop_config.prescreening_threshold,
                     ),
@@ -1581,7 +1596,7 @@ mod tests {
     #[test]
     fn test_smoke_correction_off_leaves_delta_unchanged() {
         // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
-let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_smoke_env();
         // smoke off: positive/negative ともに delta 不変
         assert!((apply_smoke_correction_to_delta(0.10) - 0.10).abs() < 1e-9);
@@ -1592,7 +1607,7 @@ let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     #[test]
     fn test_smoke_correction_on_scales_positive_delta_only() {
         // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
-let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_smoke_env();
         unsafe {
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
@@ -1616,7 +1631,7 @@ let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     #[test]
     fn test_smoke_correction_env_override_valid() {
         // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
-let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_smoke_env();
         unsafe {
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
@@ -1640,7 +1655,7 @@ let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     #[test]
     fn test_smoke_correction_env_override_invalid_falls_back() {
         // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
-let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_smoke_env();
         unsafe {
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
@@ -1661,7 +1676,7 @@ let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     #[test]
     fn test_smoke_correction_env_override_out_of_range() {
         // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
-let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_smoke_env();
         unsafe {
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
