@@ -476,6 +476,39 @@ impl MetaMutationGenerator {
     }
 }
 
+// ─── smoke 補正係数（項目 184 由来、Lab smoke→core 42% retention） ───────────
+//
+// stub 段階 (Red): apply_smoke_correction_to_delta は no-op、smoke on/off 判定なし。
+// Green でフル実装 (sign-aware scaling + env override) に置換される。
+
+/// Lab smoke モード判定（既存 BONSAI_LAB_SMOKE と同セマンティクス）
+fn lab_smoke_enabled() -> bool {
+    // Red stub: 常に false（smoke off 扱い、テストは smoke on path で fail する）
+    false
+}
+
+/// smoke 補正係数のデフォルト値
+///
+/// 項目 184 で実測された smoke 5-task → core 22-task の retention rate (~0.42)。
+/// `BONSAI_LAB_SMOKE_CORRECTION` env var で 0 < x ≤ 1 の値に上書き可能。
+pub const DEFAULT_SMOKE_CORRECTION: f64 = 0.42;
+
+/// smoke 補正係数を取得（env override 優先、無効値は default にフォールバック）
+fn smoke_correction_coefficient() -> f64 {
+    // Red stub: 常に default を返す（env override 未対応、上書きテスト fail）
+    DEFAULT_SMOKE_CORRECTION
+}
+
+/// smoke モード時に推定 delta に補正係数を適用（sign-aware: positive のみ scaling）
+///
+/// **Why sign-aware**: smoke が positive delta を inflate する性質 (項目 184) を補正する一方、
+/// negative delta も同じ係数で scaling すると false-accept リスク (-0.10 → -0.042 で
+/// -0.01 threshold を通過) が発生する。inflated win のみ補正、negative signal は保持。
+fn apply_smoke_correction_to_delta(delta: f64) -> f64 {
+    // Red stub: no-op（テストは sign-aware 期待で fail する）
+    delta
+}
+
 /// 少数タスクで変異の効果を事前推定する（事前計算済みベースラインスコアは使わず、
 /// サンプルタスク上で独自にベースラインを計測して比較する）
 /// タスク数の半分（最大4タスク）で1回実行し、delta推定値を返す
@@ -1504,6 +1537,122 @@ mod tests {
             estimated_delta_border >= threshold,
             "閾値ちょうどは通過（<で判定するため）"
         );
+    }
+
+    // --- smoke 補正係数テスト (項目 184 由来、Lab smoke→core 42% retention) ---
+    //
+    // env mutation race を避けるため module-local Mutex で serialize する
+    // (serial_test crate を増やさない方針、YAGNI)。
+
+    static SMOKE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_smoke_env() {
+        unsafe {
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+            std::env::remove_var("BONSAI_LAB_SMOKE_CORRECTION");
+        }
+    }
+
+    #[test]
+    fn test_smoke_correction_off_leaves_delta_unchanged() {
+        // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
+let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_smoke_env();
+        // smoke off: positive/negative ともに delta 不変
+        assert!((apply_smoke_correction_to_delta(0.10) - 0.10).abs() < 1e-9);
+        assert!((apply_smoke_correction_to_delta(-0.10) - (-0.10)).abs() < 1e-9);
+        assert!((apply_smoke_correction_to_delta(0.0) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_smoke_correction_on_scales_positive_delta_only() {
+        // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
+let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_smoke_env();
+        unsafe {
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        }
+        // sign-aware: positive のみ ×0.42、negative は不変
+        assert!(
+            (apply_smoke_correction_to_delta(0.10) - 0.042).abs() < 1e-9,
+            "smoke on + positive delta は ×0.42 補正されるべき"
+        );
+        assert!(
+            (apply_smoke_correction_to_delta(-0.10) - (-0.10)).abs() < 1e-9,
+            "smoke on でも negative delta は補正されない (sign-aware)"
+        );
+        assert!(
+            (apply_smoke_correction_to_delta(0.0) - 0.0).abs() < 1e-9,
+            "delta=0 は補正対象外"
+        );
+        reset_smoke_env();
+    }
+
+    #[test]
+    fn test_smoke_correction_env_override_valid() {
+        // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
+let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_smoke_env();
+        unsafe {
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+            std::env::set_var("BONSAI_LAB_SMOKE_CORRECTION", "0.5");
+        }
+        assert!(
+            (apply_smoke_correction_to_delta(0.10) - 0.05).abs() < 1e-9,
+            "BONSAI_LAB_SMOKE_CORRECTION=0.5 で 0.10 → 0.05"
+        );
+        // 境界値: 1.0 は補正なし相当
+        unsafe {
+            std::env::set_var("BONSAI_LAB_SMOKE_CORRECTION", "1.0");
+        }
+        assert!(
+            (apply_smoke_correction_to_delta(0.10) - 0.10).abs() < 1e-9,
+            "BONSAI_LAB_SMOKE_CORRECTION=1.0 で従来動作復元"
+        );
+        reset_smoke_env();
+    }
+
+    #[test]
+    fn test_smoke_correction_env_override_invalid_falls_back() {
+        // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
+let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_smoke_env();
+        unsafe {
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        }
+        for invalid in ["abc", "NaN", ""] {
+            unsafe {
+                std::env::set_var("BONSAI_LAB_SMOKE_CORRECTION", invalid);
+            }
+            assert!(
+                (apply_smoke_correction_to_delta(0.10) - 0.042).abs() < 1e-9,
+                "invalid override '{}' は default ×0.42 にフォールバック",
+                invalid
+            );
+        }
+        reset_smoke_env();
+    }
+
+    #[test]
+    fn test_smoke_correction_env_override_out_of_range() {
+        // poison は env mutation には実害なし（process-global、test の panic で値は残るのみ）
+let _g = SMOKE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_smoke_env();
+        unsafe {
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        }
+        // 範囲外 (≤0 or >1): default にフォールバック
+        for out_of_range in ["0", "0.0", "-0.1", "-1", "1.5", "10", "inf"] {
+            unsafe {
+                std::env::set_var("BONSAI_LAB_SMOKE_CORRECTION", out_of_range);
+            }
+            assert!(
+                (apply_smoke_correction_to_delta(0.10) - 0.042).abs() < 1e-9,
+                "範囲外 '{}' は default ×0.42 にフォールバック",
+                out_of_range
+            );
+        }
+        reset_smoke_env();
     }
 
     // --- 新変異カテゴリテスト ---
