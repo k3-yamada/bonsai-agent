@@ -477,36 +477,43 @@ impl MetaMutationGenerator {
 }
 
 // ─── smoke 補正係数（項目 184 由来、Lab smoke→core 42% retention） ───────────
-//
-// stub 段階 (Red): apply_smoke_correction_to_delta は no-op、smoke on/off 判定なし。
-// Green でフル実装 (sign-aware scaling + env override) に置換される。
 
-/// Lab smoke モード判定（既存 BONSAI_LAB_SMOKE と同セマンティクス）
+/// Lab smoke モード判定（既存 `BONSAI_LAB_SMOKE` と同セマンティクス）
 fn lab_smoke_enabled() -> bool {
-    // Red stub: 常に false（smoke off 扱い、テストは smoke on path で fail する）
-    false
+    std::env::var("BONSAI_LAB_SMOKE")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
 }
 
 /// smoke 補正係数のデフォルト値
 ///
 /// 項目 184 で実測された smoke 5-task → core 22-task の retention rate (~0.42)。
-/// `BONSAI_LAB_SMOKE_CORRECTION` env var で 0 < x ≤ 1 の値に上書き可能。
+/// `BONSAI_LAB_SMOKE_CORRECTION` env var で `0 < x ≤ 1` の値に上書き可能、
+/// 範囲外/無効値はこのデフォルトに自動フォールバック (`apply_smoke_correction_to_delta` 経由)。
 pub const DEFAULT_SMOKE_CORRECTION: f64 = 0.42;
 
-/// smoke 補正係数を取得（env override 優先、無効値は default にフォールバック）
+/// smoke 補正係数を取得（env override 優先、無効値/範囲外は default にフォールバック）
+///
+/// 受理範囲: `(0.0, 1.0]`。0 以下、NaN/inf、parse 不能は default に倒す。
 fn smoke_correction_coefficient() -> f64 {
-    // Red stub: 常に default を返す（env override 未対応、上書きテスト fail）
-    DEFAULT_SMOKE_CORRECTION
+    std::env::var("BONSAI_LAB_SMOKE_CORRECTION")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= 1.0)
+        .unwrap_or(DEFAULT_SMOKE_CORRECTION)
 }
 
 /// smoke モード時に推定 delta に補正係数を適用（sign-aware: positive のみ scaling）
 ///
 /// **Why sign-aware**: smoke が positive delta を inflate する性質 (項目 184) を補正する一方、
-/// negative delta も同じ係数で scaling すると false-accept リスク (-0.10 → -0.042 で
+/// negative delta も同じ係数で scaling すると false-accept リスク (例: -0.10 → -0.042 で
 /// -0.01 threshold を通過) が発生する。inflated win のみ補正、negative signal は保持。
 fn apply_smoke_correction_to_delta(delta: f64) -> f64 {
-    // Red stub: no-op（テストは sign-aware 期待で fail する）
-    delta
+    if lab_smoke_enabled() && delta > 0.0 {
+        delta * smoke_correction_coefficient()
+    } else {
+        delta
+    }
 }
 
 /// 少数タスクで変異の効果を事前推定する（事前計算済みベースラインスコアは使わず、
@@ -910,7 +917,7 @@ pub fn run_experiment_loop(
 
         // b2. プリスクリーニング: 少数タスクで事前評価し、明らかな悪化を早期棄却
         if loop_config.enable_prescreening {
-            let estimated_delta = estimate_mutation_effect_with_baseline(
+            let raw_estimated_delta = estimate_mutation_effect_with_baseline(
                 base_config,
                 &mutation,
                 baseline.composite_score(),
@@ -919,6 +926,24 @@ pub fn run_experiment_loop(
                 path_guard,
                 cancel,
             )?;
+
+            // smoke モード時のみ補正を適用 (sign-aware ×0.42、項目 184)
+            let estimated_delta = apply_smoke_correction_to_delta(raw_estimated_delta);
+
+            if lab_smoke_enabled() {
+                log_event(
+                    LogLevel::Info,
+                    "lab",
+                    &format!(
+                        "pre-screen smoke correction: raw_delta={:+.4} coeff={:.2} adjusted_delta={:+.4} threshold={:+.4}",
+                        raw_estimated_delta,
+                        smoke_correction_coefficient(),
+                        estimated_delta,
+                        loop_config.prescreening_threshold,
+                    ),
+                );
+            }
+
             if estimated_delta < loop_config.prescreening_threshold {
                 eprintln!(
                     "[lab] pre-screen REJECT: {} (estimated delta={:+.4})",
