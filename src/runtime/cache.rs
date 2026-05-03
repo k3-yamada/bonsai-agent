@@ -248,7 +248,9 @@ mod tests {
 #[cfg(test)]
 mod cached_tests {
     use super::*;
-    use crate::runtime::inference::MockLlmBackend;
+    use crate::config::ServerBackend;
+    use crate::runtime::inference::{FallbackBackend, MockLlmBackend};
+    use crate::runtime::model_router::{FallbackChain, FallbackEntry};
 
     #[test]
     fn test_cached_backend_miss_then_hit() {
@@ -279,5 +281,113 @@ mod cached_tests {
             .generate(&[Message::user("b")], &[], &mut |_| {}, &cancel)
             .unwrap();
         assert_ne!(r1.text, r2.text);
+    }
+
+    // ─── R13: CachedBackend × FallbackBackend wrap order 観察事項テスト ───
+    //
+    // Plan: .claude/plan/cached-backend-wrap-order-tests.md (handoff 05-02b R13)
+    //
+    // 観察事項: FallbackBackend::model_id() = "fallback-chain" 定数のため、
+    // CachedBackend(FallbackBackend(...)) wrap で cache key が primary/fallback を
+    // 区別しない。同一プロンプト → 同一 cached text を返す現状仕様を test で契約化し、
+    // 将来の FallbackBackend::model_id() 動的化変更を regression 検出可能にする。
+
+    fn build_cached_fallback(
+        primary_responses: Vec<String>,
+        secondary_responses: Vec<String>,
+    ) -> CachedBackend {
+        let entries = vec![
+            FallbackEntry {
+                backend: ServerBackend::MlxLm,
+                model_id: "primary-mlx".into(),
+                server_url: "http://127.0.0.1:8000".into(),
+            },
+            FallbackEntry {
+                backend: ServerBackend::LlamaServer,
+                model_id: "secondary-llama".into(),
+                server_url: "http://127.0.0.1:8080".into(),
+            },
+        ];
+        let chain = FallbackChain::with_threshold(entries.clone(), 1);
+        let mut backends: HashMap<String, Box<dyn LlmBackend>> = HashMap::new();
+        backends.insert(
+            FallbackBackend::key_for(&entries[0]),
+            Box::new(MockLlmBackend::new(primary_responses)),
+        );
+        backends.insert(
+            FallbackBackend::key_for(&entries[1]),
+            Box::new(MockLlmBackend::new(secondary_responses)),
+        );
+        let fallback = FallbackBackend::new(chain, backends);
+        CachedBackend::new(Box::new(fallback), 10)
+    }
+
+    #[test]
+    fn test_cached_fallback_key_uses_synthetic_id() {
+        // CachedBackend が wrap する FallbackBackend の model_id() = "fallback-chain"
+        // → cache key は primary/fallback を区別しない (R13 観察事項を契約化)
+        let cached = build_cached_fallback(
+            vec!["primary-resp".into()],
+            vec!["fallback-resp".into()],
+        );
+        assert_eq!(
+            cached.model_id(),
+            "fallback-chain",
+            "CachedBackend は inner FallbackBackend の synthetic_id を返す"
+        );
+    }
+
+    #[test]
+    fn test_cached_fallback_hit_returns_same_text() {
+        // 同一 prompt の 2 回目呼出は cache hit で 1 回目と同じ text を返す。
+        // FallbackBackend wrap の有無に依存せず CachedBackend 契約は維持される。
+        let cached = build_cached_fallback(
+            vec!["primary-resp".into(), "primary-resp-2".into()],
+            vec!["fallback-resp".into()],
+        );
+        let cancel = CancellationToken::new();
+        let messages = vec![Message::user("hi")];
+
+        // 1 回目: cache miss → primary 応答
+        let r1 = cached
+            .generate(&messages, &[], &mut |_| {}, &cancel)
+            .expect("first call");
+        assert_eq!(r1.text, "primary-resp", "1 回目は primary 応答");
+
+        // 2 回目: cache hit → primary backend は呼ばれない。
+        // cache が効かなければ MockLlmBackend が "primary-resp-2" を返す。
+        let r2 = cached
+            .generate(&messages, &[], &mut |_| {}, &cancel)
+            .expect("second call");
+        assert_eq!(
+            r2.text, "primary-resp",
+            "同一 prompt は cache hit で同じ text"
+        );
+    }
+
+    #[test]
+    fn test_cached_fallback_hit_model_id_field() {
+        // 現状仕様: cache hit 時 model_id は inner.model_id() = synthetic_id (R13)。
+        // 将来 FallbackBackend::model_id() を current entry に動的化する場合は
+        // この assert を反転して再評価する。
+        let cached = build_cached_fallback(
+            vec!["primary-resp".into()],
+            vec!["fallback-resp".into()],
+        );
+        let cancel = CancellationToken::new();
+        let messages = vec![Message::user("hi")];
+
+        let _r1 = cached
+            .generate(&messages, &[], &mut |_| {}, &cancel)
+            .expect("first call");
+
+        let r2 = cached
+            .generate(&messages, &[], &mut |_| {}, &cancel)
+            .expect("second call");
+
+        assert_eq!(
+            r2.model_id, "fallback-chain",
+            "現状: cache hit 時 model_id は synthetic_id (R13)"
+        );
     }
 }
