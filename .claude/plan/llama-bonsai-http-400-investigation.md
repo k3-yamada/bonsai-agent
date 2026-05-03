@@ -208,6 +208,61 @@ fn test_llama_server_actual_400_resolution() {
 - **Phase 2 H2/H4 hit**: 中規模 fix (Rust 修正 + flag 追加) → 1-2h で完了
 - **Phase 2 H3 hit**: 設定変更のみ → 15 min で完了
 
+## ─── 2026-05-04 セッション実機検証結果: **NOT REPRODUCIBLE** ────
+
+### Phase 1 curl 実機実行 (3 種類)
+
+```
+T1. 完全 bonsai-body (model + 全 sampling params + stream=false):
+    HTTP 200, time=1.84s
+    response: chat.completion / system_fingerprint=b8960-19821178b
+T2. model field 抜き (H1 検証):
+    HTTP 200, time=0.70s
+    response: 正常 chat.completion
+T3. stream=true (bonsai default):
+    HTTP 200, time=0.67s
+    response: 正常 SSE chunks
+```
+
+3 ケース全て **HTTP 200**。05-02b Phase 2 で観測された 400 は **現環境 (llama-server build b8960) では再現せず**。
+
+### 仮説判定
+
+| 仮説 | 検証 | 結論 |
+|------|------|------|
+| H1 (model_id mismatch) | T1 で `Bonsai-8B` が registered model に hit、T2 でも 200 | **REJECT** |
+| H2 (request body 差分) | bonsai-style 全フィールド送信で 200 | **REJECT** |
+| H3 (sampling out-of-range) | `temperature=0.7 / top_k=40 / top_p=0.9 / min_p=0.05 / repeat_penalty=1.1 / max_tokens=16` で 200 | **REJECT** |
+| H4 (tools schema) | T1 では tools なしで 200、tools 試験は不要に | **N/A (上流 REJECT で skip)** |
+| H5 (Content-Type) | 全テストで `application/json` で 200 | **REJECT** |
+
+### 真の原因仮説（未検証、観測継続）
+
+05-02b Phase 2 当時の 400 は以下のいずれかと推定:
+- (a) **当時の llama-server バージョン違い** — 当時 build と b8960 の差分（dependencies、起動 flag 等）
+- (b) **当時の prompt 内容依存** — bonsai が Lab 中に送信した特定 prompt（システムプロンプト + tools schema + 履歴）の組合せが build_request_body の output で 400 を誘発した可能性
+- (c) **状態依存** — degraded mode / queue overflow 等
+
+### Plan Status: **CLOSED — NOT REPRODUCIBLE**
+
+実装変更不要。**監視継続** 方針:
+- Lab v15 実機運用中に再発した場合、当時の正確な request body を eprintln 等でダンプし収集
+- llama-server build version (`/v1/models` レスポンスの `system_fingerprint`) を log に記録するよう改善案あり (別 plan、将来検討)
+
+### Phase 1 Re-execution Reference
+
+```bash
+# 再現確認用 curl (build b8960 で 200 確認済 2026-05-04)
+curl -s -w "HTTP_CODE=%{http_code}\nTIME=%{time_total}\n" --max-time 60 \
+  http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"hi"}],"temperature":0.7,
+       "top_k":40,"top_p":0.9,"min_p":0.05,"max_tokens":16,
+       "repeat_penalty":1.1,"stream":false}'
+```
+
+実行 log: `/tmp/bonsai-llama/{llama-400-repro-body, no-model-field, stream-true}.json`
+
 ## SESSION_ID (for /ccg:execute)
 
 - CODEX_SESSION: (none — Claude direct planning)
