@@ -237,9 +237,7 @@ impl CompactionMiddleware {
     }
 
     /// LLM context 予算から ContextOverflowGuard 用 middleware を構築。
-    ///
-    /// Phase 2a Red phase stub: `from_n_ctx_budget` も stub のため常に default config 同等。
-    /// Green phase で派生 budget が反映される。
+    /// `None` なら legacy default、`Some(n)` で `n * 0.7` 派生 budget を使用。
     pub fn with_n_ctx_budget(n_ctx_budget: Option<u32>) -> Self {
         Self::new(CompactionConfig::from_n_ctx_budget(n_ctx_budget))
     }
@@ -265,7 +263,9 @@ impl Middleware for CompactionMiddleware {
     /// 再帰圧縮はしない (level3 後の再削減は handoff summary 破壊リスク)。
     fn before_step(&mut self, session: &mut Session, iteration: usize) -> MiddlewareSignal {
         let before = estimate_tokens(&session.messages);
-        if before < self.config.max_context_tokens {
+        // `<=` で境界一致時も no-op (Codex audit LOW fix: before==budget で
+        // 過保守 abort を起こさない)
+        if before <= self.config.max_context_tokens {
             return MiddlewareSignal::Ok;
         }
 
@@ -287,13 +287,9 @@ impl Middleware for CompactionMiddleware {
             ));
         }
 
-        if after == before {
-            return MiddlewareSignal::Abort(format!(
-                "context overflow guard could not reduce messages: tokens={after}, budget={}",
-                self.config.max_context_tokens
-            ));
-        }
-
+        // 注: `after == before` ケース (level3 が no-op だが after も budget 以下) は
+        // 上の budget 判定で fall-through し Ok 扱い (Codex audit LOW fix で
+        // 不要な Abort branch を削除)。
         MiddlewareSignal::Ok
     }
 

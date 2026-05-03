@@ -1318,8 +1318,7 @@ fn t_check_invariants_no_false_positive_on_file_content_with_error_word() {
     // file_read で読んだ Rust コード片に "エラー" が含まれる典型例
     session.add_message(Message {
         role: Role::Tool,
-        content: "// エラーハンドリング\nfn handle(e: Error) -> Result<()> { Err(e) }"
-            .to_string(),
+        content: "// エラーハンドリング\nfn handle(e: Error) -> Result<()> { Err(e) }".to_string(),
         attachments: Vec::new(),
         tool_call_id: None,
     });

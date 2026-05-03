@@ -46,8 +46,8 @@ impl CompactionConfig {
         if n_ctx == 0 {
             return config;
         }
-        let derived = (n_ctx as usize).saturating_mul(CONTEXT_GUARD_RATIO_NUM)
-            / CONTEXT_GUARD_RATIO_DEN;
+        let derived =
+            (n_ctx as usize).saturating_mul(CONTEXT_GUARD_RATIO_NUM) / CONTEXT_GUARD_RATIO_DEN;
         config.max_context_tokens = derived.max(config.emergency_keep);
         config.prune_protect_tokens = config
             .prune_protect_tokens
@@ -59,9 +59,11 @@ impl CompactionConfig {
 /// メッセージ列の概算トークン数を保守的に算出する。
 ///
 /// ASCII (chars/3) と UTF-8 byte ベース (bytes*0.4) の `max` を取り、
-/// 日本語混在テキストでも実 BPE トークン数を下回らない値を返す。
+/// 日本語混在テキストで旧実装より実 BPE トークン数を下回りにくい値を返す。
 /// 旧実装 `len()/4` は日本語比率高で実値の 50% 程度しか見積らず、
 /// llama-server n_ctx を超過する prompt を許してしまっていた (項目 186 H6 CONTEXT_OVERFLOW)。
+/// なお code/base64/symbol-heavy 出力では `0.4 token/byte` 仮定が破れ得るため、
+/// `from_n_ctx_budget` の 70% ratio がヘッドルームとして機能する。
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages
         .iter()

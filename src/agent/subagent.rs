@@ -55,6 +55,10 @@ pub struct SubAgentConfig {
     pub max_iterations: usize,
     /// 許可するツール名（Noneなら全ツール）
     pub allowed_tools: Option<Vec<String>>,
+    /// 親エージェントから引き継ぐ LLM context 予算 (項目 187 F2 ContextOverflowGuard)
+    /// `None` なら legacy compaction 動作。サブエージェントが同じ backend を使う場合の
+    /// silent fallback (max_context_tokens=14000) を防ぐため親から伝播必須。
+    pub n_ctx_budget: Option<u32>,
 }
 
 impl SubAgentConfig {
@@ -64,6 +68,7 @@ impl SubAgentConfig {
             depth,
             max_iterations: (parent_config.max_iterations / 2).max(3),
             allowed_tools: None,
+            n_ctx_budget: parent_config.n_ctx_budget,
         }
     }
 
@@ -326,6 +331,8 @@ impl<'a> SubAgentExecutor<'a> {
                  簡潔に作業し、完了したら結果を報告してください。\n\n\
                  タスク: {goal}"
             ),
+            // 項目 187 F2: 親から引き継いだ n_ctx_budget をサブエージェント実行にも適用
+            n_ctx_budget: self.sub_config.n_ctx_budget,
             ..Default::default()
         }
     }
@@ -605,6 +612,7 @@ mod tests {
             depth: MAX_DEPTH,
             max_iterations: 5,
             allowed_tools: None,
+            n_ctx_budget: None,
         };
 
         let executor = SubAgentExecutor::new(
@@ -738,6 +746,28 @@ mod tests {
         };
         let sub = SubAgentConfig::from_parent(&parent, 0);
         assert_eq!(sub.max_iterations, 3);
+    }
+
+    /// Codex audit MEDIUM fix: 親 AgentConfig の n_ctx_budget が
+    /// SubAgentConfig::from_parent でサブエージェントに引き継がれることを検証。
+    /// 引き継ぎ忘れると silent fallback (max_context_tokens=14000) で
+    /// 同 backend 経由のサブエージェントが F2 保護を失う退行を防ぐ回帰テスト。
+    #[test]
+    fn test_sub_config_inherits_n_ctx_budget() {
+        let parent = AgentConfig {
+            n_ctx_budget: Some(8192),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert_eq!(sub.n_ctx_budget, Some(8192));
+
+        // None も明示的に伝播 (legacy 動作の opt-out 経路)
+        let parent_none = AgentConfig {
+            n_ctx_budget: None,
+            ..Default::default()
+        };
+        let sub_none = SubAgentConfig::from_parent(&parent_none, 0);
+        assert_eq!(sub_none.n_ctx_budget, None);
     }
 
     #[test]

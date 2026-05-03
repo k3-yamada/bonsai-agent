@@ -463,7 +463,10 @@ mod tests {
             path: scratch,
         }];
         // SOUL.md なし、extras のみ → extras のみ返却
-        let blocks = load_blocks(&Some(std::path::PathBuf::from("/nonexistent/SOUL.md")), &extras);
+        let blocks = load_blocks(
+            &Some(std::path::PathBuf::from("/nonexistent/SOUL.md")),
+            &extras,
+        );
         // 環境依存で 0 or 1 (SOUL.md 3 段 fallback) + 1 extra
         assert!(
             blocks.iter().any(|b| b.label == "scratchpad"),

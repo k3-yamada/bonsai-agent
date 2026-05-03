@@ -326,10 +326,8 @@ mod cached_tests {
     fn test_cached_fallback_key_uses_synthetic_id() {
         // CachedBackend が wrap する FallbackBackend の model_id() = "fallback-chain"
         // → cache key は primary/fallback を区別しない (R13 観察事項を契約化)
-        let cached = build_cached_fallback(
-            vec!["primary-resp".into()],
-            vec!["fallback-resp".into()],
-        );
+        let cached =
+            build_cached_fallback(vec!["primary-resp".into()], vec!["fallback-resp".into()]);
         assert_eq!(
             cached.model_id(),
             "fallback-chain",
@@ -370,10 +368,8 @@ mod cached_tests {
         // 現状仕様: cache hit 時 model_id は inner.model_id() = synthetic_id (R13)。
         // 将来 FallbackBackend::model_id() を current entry に動的化する場合は
         // この assert を反転して再評価する。
-        let cached = build_cached_fallback(
-            vec!["primary-resp".into()],
-            vec!["fallback-resp".into()],
-        );
+        let cached =
+            build_cached_fallback(vec!["primary-resp".into()], vec!["fallback-resp".into()]);
         let cancel = CancellationToken::new();
         let messages = vec![Message::user("hi")];
 
