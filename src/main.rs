@@ -170,6 +170,14 @@ fn main() -> Result<()> {
             },
             // 項目 179: SOUL.md ペルソナ + 追加メモリブロックを config から伝播
             soul_path: app_config.agent.soul_path.clone(),
+            // F2 ContextOverflowGuard: ModelConfig.context_length を AgentConfig に伝播
+            // (`Some(n)` で `CompactionConfig::from_n_ctx_budget` 経由 n*0.7 派生 budget、
+            // `0` ならガード無効化として `None` 扱い)
+            n_ctx_budget: if app_config.model.context_length > 0 {
+                Some(app_config.model.context_length)
+            } else {
+                None
+            },
             memory_blocks: app_config.memory.blocks.clone(),
             ..Default::default()
         },

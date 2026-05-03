@@ -329,6 +329,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         base_inference: base_config.base_inference.clone(),
         task_timeout: base_config.task_timeout,
         soul_path: base_config.soul_path.clone(),
+        n_ctx_budget: base_config.n_ctx_budget,
         memory_blocks: base_config.memory_blocks.clone(),
     };
 
@@ -1278,6 +1279,7 @@ mod tests {
             base_inference: crate::config::InferenceParams::default(),
             task_timeout: None,
             soul_path: None,
+            n_ctx_budget: None,
             memory_blocks: Vec::new(),
         }
     }

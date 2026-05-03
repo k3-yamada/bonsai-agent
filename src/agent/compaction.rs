@@ -2,6 +2,11 @@ use crate::agent::conversation::{Message, Role};
 use crate::memory::store::MemoryStore;
 use crate::runtime::embedder::{Embedder, cosine_similarity};
 use std::collections::HashMap;
+
+/// ContextOverflowGuard 派生 budget 比率 (n_ctx の 70% を bonsai 側 budget とする)
+const CONTEXT_GUARD_RATIO_NUM: usize = 70;
+const CONTEXT_GUARD_RATIO_DEN: usize = 100;
+
 pub struct CompactionConfig {
     pub large_output_threshold: usize,
     pub placeholder_keep_recent: usize,
@@ -26,6 +31,19 @@ impl Default for CompactionConfig {
         }
     }
 }
+
+impl CompactionConfig {
+    /// LLM の n_ctx から派生する保守的な圧縮予算 (ratio = 70%)。
+    /// `None` または `Some(0)` で legacy default (max_context_tokens=14000) を維持。
+    ///
+    /// Red phase stub: 常に `Self::default()` を返す。Green phase で実装する。
+    pub fn from_n_ctx_budget(_n_ctx_budget: Option<u32>) -> Self {
+        let _ = CONTEXT_GUARD_RATIO_NUM;
+        let _ = CONTEXT_GUARD_RATIO_DEN;
+        Self::default()
+    }
+}
+
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages.iter().map(|m| m.content.len().div_ceil(4)).sum()
 }
@@ -643,6 +661,29 @@ mod tests {
     fn t_tok() {
         assert_eq!(estimate_tokens(&[Message::user("hello world")]), 3);
     }
+
+    /// Phase 2a Red: 旧 estimator (`len()/4`) は "hello world" (11 bytes) → 3 を返すので
+    /// `5` 期待で fail する。Green で hybrid estimator `max(chars/3, bytes*0.4)` に置換すると pass。
+    #[test]
+    fn t_estimate_tokens_is_japanese_aware() {
+        assert_eq!(estimate_tokens(&[Message::user("hello world")]), 5);
+        assert_eq!(estimate_tokens(&[Message::user("こんにちは世界")]), 9);
+    }
+
+    /// Phase 2a Red: stub `from_n_ctx_budget` は常に default を返すため `Some(8192)` でも 14000、
+    /// 期待値 5734 (8192 * 70 / 100) と乖離して fail。Green で派生実装に置換すると pass。
+    #[test]
+    fn t_compaction_config_derives_from_n_ctx_budget() {
+        let derived = CompactionConfig::from_n_ctx_budget(Some(8192));
+        assert_eq!(derived.max_context_tokens, 5734);
+
+        let none = CompactionConfig::from_n_ctx_budget(None);
+        assert_eq!(none.max_context_tokens, 14000);
+
+        let zero = CompactionConfig::from_n_ctx_budget(Some(0));
+        assert_eq!(zero.max_context_tokens, 14000);
+    }
+
     #[test]
     fn t_l0() {
         let mut m = vec![Message::tool("x".repeat(10000), "b")];

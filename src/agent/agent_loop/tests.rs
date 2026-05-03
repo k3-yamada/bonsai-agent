@@ -1348,7 +1348,7 @@ fn test_before_step_abort_stops_loop() {
         fn name(&self) -> &str {
             "abort_test"
         }
-        fn before_step(&mut self, _session: &Session, _iteration: usize) -> MiddlewareSignal {
+        fn before_step(&mut self, _session: &mut Session, _iteration: usize) -> MiddlewareSignal {
             MiddlewareSignal::Abort("テスト中断".to_string())
         }
         fn after_step(
@@ -1378,7 +1378,7 @@ fn test_before_step_inject_adds_message() {
         fn name(&self) -> &str {
             "inject_test"
         }
-        fn before_step(&mut self, _session: &Session, _iteration: usize) -> MiddlewareSignal {
+        fn before_step(&mut self, _session: &mut Session, _iteration: usize) -> MiddlewareSignal {
             MiddlewareSignal::Inject("注入テスト".to_string())
         }
         fn after_step(

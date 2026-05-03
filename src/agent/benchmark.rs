@@ -895,6 +895,7 @@ impl BenchmarkSuite {
                     base_inference: config.base_inference.clone(),
                     task_timeout: config.task_timeout,
                     soul_path: config.soul_path.clone(),
+                    n_ctx_budget: config.n_ctx_budget,
                     memory_blocks: config.memory_blocks.clone(),
                 };
                 let result = run_agent_loop(
@@ -972,6 +973,7 @@ impl BenchmarkSuite {
                 base_inference: config.base_inference.clone(),
                 task_timeout: config.task_timeout,
                 soul_path: config.soul_path.clone(),
+                n_ctx_budget: config.n_ctx_budget,
                 memory_blocks: config.memory_blocks.clone(),
             };
 

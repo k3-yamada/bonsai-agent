@@ -34,7 +34,10 @@ pub trait Middleware {
     fn name(&self) -> &str;
     fn after_step(&mut self, session: &mut Session, result: &StepResult) -> MiddlewareSignal;
     /// LLM呼出前のフック（NAT知見: プリスクリーン/プロンプト修正/安全ガード）
-    fn before_step(&mut self, _session: &Session, _iteration: usize) -> MiddlewareSignal {
+    ///
+    /// Phase 2a Red: 引数を `&Session` → `&mut Session` に変更
+    /// (ContextOverflowGuard が level3 圧縮で session.messages を変更するため)
+    fn before_step(&mut self, _session: &mut Session, _iteration: usize) -> MiddlewareSignal {
         MiddlewareSignal::Ok
     }
 }
@@ -230,6 +233,14 @@ impl CompactionMiddleware {
     pub fn new(config: CompactionConfig) -> Self {
         Self { config }
     }
+
+    /// LLM context 予算から ContextOverflowGuard 用 middleware を構築。
+    ///
+    /// Phase 2a Red phase stub: `from_n_ctx_budget` も stub のため常に default config 同等。
+    /// Green phase で派生 budget が反映される。
+    pub fn with_n_ctx_budget(n_ctx_budget: Option<u32>) -> Self {
+        Self::new(CompactionConfig::from_n_ctx_budget(n_ctx_budget))
+    }
 }
 
 impl Default for CompactionMiddleware {
@@ -297,9 +308,13 @@ impl Middleware for TokenBudgetMiddleware {
 }
 
 /// デフォルト5段ミドルウェアチェーンを構築
+///
+/// `n_ctx_budget` が `Some(value)` で `CompactionMiddleware` が ContextOverflowGuard 動作。
+/// `None` で legacy 動作 (max_context_tokens=14000)。
 pub fn build_default_chain<'a>(
     session_id: &str,
     store: Option<&'a MemoryStore>,
+    n_ctx_budget: Option<u32>,
 ) -> MiddlewareChain<'a> {
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(AuditMiddleware::new(
@@ -308,7 +323,9 @@ pub fn build_default_chain<'a>(
     )));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
     // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
-    chain.add(Box::new(CompactionMiddleware::default()));
+    chain.add(Box::new(CompactionMiddleware::with_n_ctx_budget(
+        n_ctx_budget,
+    )));
     chain.add(Box::new(TokenBudgetMiddleware::default()));
     chain
 }
@@ -421,6 +438,77 @@ mod tests {
         ));
     }
 
+    // --- Phase 2a Red: ContextOverflowGuard tests (F2 plan) ---
+    // Red phase では `before_step` が default Ok を返すため、
+    // session 縮約を期待する test は fail (期待動作は Green commit で実装)。
+
+    /// Phase 2a Red: stub では session 不変、Green で `compact_level3` 強制発火に置換すると pass。
+    #[test]
+    fn t_context_overflow_guard_compacts_before_llm_call() {
+        use crate::agent::compaction::estimate_tokens;
+        let mut mw = CompactionMiddleware::with_n_ctx_budget(Some(8192));
+        let mut session = Session::new();
+        session.add_message(Message::system("s"));
+
+        for i in 0..12 {
+            session.add_message(Message::user(format!("q{i}")));
+            session.add_message(Message::assistant("あ".repeat(700)));
+            session.add_message(Message::tool("い".repeat(700), format!("tool-{i}")));
+        }
+
+        assert!(estimate_tokens(&session.messages) > 6000);
+        let signal = mw.before_step(&mut session, 0);
+
+        assert!(matches!(signal, MiddlewareSignal::Ok));
+        assert!(estimate_tokens(&session.messages) < 6000);
+        assert!(
+            session.messages.len() <= 6,
+            "system+handoff+emergency_keep=最大6"
+        );
+    }
+
+    /// Phase 2a: 短いセッションは Ok 返し、session 不変 (stub も pass、Green も pass = behavior 一致)。
+    #[test]
+    fn t_context_overflow_guard_no_op_below_threshold() {
+        use crate::agent::compaction::estimate_tokens;
+        let mut mw = CompactionMiddleware::with_n_ctx_budget(Some(8192));
+        let mut session = Session::new();
+        session.add_message(Message::system("s"));
+        session.add_message(Message::user("hello"));
+
+        let before_len = session.messages.len();
+        let before_tokens = estimate_tokens(&session.messages);
+        let signal = mw.before_step(&mut session, 0);
+
+        assert!(matches!(signal, MiddlewareSignal::Ok));
+        assert_eq!(session.messages.len(), before_len);
+        assert_eq!(estimate_tokens(&session.messages), before_tokens);
+    }
+
+    /// Phase 2a Red: stub では Abort 発火せず Ok → 期待 Abort で fail。
+    /// Green で level3 後も超過時 Abort に置換すると pass。
+    #[test]
+    fn t_context_overflow_guard_aborts_when_unrecoverable() {
+        let mut mw = CompactionMiddleware::with_n_ctx_budget(Some(16));
+        let mut session = Session::new();
+        session.add_message(Message::system("システム".repeat(100)));
+        session.add_message(Message::user("q0"));
+        session.add_message(Message::assistant("a0".repeat(100)));
+        session.add_message(Message::tool("t0".repeat(100), "tool-0"));
+        session.add_message(Message::user("q1"));
+        session.add_message(Message::assistant("a1".repeat(100)));
+        session.add_message(Message::tool("t1".repeat(100), "tool-1"));
+
+        let signal = mw.before_step(&mut session, 0);
+
+        match signal {
+            MiddlewareSignal::Abort(reason) => {
+                assert!(reason.contains("context overflow"));
+            }
+            _ => panic!("unrecoverable overflow must abort before LLM call"),
+        }
+    }
+
     #[test]
     fn test_token_budget_ok_initially() {
         let mut mw = TokenBudgetMiddleware::new(100_000);
@@ -471,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_build_default_chain_has_5_middlewares() {
-        let chain = build_default_chain("test", None);
+        let chain = build_default_chain("test", None, None);
         assert_eq!(chain.len(), 4);
         assert_eq!(
             chain.names(),
@@ -596,7 +684,7 @@ mod tests {
         fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
             MiddlewareSignal::Ok
         }
-        fn before_step(&mut self, _s: &Session, _iter: usize) -> MiddlewareSignal {
+        fn before_step(&mut self, _s: &mut Session, _iter: usize) -> MiddlewareSignal {
             MiddlewareSignal::Inject("pre-step context".to_string())
         }
     }
@@ -609,7 +697,7 @@ mod tests {
         fn after_step(&mut self, _s: &mut Session, _r: &StepResult) -> MiddlewareSignal {
             MiddlewareSignal::Ok
         }
-        fn before_step(&mut self, _s: &Session, _iter: usize) -> MiddlewareSignal {
+        fn before_step(&mut self, _s: &mut Session, _iter: usize) -> MiddlewareSignal {
             MiddlewareSignal::Abort("safety limit".to_string())
         }
     }

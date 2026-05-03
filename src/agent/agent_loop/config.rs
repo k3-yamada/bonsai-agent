@@ -30,6 +30,10 @@ pub struct AgentConfig {
     pub task_timeout: Option<std::time::Duration>,
     /// 項目 179: SOUL.md ペルソナパス（label="persona" として注入、3 段 fallback 検索）
     pub soul_path: Option<std::path::PathBuf>,
+    /// LLM context length (n_ctx) から派生する圧縮予算。
+    /// `None` で legacy compaction 動作 (max_context_tokens=14000) を維持。
+    /// `Some(n)` で `CompactionConfig::from_n_ctx_budget(Some(n))` 経由で派生 (n*0.7)。
+    pub n_ctx_budget: Option<u32>,
     /// 項目 179: 追加メモリブロック（[[memory.blocks]] config 由来）
     pub memory_blocks: Vec<MemoryBlockConfig>,
 }
@@ -49,6 +53,7 @@ impl Default for AgentConfig {
             base_inference: InferenceParams::default(),
             task_timeout: None,
             soul_path: None,
+            n_ctx_budget: None,
             memory_blocks: Vec::new(),
         }
     }

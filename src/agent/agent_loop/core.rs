@@ -146,7 +146,8 @@ pub fn run_agent_loop_with_session(
 
     let mut state = LoopState::new(config.advisor.clone());
     // ミドルウェアチェーン構築（DeerFlow知見: 5段パイプライン）
-    state.middleware_chain = crate::agent::middleware::build_default_chain(&session.id, store);
+    state.middleware_chain =
+        crate::agent::middleware::build_default_chain(&session.id, store, config.n_ctx_budget);
 
     let ctx = StepContext {
         backend,
