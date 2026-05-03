@@ -935,15 +935,12 @@ pub fn run_experiment_loop(
             )?;
 
             // smoke モード時のみ補正を適用 (sign-aware ×0.42、項目 184)
-            // env を 1 回だけ読んで以降のロジックとログに使い、計測整合性を保証
-            // (Codex audit Low #1: 2 回 read で値が乖離するレースウィンドウを除去)
+            // env を 1 回だけ読んで log の整合性を保ちつつ、決定値は canonical function 経由
+            // (Codex audit Low #1: log フィールドのレース window を mitigate しつつ、
+            //  決定ロジックは apply_smoke_correction_to_delta() に集約 = dead_code warning 解消)
             let smoke_enabled = lab_smoke_enabled();
             let smoke_coeff = smoke_correction_coefficient();
-            let estimated_delta = if smoke_enabled && raw_estimated_delta > 0.0 {
-                raw_estimated_delta * smoke_coeff
-            } else {
-                raw_estimated_delta
-            };
+            let estimated_delta = apply_smoke_correction_to_delta(raw_estimated_delta);
 
             if smoke_enabled {
                 log_event(
@@ -1071,6 +1068,22 @@ pub fn run_experiment_loop(
                     // fail-open: judge 失敗時は exp.accepted を変えない
                 }
             }
+        }
+
+        // 項目 185 D-side: smoke モード時にフル評価 delta の raw vs adjusted を可視化
+        // (accept 判定は `delta > 0.0` で sign-preserving のため adjusted で結果不変だが、
+        //  operator が smoke→core retention 42% を考慮して結果を解釈できるよう情報出力)
+        if lab_smoke_enabled() {
+            let raw_delta = exp.delta;
+            let adjusted_delta = apply_smoke_correction_to_delta(raw_delta);
+            log_event(
+                LogLevel::Info,
+                "lab",
+                &format!(
+                    "full-eval smoke correction: raw_delta={:+.4} adjusted_delta={:+.4} accepted={} (sign-preserving + threshold=0.0 で判定は不変)",
+                    raw_delta, adjusted_delta, exp.accepted,
+                ),
+            );
         }
 
         eprintln!(
