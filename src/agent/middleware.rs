@@ -4,7 +4,9 @@
 //! before_step / after_step のフックポイントで、ループの前後処理をパイプライン化。
 
 use crate::agent::agent_loop::{StallDetector, TokenBudgetTracker};
-use crate::agent::compaction::{CompactionConfig, compact_if_needed};
+use crate::agent::compaction::{
+    CompactionConfig, compact_if_needed, compact_level3, estimate_tokens,
+};
 use crate::agent::conversation::{Message, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
@@ -252,6 +254,47 @@ impl Default for CompactionMiddleware {
 impl Middleware for CompactionMiddleware {
     fn name(&self) -> &str {
         "compaction"
+    }
+
+    /// LLM 呼出前 ContextOverflowGuard (項目 186 H6 CONTEXT_OVERFLOW 対策)。
+    ///
+    /// 1. 推定 tokens が `max_context_tokens` 未満なら no-op
+    /// 2. 超過時は `compact_level3` を強制発火 (handoff summary + emergency_keep)
+    /// 3. 圧縮後も超過 or 縮小不可なら `Abort` で graceful 停止 → LLM 呼出を防ぎ HTTP 400 を回避
+    ///
+    /// 再帰圧縮はしない (level3 後の再削減は handoff summary 破壊リスク)。
+    fn before_step(&mut self, session: &mut Session, iteration: usize) -> MiddlewareSignal {
+        let before = estimate_tokens(&session.messages);
+        if before < self.config.max_context_tokens {
+            return MiddlewareSignal::Ok;
+        }
+
+        compact_level3(&mut session.messages, &self.config);
+        let after = estimate_tokens(&session.messages);
+        log_event(
+            LogLevel::Warn,
+            "middleware:context_guard",
+            &format!(
+                "LLM呼出前コンテキスト圧縮 iter={iteration} tokens_before={before} tokens_after={after} budget={}",
+                self.config.max_context_tokens
+            ),
+        );
+
+        if after > self.config.max_context_tokens {
+            return MiddlewareSignal::Abort(format!(
+                "context overflow remains after emergency compaction: tokens={after}, budget={}",
+                self.config.max_context_tokens
+            ));
+        }
+
+        if after == before {
+            return MiddlewareSignal::Abort(format!(
+                "context overflow guard could not reduce messages: tokens={after}, budget={}",
+                self.config.max_context_tokens
+            ));
+        }
+
+        MiddlewareSignal::Ok
     }
 
     fn after_step(&mut self, session: &mut Session, result: &StepResult) -> MiddlewareSignal {

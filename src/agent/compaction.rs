@@ -36,16 +36,43 @@ impl CompactionConfig {
     /// LLM の n_ctx から派生する保守的な圧縮予算 (ratio = 70%)。
     /// `None` または `Some(0)` で legacy default (max_context_tokens=14000) を維持。
     ///
-    /// Red phase stub: 常に `Self::default()` を返す。Green phase で実装する。
-    pub fn from_n_ctx_budget(_n_ctx_budget: Option<u32>) -> Self {
-        let _ = CONTEXT_GUARD_RATIO_NUM;
-        let _ = CONTEXT_GUARD_RATIO_DEN;
-        Self::default()
+    /// 派生時は `prune_protect_tokens` も新 budget の半分以下にクランプし、
+    /// 圧縮が機能する余地を確保する。
+    pub fn from_n_ctx_budget(n_ctx_budget: Option<u32>) -> Self {
+        let mut config = Self::default();
+        let Some(n_ctx) = n_ctx_budget else {
+            return config;
+        };
+        if n_ctx == 0 {
+            return config;
+        }
+        let derived = (n_ctx as usize).saturating_mul(CONTEXT_GUARD_RATIO_NUM)
+            / CONTEXT_GUARD_RATIO_DEN;
+        config.max_context_tokens = derived.max(config.emergency_keep);
+        config.prune_protect_tokens = config
+            .prune_protect_tokens
+            .min(config.max_context_tokens / 2);
+        config
     }
 }
 
+/// メッセージ列の概算トークン数を保守的に算出する。
+///
+/// ASCII (chars/3) と UTF-8 byte ベース (bytes*0.4) の `max` を取り、
+/// 日本語混在テキストでも実 BPE トークン数を下回らない値を返す。
+/// 旧実装 `len()/4` は日本語比率高で実値の 50% 程度しか見積らず、
+/// llama-server n_ctx を超過する prompt を許してしまっていた (項目 186 H6 CONTEXT_OVERFLOW)。
 pub fn estimate_tokens(messages: &[Message]) -> usize {
-    messages.iter().map(|m| m.content.len().div_ceil(4)).sum()
+    messages
+        .iter()
+        .map(|m| estimate_message_tokens(&m.content))
+        .sum()
+}
+
+fn estimate_message_tokens(content: &str) -> usize {
+    let by_chars = content.chars().count().div_ceil(3);
+    let by_utf8 = (content.len() * 4).div_ceil(10);
+    by_chars.max(by_utf8).max(1)
 }
 /// AI+Toolメッセージペアを検出
 pub fn find_ai_tool_pairs(messages: &[Message]) -> Vec<(usize, usize)> {
@@ -659,7 +686,9 @@ mod tests {
 
     #[test]
     fn t_tok() {
-        assert_eq!(estimate_tokens(&[Message::user("hello world")]), 3);
+        // Phase 2b Green: 新 estimator は max(chars/3, bytes*0.4)
+        // "hello world" = 11 chars / 11 bytes → max(11/3=4, 11*4/10=5) = 5
+        assert_eq!(estimate_tokens(&[Message::user("hello world")]), 5);
     }
 
     /// Phase 2a Red: 旧 estimator (`len()/4`) は "hello world" (11 bytes) → 3 を返すので
