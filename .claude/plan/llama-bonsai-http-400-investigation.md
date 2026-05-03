@@ -243,11 +243,67 @@ T3. stream=true (bonsai default):
 - (b) **当時の prompt 内容依存** — bonsai が Lab 中に送信した特定 prompt（システムプロンプト + tools schema + 履歴）の組合せが build_request_body の output で 400 を誘発した可能性
 - (c) **状態依存** — degraded mode / queue overflow 等
 
-### Plan Status: **CLOSED — NOT REPRODUCIBLE**
+### Plan Status: **REOPENED — H6 CONFIRMED (CONTEXT_OVERFLOW)**
 
-実装変更不要。**監視継続** 方針:
-- Lab v15 実機運用中に再発した場合、当時の正確な request body を eprintln 等でダンプし収集
-- llama-server build version (`/v1/models` レスポンスの `system_fingerprint`) を log に記録するよう改善案あり (別 plan、将来検討)
+> **2026-05-04 セッション後刻**: smoke 実行 (`/tmp/bonsai-llama/lab-v15-smoke-2026-05-04.log`)
+> で **HTTP 400 が 26 件再現**。Plan 1 A-side smoke が初めて Lab 内 request 流路で 400 を観測。
+> 単純 curl では 200、bonsai 経由で 400 という当初の仮説 (b)「prompt 内容依存」が確定。
+> 監視継続→真因究明に方針転換。
+
+#### 観測パターン (smoke log evidence)
+
+400 は **すべて `file_write` tool_call retry の連鎖中** に発生。具体的事象:
+
+```
+{"name": "file_write", "arguments": {"path": "FizzBuzz.rs", "old_text": "...", "new_text": "fn main() {\n    for (i in 1..=15) {...長大...}"}}
+[llama-server] ストリーミングリクエスト失敗 (http://127.0.0.1:8080): http status: 400
+[WARN][fallback] backend LlamaServer:Bonsai-8B failed: http status: 400
+```
+
+全 26 件で同一パターン: LLM が **malformed Rust コード** を含む長大な file_write を試行 → tool 結果 message が conversation に追加 → 次 request で context が膨張 → 400。
+
+#### llama-server n_ctx 実測
+
+```bash
+$ ps aux | grep llama-server
+keizo  68103  llama-server ... -c 8192 -ngl 99 --flash-attn on ... --alias Bonsai-8B
+
+$ curl -s http://127.0.0.1:8080/slots | jq '.[].n_ctx'
+8192
+```
+
+#### 新仮説 H6: CONTEXT_OVERFLOW (CONFIRMED)
+
+| 観点 | 値 | 影響 |
+|------|-----|------|
+| llama-server `-c` | **8192** | 入力 + 出力の合計上限 |
+| bonsai config `context_length` | 8192 | 一致しているが hard cap として機能せず |
+| 観測される 400 タイミング | 連続 file_write retry 中 | system + tools + history + tool_results 累積で 8192 超過 |
+| 同一 request を curl で再現 | **200** (Phase 1 検証) | 短い prompt なので n_ctx 余裕あり |
+| Lab 経由で再現 | **400 (26 件)** | 長 prompt で n_ctx 超過 |
+
+Plan 1 A-side smoke 中に観測される 400 は、コード生成 task で 1bit モデルが malformed JSON を出力 →
+bonsai の retry → conversation 蓄積 → token 数が 8192 を超え llama-server が input rejection で 400。
+
+#### Fix Candidates
+
+| ID | Approach | 規模 | 効果 |
+|----|----------|------|------|
+| **F1** | llama-server を `-c 16384` で再起動 (user 起動コマンド変更) | 5 min | 即時、ただし llama-server 単独 — bonsai config も合わせて 16384 に |
+| **F2** | bonsai 側: send 前に token 数推定 + 8192 接近で `compact_level3` 強制 | 2-3h (既存 compaction 拡張) | 根本対策、any backend に移植可能 |
+| **F3** | `LlmBackendError::ContextOverflow` を 400 から推論 → 自動 compaction 後 retry | 1-2h | F2 を起点としたエラー駆動 |
+| **F4** | 1bit モデル特有 retry 削減 (FailureMode + LoopDetector の閾値調整) | 1h | 副次効果、緩和 |
+
+#### Decision Gate (revised)
+
+- **(I) F1 単独適用 (推奨即時)**: smoke の 400 を ~95% 削減見込、ただし n_ctx 32768 まで上げると VRAM 増加 → M2 16GB の MPS でテスト要。
+- **(II) F1 + F2 併用 (推奨 next session)**: Lab v15 安定運用に必須、TDD で実装 (token 推定 + 強制 compaction)。
+- **F3 / F4** は F1+F2 後の補助対策、**本 plan の YAGNI fence 内で defer**。
+
+#### Plan v2 Status: **NEXT SESSION — F1 適用 + F2 実装**
+
+実装規模 ~4-5h。F1 は user action (llama-server 再起動)、F2 は bonsai code 修正 + TDD。
+F2 完了後に Lab v15 core 22 (Plan 1 Step 6) 実機実行が安全に可能になる。
 
 ### Phase 1 Re-execution Reference
 
