@@ -315,28 +315,46 @@ impl Middleware for CompactionMiddleware {
 /// llama-server n_ctx を瞬時に超過し HTTP 400 を引き起こすケースを抑制。
 /// F2 ContextOverflowGuard (累積保護、項目 187) と相補的。
 ///
-/// **保護タグ (Codex HIGH 1)**: Assistant content に `<tool_call>` `</tool_call>`
-/// `<start_function_call>` `<end_function_call>` のいずれかを含む場合は skip
-/// (JSON tag 中切による parse 失敗を回避、F2 累積保護に委譲)。
+/// **保護タグ (Codex HIGH 1 / Gemini MUST 2)**: Assistant content に
+/// `<tool_call>` `</tool_call>` `<start_function_call>` `<end_function_call>`
+/// のいずれかを含む場合は skip (JSON tag 中切による parse 失敗を回避、F2 累積
+/// 保護に委譲)。
 ///
 /// **Tool role**: 全件対象 (data 部のみで JSON 中切リスクが低い)。
 ///
 /// **Idempotent (Gemini MUST 1)**: 既に suffix で終わる message は skip
 /// (累積無限ループ防止)。
 ///
-/// **Phase 1 Red 段階の本実装は no-op stub** (Phase 2 Green で実装)。
-pub struct RequestSizeGuard {
+/// **Token estimator (Codex MEDIUM 1)**: F2 と同じ hybrid estimator
+/// (`max(chars/3, bytes*0.4)`) を message 単位で使用。char count 単純比は
+/// 日本語混在で実 BPE token を 50% しか見積らないため不採用。
+pub struct RequestSizeGuard<'a> {
     /// 0 = disabled (legacy 互換)。`>0` で n token を上限。
     pub max_message_tokens: u32,
     /// truncate 末尾に付与する marker 文字列 (idempotent 判定にも使用)。
     pub truncate_suffix: String,
+    session_id: Option<String>,
+    store: Option<&'a MemoryStore>,
 }
 
-impl RequestSizeGuard {
+impl<'a> RequestSizeGuard<'a> {
+    /// 監査ログなしの構築 (テスト + store 不在時)。
     pub fn new(max_message_tokens: u32) -> Self {
         Self {
             max_message_tokens,
             truncate_suffix: "\n[truncated by F3 size_guard]".to_string(),
+            session_id: None,
+            store: None,
+        }
+    }
+
+    /// 監査ログ付き構築 (Gemini SHOULD 1: AuditAction::F3SizeGuard で SQLite 永続化)。
+    pub fn with_audit(max_message_tokens: u32, session_id: String, store: &'a MemoryStore) -> Self {
+        Self {
+            max_message_tokens,
+            truncate_suffix: "\n[truncated by F3 size_guard]".to_string(),
+            session_id: Some(session_id),
+            store: Some(store),
         }
     }
 
@@ -357,7 +375,7 @@ impl RequestSizeGuard {
     }
 }
 
-impl Middleware for RequestSizeGuard {
+impl Middleware for RequestSizeGuard<'_> {
     fn name(&self) -> &str {
         "request_size_guard"
     }
@@ -366,9 +384,98 @@ impl Middleware for RequestSizeGuard {
         MiddlewareSignal::Ok
     }
 
-    /// **Phase 1 Red 段階**: no-op stub。
-    /// Phase 2 Green で hybrid token estimator + tag skip + suffix truncate を実装。
-    fn before_step(&mut self, _session: &mut Session, _iteration: usize) -> MiddlewareSignal {
+    /// LLM 呼出前に session.messages を走査し、size > threshold の
+    /// Assistant/Tool message を末尾切捨。tool_call tag を含む Assistant は skip。
+    fn before_step(&mut self, session: &mut Session, _iteration: usize) -> MiddlewareSignal {
+        if self.max_message_tokens == 0 {
+            return MiddlewareSignal::Ok; // disabled
+        }
+        let max_tokens = self.max_message_tokens as usize;
+        let suffix_tokens = estimate_message_tokens(&self.truncate_suffix);
+        if suffix_tokens >= max_tokens {
+            // 極端 config 防護: suffix が threshold 以上なら no-op
+            return MiddlewareSignal::Ok;
+        }
+        let cutoff_tokens = max_tokens - suffix_tokens;
+        let mut truncated_count = 0_usize;
+
+        for (idx, msg) in session.messages.iter_mut().enumerate() {
+            // User/System は task 指示で保護
+            if !matches!(msg.role, Role::Assistant | Role::Tool) {
+                continue;
+            }
+            // Idempotent: 既に suffix で終わる message は skip (Gemini MUST 1)
+            if msg.content.ends_with(&self.truncate_suffix) {
+                continue;
+            }
+            // tool_call tag 保護 (Codex HIGH 1 / Gemini MUST 2)
+            if matches!(msg.role, Role::Assistant) && Self::has_protected_tags(&msg.content) {
+                continue;
+            }
+
+            let cur_tokens = estimate_message_tokens(&msg.content);
+            if cur_tokens <= max_tokens {
+                continue;
+            }
+
+            // 言語に応じた初期 target_chars: 線形スケール (cutoff/cur 比) +
+            // 5% 安全マージンで while loop 反復を最小化
+            let cur_chars = msg.content.chars().count();
+            let scale = cutoff_tokens as f64 / cur_tokens as f64;
+            let initial = ((cur_chars as f64) * scale * 0.95) as usize;
+            let target_chars = initial.max(1);
+
+            let prefix: String = msg.content.chars().take(target_chars).collect();
+            // 必要なら微調整 (Japanese で chars*1.2 倍トークンとなり初期推定超過時)
+            let mut chars: Vec<char> = prefix.chars().collect();
+            while !chars.is_empty()
+                && estimate_message_tokens(&chars.iter().collect::<String>()) > cutoff_tokens
+            {
+                chars.truncate(chars.len().saturating_sub(64));
+            }
+            let truncated_text: String = chars.into_iter().collect();
+            let original_size = msg.content.len();
+            msg.content = format!("{}{}", truncated_text, self.truncate_suffix);
+            let new_size = msg.content.len();
+            truncated_count += 1;
+
+            // LOW (Codex): role/index/sizes を log
+            log_event(
+                LogLevel::Info,
+                "middleware:f3_size_guard",
+                &format!(
+                    "truncated role={:?} idx={} original_size={} new_size={} threshold_tokens={}",
+                    msg.role, idx, original_size, new_size, self.max_message_tokens
+                ),
+            );
+
+            // SHOULD 1 (Gemini): SQLite audit 永続化
+            if let (Some(store), Some(session_id)) = (self.store, self.session_id.as_deref()) {
+                let audit = AuditLog::new(store.conn());
+                let role_str = format!("{:?}", msg.role).to_lowercase();
+                let _ = audit.log(
+                    Some(session_id),
+                    &AuditAction::F3SizeGuard {
+                        role: role_str,
+                        message_index: idx,
+                        original_size: original_size as u64,
+                        new_size: new_size as u64,
+                        threshold_tokens: self.max_message_tokens,
+                    },
+                );
+            }
+        }
+
+        if truncated_count > 0 {
+            log_event(
+                LogLevel::Info,
+                "middleware:f3_size_guard",
+                &format!(
+                    "step truncated {} messages (threshold_tokens={})",
+                    truncated_count, self.max_message_tokens
+                ),
+            );
+        }
         MiddlewareSignal::Ok
     }
 }
@@ -431,7 +538,12 @@ pub fn build_default_chain<'a>(
     )));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
     // F3 RequestSizeGuard (項目 190): 単発 message burst 防護。F2 の前に挿入。
-    chain.add(Box::new(RequestSizeGuard::new(f3_max_message_tokens)));
+    // store が利用可能なら audit 永続化付き (SHOULD 1 反映)、不在なら log_event のみ。
+    let f3 = match store {
+        Some(s) => RequestSizeGuard::with_audit(f3_max_message_tokens, session_id.to_string(), s),
+        None => RequestSizeGuard::new(f3_max_message_tokens),
+    };
+    chain.add(Box::new(f3));
     // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
     chain.add(Box::new(CompactionMiddleware::with_n_ctx_budget(
         n_ctx_budget,
@@ -1050,7 +1162,10 @@ mod tests {
             names
         );
         // F3 が ToolTrack の後、Compaction の前に配置されることを確認
-        let f3_idx = names.iter().position(|n| *n == "request_size_guard").unwrap();
+        let f3_idx = names
+            .iter()
+            .position(|n| *n == "request_size_guard")
+            .unwrap();
         let compaction_idx = names.iter().position(|n| *n == "compaction").unwrap();
         let tooltrack_idx = names.iter().position(|n| *n == "tool_tracking").unwrap();
         assert!(
@@ -1064,7 +1179,9 @@ mod tests {
         // helper の検出網羅性を確認 (4 種類すべて)
         assert!(RequestSizeGuard::has_protected_tags("foo<tool_call>bar"));
         assert!(RequestSizeGuard::has_protected_tags("foo</tool_call>"));
-        assert!(RequestSizeGuard::has_protected_tags("<start_function_call>"));
+        assert!(RequestSizeGuard::has_protected_tags(
+            "<start_function_call>"
+        ));
         assert!(RequestSizeGuard::has_protected_tags("<end_function_call>"));
         assert!(!RequestSizeGuard::has_protected_tags("plain text"));
         assert!(!RequestSizeGuard::has_protected_tags("<think>foo</think>"));
