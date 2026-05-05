@@ -71,7 +71,9 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         .sum()
 }
 
-fn estimate_message_tokens(content: &str) -> usize {
+/// 単一テキストのトークン数推定 — ASCII (chars/3) と UTF-8 byte (bytes*0.4)
+/// の `max` で算出。F3 RequestSizeGuard などが re-use する hybrid estimator。
+pub fn estimate_message_tokens(content: &str) -> usize {
     let by_chars = content.chars().count().div_ceil(3);
     let by_utf8 = (content.len() * 4).div_ceil(10);
     by_chars.max(by_utf8).max(1)

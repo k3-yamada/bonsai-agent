@@ -330,6 +330,7 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         task_timeout: base_config.task_timeout,
         soul_path: base_config.soul_path.clone(),
         n_ctx_budget: base_config.n_ctx_budget,
+        f3_max_message_tokens: base_config.f3_max_message_tokens,
         memory_blocks: base_config.memory_blocks.clone(),
     };
 
@@ -1280,6 +1281,7 @@ mod tests {
             task_timeout: None,
             soul_path: None,
             n_ctx_budget: None,
+            f3_max_message_tokens: 0,
             memory_blocks: Vec::new(),
         }
     }

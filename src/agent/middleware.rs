@@ -5,9 +5,9 @@
 
 use crate::agent::agent_loop::{StallDetector, TokenBudgetTracker};
 use crate::agent::compaction::{
-    CompactionConfig, compact_if_needed, compact_level3, estimate_tokens,
+    CompactionConfig, compact_if_needed, compact_level3, estimate_message_tokens, estimate_tokens,
 };
-use crate::agent::conversation::{Message, Session};
+use crate::agent::conversation::{Message, Role, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
@@ -309,6 +309,70 @@ impl Middleware for CompactionMiddleware {
     }
 }
 
+/// 4b. F3 RequestSizeGuard — 単発 message size > threshold で末尾 truncate
+///
+/// 項目 190: 単発 burst (file_write の長 new_text、巨大 tool 出力等) で
+/// llama-server n_ctx を瞬時に超過し HTTP 400 を引き起こすケースを抑制。
+/// F2 ContextOverflowGuard (累積保護、項目 187) と相補的。
+///
+/// **保護タグ (Codex HIGH 1)**: Assistant content に `<tool_call>` `</tool_call>`
+/// `<start_function_call>` `<end_function_call>` のいずれかを含む場合は skip
+/// (JSON tag 中切による parse 失敗を回避、F2 累積保護に委譲)。
+///
+/// **Tool role**: 全件対象 (data 部のみで JSON 中切リスクが低い)。
+///
+/// **Idempotent (Gemini MUST 1)**: 既に suffix で終わる message は skip
+/// (累積無限ループ防止)。
+///
+/// **Phase 1 Red 段階の本実装は no-op stub** (Phase 2 Green で実装)。
+pub struct RequestSizeGuard {
+    /// 0 = disabled (legacy 互換)。`>0` で n token を上限。
+    pub max_message_tokens: u32,
+    /// truncate 末尾に付与する marker 文字列 (idempotent 判定にも使用)。
+    pub truncate_suffix: String,
+}
+
+impl RequestSizeGuard {
+    pub fn new(max_message_tokens: u32) -> Self {
+        Self {
+            max_message_tokens,
+            truncate_suffix: "\n[truncated by F3 size_guard]".to_string(),
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self::new(0)
+    }
+
+    /// Assistant content に tool_call 系の保護タグが含まれるか判定。
+    /// 含まれる場合 F3 は skip (HIGH 1 / MUST 2 反映)。
+    pub fn has_protected_tags(content: &str) -> bool {
+        const TAGS: &[&str] = &[
+            "<tool_call>",
+            "</tool_call>",
+            "<start_function_call>",
+            "<end_function_call>",
+        ];
+        TAGS.iter().any(|t| content.contains(t))
+    }
+}
+
+impl Middleware for RequestSizeGuard {
+    fn name(&self) -> &str {
+        "request_size_guard"
+    }
+
+    fn after_step(&mut self, _session: &mut Session, _result: &StepResult) -> MiddlewareSignal {
+        MiddlewareSignal::Ok
+    }
+
+    /// **Phase 1 Red 段階**: no-op stub。
+    /// Phase 2 Green で hybrid token estimator + tag skip + suffix truncate を実装。
+    fn before_step(&mut self, _session: &mut Session, _iteration: usize) -> MiddlewareSignal {
+        MiddlewareSignal::Ok
+    }
+}
+
 /// 5. トークン予算ミドルウェア
 pub struct TokenBudgetMiddleware {
     tracker: TokenBudgetTracker,
@@ -348,12 +412,17 @@ impl Middleware for TokenBudgetMiddleware {
 
 /// デフォルト5段ミドルウェアチェーンを構築
 ///
-/// `n_ctx_budget` が `Some(value)` で `CompactionMiddleware` が ContextOverflowGuard 動作。
-/// `None` で legacy 動作 (max_context_tokens=14000)。
+/// 順序: `[Audit, ToolTrack, RequestSizeGuard (F3), Compaction (F2), TokenBudget]`
+///
+/// - `n_ctx_budget` が `Some(value)` で `CompactionMiddleware` が ContextOverflowGuard 動作 (F2 累積保護)。
+///   `None` で legacy 動作 (max_context_tokens=14000)。
+/// - `f3_max_message_tokens` が `>0` で `RequestSizeGuard` が単発 message size 保護 (F3)。
+///   `0` で F3 disabled (legacy 互換)。F2 の前に配置することで単発 burst を抑えてから累積保護に渡す。
 pub fn build_default_chain<'a>(
     session_id: &str,
     store: Option<&'a MemoryStore>,
     n_ctx_budget: Option<u32>,
+    f3_max_message_tokens: u32,
 ) -> MiddlewareChain<'a> {
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(AuditMiddleware::new(
@@ -361,6 +430,8 @@ pub fn build_default_chain<'a>(
         store,
     )));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
+    // F3 RequestSizeGuard (項目 190): 単発 message burst 防護。F2 の前に挿入。
+    chain.add(Box::new(RequestSizeGuard::new(f3_max_message_tokens)));
     // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
     chain.add(Box::new(CompactionMiddleware::with_n_ctx_budget(
         n_ctx_budget,
@@ -598,11 +669,18 @@ mod tests {
 
     #[test]
     fn test_build_default_chain_has_5_middlewares() {
-        let chain = build_default_chain("test", None, None);
-        assert_eq!(chain.len(), 4);
+        // 項目 190 F3: chain は 5 段 (Audit, ToolTrack, F3, Compaction, TokenBudget)
+        let chain = build_default_chain("test", None, None, 0);
+        assert_eq!(chain.len(), 5);
         assert_eq!(
             chain.names(),
-            vec!["audit", "tool_tracking", "compaction", "token_budget"]
+            vec![
+                "audit",
+                "tool_tracking",
+                "request_size_guard",
+                "compaction",
+                "token_budget"
+            ]
         );
     }
 
@@ -798,5 +876,197 @@ mod tests {
             session.messages.is_empty(),
             "inject after abort not reached"
         );
+    }
+
+    // --- 項目 190 F3 RequestSizeGuard tests (Phase 1 Red, CCG review v2 反映) ---
+
+    /// F3 のテストで使う threshold は token 単位 (chars/3 と bytes*0.4 の max)。
+    /// `repeat(N, 'x')` は N chars = N bytes なので tokens = max(N/3, N*0.4) ≈ N*0.4。
+    /// → threshold=1000 tokens は約 2500 chars (ASCII) 相当。
+    /// 安全マージンで oversized は threshold * 5 chars 程度を使う。
+    fn make_session_with(messages: Vec<Message>) -> Session {
+        let mut s = Session::new();
+        for m in messages {
+            s.messages.push(m);
+        }
+        s
+    }
+
+    #[test]
+    fn t_f3_truncates_oversized_assistant_message() {
+        // 純粋 text の Assistant message (tool_call tag なし) を truncate する
+        let big = "x".repeat(10000); // ≈ 4000 tokens
+        let original_len = big.len();
+        let mut session = make_session_with(vec![Message::assistant(big)]);
+        let mut mw = RequestSizeGuard::new(500); // threshold 500 tokens
+        let signal = mw.before_step(&mut session, 0);
+        assert!(matches!(signal, MiddlewareSignal::Ok));
+        let new_content = &session.messages[0].content;
+        assert!(
+            new_content.len() < original_len,
+            "Assistant message must be truncated (was {} chars)",
+            original_len
+        );
+        assert!(
+            new_content.contains("[truncated by F3 size_guard]"),
+            "Expected suffix marker"
+        );
+    }
+
+    #[test]
+    fn t_f3_truncates_oversized_tool_message() {
+        let big = "y".repeat(10000);
+        let mut session = make_session_with(vec![Message::tool(big.clone(), "call_001")]);
+        let mut mw = RequestSizeGuard::new(500);
+        mw.before_step(&mut session, 0);
+        let new_content = &session.messages[0].content;
+        assert!(new_content.len() < big.len());
+        assert!(new_content.contains("[truncated by F3 size_guard]"));
+    }
+
+    #[test]
+    fn t_f3_preserves_under_threshold_messages() {
+        // 100 chars ≈ 40 tokens、threshold 1000 を超えない
+        let small = "a".repeat(100);
+        let mut session = make_session_with(vec![Message::assistant(small.clone())]);
+        let mut mw = RequestSizeGuard::new(1000);
+        mw.before_step(&mut session, 0);
+        assert_eq!(
+            session.messages[0].content, small,
+            "under-threshold message must not be truncated"
+        );
+    }
+
+    #[test]
+    fn t_f3_disabled_when_threshold_zero() {
+        let big = "z".repeat(10000);
+        let mut session = make_session_with(vec![Message::assistant(big.clone())]);
+        let mut mw = RequestSizeGuard::new(0); // disabled
+        mw.before_step(&mut session, 0);
+        assert_eq!(
+            session.messages[0].content, big,
+            "threshold=0 must be no-op"
+        );
+    }
+
+    #[test]
+    fn t_f3_skips_user_and_system_messages() {
+        // User と System は task 指示で保護対象外
+        let big_user = "u".repeat(10000);
+        let big_sys = "s".repeat(10000);
+        let mut session = make_session_with(vec![
+            Message::system(big_sys.clone()),
+            Message::user(big_user.clone()),
+        ]);
+        let mut mw = RequestSizeGuard::new(500);
+        mw.before_step(&mut session, 0);
+        assert_eq!(session.messages[0].content, big_sys, "System unchanged");
+        assert_eq!(session.messages[1].content, big_user, "User unchanged");
+    }
+
+    #[test]
+    fn t_f3_skips_assistant_with_tool_call_tag() {
+        // Codex HIGH 1 / Gemini MUST 2: tool_call tag を含む Assistant は skip
+        let big = format!(
+            "{}<tool_call>{{\"name\":\"shell\",\"arguments\":{{}}}}</tool_call>",
+            "x".repeat(10000)
+        );
+        let mut session = make_session_with(vec![Message::assistant(big.clone())]);
+        let mut mw = RequestSizeGuard::new(500);
+        mw.before_step(&mut session, 0);
+        assert_eq!(
+            session.messages[0].content, big,
+            "Assistant with <tool_call> must NOT be truncated"
+        );
+    }
+
+    #[test]
+    fn t_f3_skips_assistant_with_function_call_tag() {
+        // Codex HIGH 1: <start_function_call>...<end_function_call> も保護
+        let big = format!(
+            "{}<start_function_call>call:shell{{cmd:date}}<end_function_call>",
+            "y".repeat(10000)
+        );
+        let mut session = make_session_with(vec![Message::assistant(big.clone())]);
+        let mut mw = RequestSizeGuard::new(500);
+        mw.before_step(&mut session, 0);
+        assert_eq!(
+            session.messages[0].content, big,
+            "Assistant with function_call tag must NOT be truncated"
+        );
+    }
+
+    #[test]
+    fn t_f3_idempotent_does_not_accumulate_suffix() {
+        // Gemini MUST 1: 2 回 before_step を通しても suffix は 1 回のみ
+        let big = "p".repeat(10000);
+        let mut session = make_session_with(vec![Message::assistant(big)]);
+        let mut mw = RequestSizeGuard::new(500);
+        mw.before_step(&mut session, 0);
+        let after_first = session.messages[0].content.clone();
+        mw.before_step(&mut session, 1);
+        assert_eq!(
+            session.messages[0].content, after_first,
+            "Second pass must not modify already-truncated message"
+        );
+        // suffix が 1 回しか出現しないことを確認
+        let suffix = "[truncated by F3 size_guard]";
+        let count = session.messages[0].content.matches(suffix).count();
+        assert_eq!(count, 1, "Suffix appears exactly once (idempotent)");
+    }
+
+    #[test]
+    fn t_f3_token_estimator_handles_japanese() {
+        // Codex MEDIUM 1: 日本語混在で hybrid estimator が char 単純比と異なる挙動
+        // "あ" (1 char, UTF-8 3 bytes) → estimate ≈ max(1/3, 3*0.4) = 1.2 tokens
+        // つまり日本語の方が char 数比でトークンが大きく見積もられる。
+        let jp = "あ".repeat(5000); // 5000 chars = 15000 bytes ≈ 6000 tokens
+        let mut session = make_session_with(vec![Message::tool(jp, "call_jp")]);
+        let mut mw = RequestSizeGuard::new(500); // 500 tokens threshold
+        mw.before_step(&mut session, 0);
+        let new_content = &session.messages[0].content;
+        assert!(
+            new_content.contains("[truncated by F3 size_guard]"),
+            "Japanese-heavy content over threshold must be truncated"
+        );
+        // 結果の token 数は threshold 以下のはず (suffix 込みで近似)
+        let new_tokens = estimate_message_tokens(new_content);
+        assert!(
+            new_tokens <= 500,
+            "After truncation tokens={} must be <= 500",
+            new_tokens
+        );
+    }
+
+    #[test]
+    fn t_build_default_chain_includes_f3() {
+        // Codex MEDIUM 2: chain.len()==5、names に "request_size_guard" を含む
+        let chain = build_default_chain("test", None, None, 4915);
+        assert_eq!(chain.len(), 5, "Chain has 5 middlewares with F3");
+        let names = chain.names();
+        assert!(
+            names.contains(&"request_size_guard"),
+            "Chain must include request_size_guard, got: {:?}",
+            names
+        );
+        // F3 が ToolTrack の後、Compaction の前に配置されることを確認
+        let f3_idx = names.iter().position(|n| *n == "request_size_guard").unwrap();
+        let compaction_idx = names.iter().position(|n| *n == "compaction").unwrap();
+        let tooltrack_idx = names.iter().position(|n| *n == "tool_tracking").unwrap();
+        assert!(
+            tooltrack_idx < f3_idx && f3_idx < compaction_idx,
+            "F3 order must be: tool_tracking < request_size_guard < compaction"
+        );
+    }
+
+    #[test]
+    fn t_f3_has_protected_tags_helper() {
+        // helper の検出網羅性を確認 (4 種類すべて)
+        assert!(RequestSizeGuard::has_protected_tags("foo<tool_call>bar"));
+        assert!(RequestSizeGuard::has_protected_tags("foo</tool_call>"));
+        assert!(RequestSizeGuard::has_protected_tags("<start_function_call>"));
+        assert!(RequestSizeGuard::has_protected_tags("<end_function_call>"));
+        assert!(!RequestSizeGuard::has_protected_tags("plain text"));
+        assert!(!RequestSizeGuard::has_protected_tags("<think>foo</think>"));
     }
 }
