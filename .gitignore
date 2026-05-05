@@ -9,3 +9,5 @@ logs/
 .omc/
 # Claude Codeスケジューラロック
 .claude/scheduled_tasks.lock
+fizzbuzz/
+/main.rs
