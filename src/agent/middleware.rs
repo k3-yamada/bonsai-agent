@@ -1186,4 +1186,113 @@ mod tests {
         assert!(!RequestSizeGuard::has_protected_tags("plain text"));
         assert!(!RequestSizeGuard::has_protected_tags("<think>foo</think>"));
     }
+
+    // --- Phase 3 統合 test (F3 + F2 chain edge cases、v2 plan G-3 検証) ---
+
+    #[test]
+    fn t_f3_active_f2_no_fire() {
+        // F3 truncate 後、累積 token < F2 budget で F2 不発火、messages.len() 不変
+        let mut chain = build_default_chain("test_f3_only", None, None, 100);
+        let mut session = make_session_with(vec![
+            Message::system("system prompt"),
+            Message::user("task"),
+            Message::tool("z".repeat(1500), "call_001"),
+        ]);
+        let len_before = session.messages.len();
+        let signal = chain.run_before_step(&mut session, 0);
+        assert!(signal.is_none(), "F2 不発火で abort なし");
+        assert_eq!(
+            session.messages.len(),
+            len_before,
+            "messages.len() 不変 (F2 不発火、F3 は truncate のみ)"
+        );
+        let tool_content = &session.messages[2].content;
+        assert!(
+            tool_content.contains("[truncated by F3 size_guard]"),
+            "F3 が tool message を truncate"
+        );
+    }
+
+    #[test]
+    fn t_f3_no_fire_f2_compact() {
+        // F3 threshold 大で F3 不発火、F2 budget は通常 (n_ctx=8192) で
+        // 累積超過時に圧縮発火 (既存 t_context_overflow_guard_compacts_before_llm_call と同パターン)
+        // F3 threshold = 999_999 (実質無効、no-fire)
+        use crate::agent::compaction::estimate_tokens;
+        let mut chain = build_default_chain("test_f2_only", None, Some(8192), 999_999);
+        let mut session = Session::new();
+        session.add_message(Message::system("s"));
+        for i in 0..12 {
+            session.add_message(Message::user(format!("q{i}")));
+            session.add_message(Message::assistant("あ".repeat(700)));
+            session.add_message(Message::tool("い".repeat(700), format!("tool-{i}")));
+        }
+        assert!(
+            estimate_tokens(&session.messages) > 6000,
+            "事前: budget 5734 を超過する累積"
+        );
+
+        let signal = chain.run_before_step(&mut session, 0);
+        assert!(signal.is_none(), "F2 圧縮成功 (Abort なし)");
+        // F2 が圧縮した
+        assert!(
+            estimate_tokens(&session.messages) < 6000,
+            "F2 圧縮で budget 内"
+        );
+        assert!(
+            session.messages.len() <= 6,
+            "F2 emergency_keep+handoff 動作"
+        );
+        // F3 は truncate していない (threshold 999_999、Assistant content は短いもの含めて全て threshold 以下)
+        let has_f3_suffix = session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("[truncated by F3 size_guard]"));
+        assert!(!has_f3_suffix, "F3 threshold 大で F3 不発火");
+    }
+
+    #[test]
+    fn t_f3_and_f2_both_active_in_one_step() {
+        // F3 + F2 両方発火: F3 で各 tool message を 500 tokens に切り詰め後、
+        // 累積もまだ budget 超過なら F2 が compact する
+        // F3 threshold = 500 tokens、F2 budget = 8192 * 0.7 = 5734 tokens
+        use crate::agent::compaction::estimate_tokens;
+        let mut chain = build_default_chain("test_f3_and_f2", None, Some(8192), 500);
+        let mut session = Session::new();
+        session.add_message(Message::system("agent prompt"));
+        // 各 tool message 約 1000 tokens (700 chars 日本語)、12 件で約 12000 tokens
+        // F3 が各 tool を 500 tokens 以下に切り詰めても累積は budget 超過のまま
+        for i in 0..12 {
+            session.add_message(Message::user(format!("q{i}")));
+            session.add_message(Message::assistant("あ".repeat(700)));
+            session.add_message(Message::tool("い".repeat(700), format!("tool-{i}")));
+        }
+        let tokens_before_chain = estimate_tokens(&session.messages);
+        assert!(
+            tokens_before_chain > 6000,
+            "事前: F3 通過前の累積 budget 超過"
+        );
+
+        let signal = chain.run_before_step(&mut session, 0);
+        assert!(signal.is_none(), "F3+F2 chain で graceful 完了");
+
+        // F3 suffix or F2 handoff のいずれかが残る (両 middleware 動作の証跡)
+        let has_f3_suffix = session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("[truncated by F3 size_guard]"));
+        let has_handoff = session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("Context handoff"));
+        assert!(
+            has_f3_suffix || has_handoff,
+            "F3 suffix or F2 handoff のいずれかが残る (両 middleware 動作)"
+        );
+        // 最終的に budget 内に収束
+        assert!(
+            estimate_tokens(&session.messages) <= 5734,
+            "chain 通過後 budget 内"
+        );
+    }
 }
