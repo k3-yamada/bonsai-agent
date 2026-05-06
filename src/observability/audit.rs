@@ -67,19 +67,9 @@ pub enum AuditAction {
         /// nudge 文字列の長さ（システムメッセージ追加トークン量の指標）
         nudge_len: usize,
     },
-    /// 項目 190 F3 RequestSizeGuard truncate 発火（Gemini SHOULD 1 反映）
-    F3SizeGuard {
-        /// 切り詰めた message の role ("assistant" / "tool")
-        role: String,
-        /// session.messages 内の index
-        message_index: usize,
-        /// 切り詰め前の content バイト長
-        original_size: u64,
-        /// 切り詰め後 (suffix 込み) の content バイト長
-        new_size: u64,
-        /// F3 の threshold (max_message_tokens、設定値)
-        threshold_tokens: u32,
-    },
+    // 項目 193 (2026-05-06d): F3SizeGuard variant 削除。
+    // F3 RequestSizeGuard を削除したため、対応する audit variant も不要化。
+    // 既存 audit_log table 内の action_type='f3_size_guard' row は残存 (data loss なし)。
 }
 
 /// 監査ログライター（append-only）
@@ -103,7 +93,6 @@ impl<'a> AuditLog<'a> {
             AuditAction::AdvisorCall { .. } => "advisor_call",
             AuditAction::TaskComplete { .. } => "task_complete",
             AuditAction::MultiFileNudge { .. } => "multi_file_nudge",
-            AuditAction::F3SizeGuard { .. } => "f3_size_guard",
         };
         let action_data = serde_json::to_string(action)?;
 

@@ -178,9 +178,6 @@ fn main() -> Result<()> {
             } else {
                 None
             },
-            // 項目 190 F3 RequestSizeGuard: ModelConfig.f3_max_message_tokens から伝播
-            // (HIGH 2 反映で auto-derive 廃止、user 明示設定でのみ有効化)
-            f3_max_message_tokens: app_config.model.f3_max_message_tokens.unwrap_or(0),
             memory_blocks: app_config.memory.blocks.clone(),
             ..Default::default()
         },

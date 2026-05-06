@@ -308,11 +308,6 @@ pub struct ModelConfig {
     /// 推論パラメータ（temperature等）
     #[serde(default)]
     pub inference: InferenceParams,
-    /// 項目 190 F3 RequestSizeGuard: 単発 message の token 上限。
-    /// `None` or `Some(0)` で disabled (legacy 互換、HIGH 2 反映で auto-derive 廃止)。
-    /// `Some(n>0)` で明示的に有効化 (推奨: `context_length * 0.4`)。
-    #[serde(default)]
-    pub f3_max_message_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,7 +372,6 @@ impl Default for ModelConfig {
             gguf_path: None,
             sse_chunk_timeout_secs: 60,
             inference: InferenceParams::default(),
-            f3_max_message_tokens: None,
         }
     }
 }

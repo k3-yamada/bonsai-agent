@@ -5,9 +5,9 @@
 
 use crate::agent::agent_loop::{StallDetector, TokenBudgetTracker};
 use crate::agent::compaction::{
-    CompactionConfig, compact_if_needed, compact_level3, estimate_message_tokens, estimate_tokens,
+    CompactionConfig, compact_if_needed, compact_level3, estimate_tokens,
 };
-use crate::agent::conversation::{Message, Role, Session};
+use crate::agent::conversation::{Message, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
@@ -309,177 +309,6 @@ impl Middleware for CompactionMiddleware {
     }
 }
 
-/// 4b. F3 RequestSizeGuard — 単発 message size > threshold で末尾 truncate
-///
-/// 項目 190: 単発 burst (file_write の長 new_text、巨大 tool 出力等) で
-/// llama-server n_ctx を瞬時に超過し HTTP 400 を引き起こすケースを抑制。
-/// F2 ContextOverflowGuard (累積保護、項目 187) と相補的。
-///
-/// **保護タグ (Codex HIGH 1 / Gemini MUST 2)**: Assistant content に
-/// `<tool_call>` `</tool_call>` `<start_function_call>` `<end_function_call>`
-/// のいずれかを含む場合は skip (JSON tag 中切による parse 失敗を回避、F2 累積
-/// 保護に委譲)。
-///
-/// **Tool role**: 全件対象 (data 部のみで JSON 中切リスクが低い)。
-///
-/// **Idempotent (Gemini MUST 1)**: 既に suffix で終わる message は skip
-/// (累積無限ループ防止)。
-///
-/// **Token estimator (Codex MEDIUM 1)**: F2 と同じ hybrid estimator
-/// (`max(chars/3, bytes*0.4)`) を message 単位で使用。char count 単純比は
-/// 日本語混在で実 BPE token を 50% しか見積らないため不採用。
-pub struct RequestSizeGuard<'a> {
-    /// 0 = disabled (legacy 互換)。`>0` で n token を上限。
-    pub max_message_tokens: u32,
-    /// truncate 末尾に付与する marker 文字列 (idempotent 判定にも使用)。
-    pub truncate_suffix: String,
-    session_id: Option<String>,
-    store: Option<&'a MemoryStore>,
-}
-
-impl<'a> RequestSizeGuard<'a> {
-    /// 監査ログなしの構築 (テスト + store 不在時)。
-    pub fn new(max_message_tokens: u32) -> Self {
-        Self {
-            max_message_tokens,
-            truncate_suffix: "\n[truncated by F3 size_guard]".to_string(),
-            session_id: None,
-            store: None,
-        }
-    }
-
-    /// 監査ログ付き構築 (Gemini SHOULD 1: AuditAction::F3SizeGuard で SQLite 永続化)。
-    pub fn with_audit(max_message_tokens: u32, session_id: String, store: &'a MemoryStore) -> Self {
-        Self {
-            max_message_tokens,
-            truncate_suffix: "\n[truncated by F3 size_guard]".to_string(),
-            session_id: Some(session_id),
-            store: Some(store),
-        }
-    }
-
-    pub fn disabled() -> Self {
-        Self::new(0)
-    }
-
-    /// Assistant content に tool_call 系の保護タグが含まれるか判定。
-    /// 含まれる場合 F3 は skip (HIGH 1 / MUST 2 反映)。
-    pub fn has_protected_tags(content: &str) -> bool {
-        const TAGS: &[&str] = &[
-            "<tool_call>",
-            "</tool_call>",
-            "<start_function_call>",
-            "<end_function_call>",
-        ];
-        TAGS.iter().any(|t| content.contains(t))
-    }
-}
-
-impl Middleware for RequestSizeGuard<'_> {
-    fn name(&self) -> &str {
-        "request_size_guard"
-    }
-
-    fn after_step(&mut self, _session: &mut Session, _result: &StepResult) -> MiddlewareSignal {
-        MiddlewareSignal::Ok
-    }
-
-    /// LLM 呼出前に session.messages を走査し、size > threshold の
-    /// Assistant/Tool message を末尾切捨。tool_call tag を含む Assistant は skip。
-    fn before_step(&mut self, session: &mut Session, _iteration: usize) -> MiddlewareSignal {
-        if self.max_message_tokens == 0 {
-            return MiddlewareSignal::Ok; // disabled
-        }
-        let max_tokens = self.max_message_tokens as usize;
-        let suffix_tokens = estimate_message_tokens(&self.truncate_suffix);
-        if suffix_tokens >= max_tokens {
-            // 極端 config 防護: suffix が threshold 以上なら no-op
-            return MiddlewareSignal::Ok;
-        }
-        let cutoff_tokens = max_tokens - suffix_tokens;
-        let mut truncated_count = 0_usize;
-
-        for (idx, msg) in session.messages.iter_mut().enumerate() {
-            // User/System は task 指示で保護
-            if !matches!(msg.role, Role::Assistant | Role::Tool) {
-                continue;
-            }
-            // Idempotent: 既に suffix で終わる message は skip (Gemini MUST 1)
-            if msg.content.ends_with(&self.truncate_suffix) {
-                continue;
-            }
-            // tool_call tag 保護 (Codex HIGH 1 / Gemini MUST 2)
-            if matches!(msg.role, Role::Assistant) && Self::has_protected_tags(&msg.content) {
-                continue;
-            }
-
-            let cur_tokens = estimate_message_tokens(&msg.content);
-            if cur_tokens <= max_tokens {
-                continue;
-            }
-
-            // 言語に応じた初期 target_chars: 線形スケール (cutoff/cur 比) +
-            // 5% 安全マージンで while loop 反復を最小化
-            let cur_chars = msg.content.chars().count();
-            let scale = cutoff_tokens as f64 / cur_tokens as f64;
-            let initial = ((cur_chars as f64) * scale * 0.95) as usize;
-            let target_chars = initial.max(1);
-
-            let prefix: String = msg.content.chars().take(target_chars).collect();
-            // 必要なら微調整 (Japanese で chars*1.2 倍トークンとなり初期推定超過時)
-            let mut chars: Vec<char> = prefix.chars().collect();
-            while !chars.is_empty()
-                && estimate_message_tokens(&chars.iter().collect::<String>()) > cutoff_tokens
-            {
-                chars.truncate(chars.len().saturating_sub(64));
-            }
-            let truncated_text: String = chars.into_iter().collect();
-            let original_size = msg.content.len();
-            msg.content = format!("{}{}", truncated_text, self.truncate_suffix);
-            let new_size = msg.content.len();
-            truncated_count += 1;
-
-            // LOW (Codex): role/index/sizes を log
-            log_event(
-                LogLevel::Info,
-                "middleware:f3_size_guard",
-                &format!(
-                    "truncated role={:?} idx={} original_size={} new_size={} threshold_tokens={}",
-                    msg.role, idx, original_size, new_size, self.max_message_tokens
-                ),
-            );
-
-            // SHOULD 1 (Gemini): SQLite audit 永続化
-            if let (Some(store), Some(session_id)) = (self.store, self.session_id.as_deref()) {
-                let audit = AuditLog::new(store.conn());
-                let role_str = format!("{:?}", msg.role).to_lowercase();
-                let _ = audit.log(
-                    Some(session_id),
-                    &AuditAction::F3SizeGuard {
-                        role: role_str,
-                        message_index: idx,
-                        original_size: original_size as u64,
-                        new_size: new_size as u64,
-                        threshold_tokens: self.max_message_tokens,
-                    },
-                );
-            }
-        }
-
-        if truncated_count > 0 {
-            log_event(
-                LogLevel::Info,
-                "middleware:f3_size_guard",
-                &format!(
-                    "step truncated {} messages (threshold_tokens={})",
-                    truncated_count, self.max_message_tokens
-                ),
-            );
-        }
-        MiddlewareSignal::Ok
-    }
-}
-
 /// 5. トークン予算ミドルウェア
 pub struct TokenBudgetMiddleware {
     tracker: TokenBudgetTracker,
@@ -517,19 +346,21 @@ impl Middleware for TokenBudgetMiddleware {
     }
 }
 
-/// デフォルト5段ミドルウェアチェーンを構築
+/// デフォルト4段ミドルウェアチェーンを構築
 ///
-/// 順序: `[Audit, ToolTrack, RequestSizeGuard (F3), Compaction (F2), TokenBudget]`
+/// 順序: `[Audit, ToolTrack, Compaction (F2), TokenBudget]`
 ///
 /// - `n_ctx_budget` が `Some(value)` で `CompactionMiddleware` が ContextOverflowGuard 動作 (F2 累積保護)。
 ///   `None` で legacy 動作 (max_context_tokens=14000)。
-/// - `f3_max_message_tokens` が `>0` で `RequestSizeGuard` が単発 message size 保護 (F3)。
-///   `0` で F3 disabled (legacy 互換)。F2 の前に配置することで単発 burst を抑えてから累積保護に渡す。
+///
+/// 項目 193 (2026-05-06d): F3 RequestSizeGuard 削除。fire=0/180run (項目 191/192/193 smoke 半減検証) で
+/// 現行 workload の単発 message tokens は 2048 未満であり、Layer 1 (`max_tool_output_chars=4000` ≈ 1333 tokens、
+/// 項目 116) が完全支配することが確定したため。将来の non-llama backend / multi-modal task 等で
+/// 単発 burst 保護が必要になった場合は git history から復元可能。
 pub fn build_default_chain<'a>(
     session_id: &str,
     store: Option<&'a MemoryStore>,
     n_ctx_budget: Option<u32>,
-    f3_max_message_tokens: u32,
 ) -> MiddlewareChain<'a> {
     let mut chain = MiddlewareChain::new();
     chain.add(Box::new(AuditMiddleware::new(
@@ -537,13 +368,6 @@ pub fn build_default_chain<'a>(
         store,
     )));
     chain.add(Box::new(ToolTrackingMiddleware::new()));
-    // F3 RequestSizeGuard (項目 190): 単発 message burst 防護。F2 の前に挿入。
-    // store が利用可能なら audit 永続化付き (SHOULD 1 反映)、不在なら log_event のみ。
-    let f3 = match store {
-        Some(s) => RequestSizeGuard::with_audit(f3_max_message_tokens, session_id.to_string(), s),
-        None => RequestSizeGuard::new(f3_max_message_tokens),
-    };
-    chain.add(Box::new(f3));
     // StallMiddleware は除外: Advisor連携付きの inject_replan_on_stall() が上位互換
     chain.add(Box::new(CompactionMiddleware::with_n_ctx_budget(
         n_ctx_budget,
@@ -780,19 +604,13 @@ mod tests {
     }
 
     #[test]
-    fn test_build_default_chain_has_5_middlewares() {
-        // 項目 190 F3: chain は 5 段 (Audit, ToolTrack, F3, Compaction, TokenBudget)
-        let chain = build_default_chain("test", None, None, 0);
-        assert_eq!(chain.len(), 5);
+    fn test_build_default_chain_has_4_middlewares() {
+        // 項目 193 (2026-05-06d): F3 削除後、chain は 4 段 (Audit, ToolTrack, Compaction, TokenBudget)
+        let chain = build_default_chain("test", None, None);
+        assert_eq!(chain.len(), 4);
         assert_eq!(
             chain.names(),
-            vec![
-                "audit",
-                "tool_tracking",
-                "request_size_guard",
-                "compaction",
-                "token_budget"
-            ]
+            vec!["audit", "tool_tracking", "compaction", "token_budget"]
         );
     }
 
@@ -990,309 +808,4 @@ mod tests {
         );
     }
 
-    // --- 項目 190 F3 RequestSizeGuard tests (Phase 1 Red, CCG review v2 反映) ---
-
-    /// F3 のテストで使う threshold は token 単位 (chars/3 と bytes*0.4 の max)。
-    /// `repeat(N, 'x')` は N chars = N bytes なので tokens = max(N/3, N*0.4) ≈ N*0.4。
-    /// → threshold=1000 tokens は約 2500 chars (ASCII) 相当。
-    /// 安全マージンで oversized は threshold * 5 chars 程度を使う。
-    fn make_session_with(messages: Vec<Message>) -> Session {
-        let mut s = Session::new();
-        for m in messages {
-            s.messages.push(m);
-        }
-        s
-    }
-
-    #[test]
-    fn t_f3_truncates_oversized_assistant_message() {
-        // 純粋 text の Assistant message (tool_call tag なし) を truncate する
-        let big = "x".repeat(10000); // ≈ 4000 tokens
-        let original_len = big.len();
-        let mut session = make_session_with(vec![Message::assistant(big)]);
-        let mut mw = RequestSizeGuard::new(500); // threshold 500 tokens
-        let signal = mw.before_step(&mut session, 0);
-        assert!(matches!(signal, MiddlewareSignal::Ok));
-        let new_content = &session.messages[0].content;
-        assert!(
-            new_content.len() < original_len,
-            "Assistant message must be truncated (was {} chars)",
-            original_len
-        );
-        assert!(
-            new_content.contains("[truncated by F3 size_guard]"),
-            "Expected suffix marker"
-        );
-    }
-
-    #[test]
-    fn t_f3_truncates_oversized_tool_message() {
-        let big = "y".repeat(10000);
-        let mut session = make_session_with(vec![Message::tool(big.clone(), "call_001")]);
-        let mut mw = RequestSizeGuard::new(500);
-        mw.before_step(&mut session, 0);
-        let new_content = &session.messages[0].content;
-        assert!(new_content.len() < big.len());
-        assert!(new_content.contains("[truncated by F3 size_guard]"));
-    }
-
-    #[test]
-    fn t_f3_preserves_under_threshold_messages() {
-        // 100 chars ≈ 40 tokens、threshold 1000 を超えない
-        let small = "a".repeat(100);
-        let mut session = make_session_with(vec![Message::assistant(small.clone())]);
-        let mut mw = RequestSizeGuard::new(1000);
-        mw.before_step(&mut session, 0);
-        assert_eq!(
-            session.messages[0].content, small,
-            "under-threshold message must not be truncated"
-        );
-    }
-
-    #[test]
-    fn t_f3_disabled_when_threshold_zero() {
-        let big = "z".repeat(10000);
-        let mut session = make_session_with(vec![Message::assistant(big.clone())]);
-        let mut mw = RequestSizeGuard::new(0); // disabled
-        mw.before_step(&mut session, 0);
-        assert_eq!(
-            session.messages[0].content, big,
-            "threshold=0 must be no-op"
-        );
-    }
-
-    #[test]
-    fn t_f3_skips_user_and_system_messages() {
-        // User と System は task 指示で保護対象外
-        let big_user = "u".repeat(10000);
-        let big_sys = "s".repeat(10000);
-        let mut session = make_session_with(vec![
-            Message::system(big_sys.clone()),
-            Message::user(big_user.clone()),
-        ]);
-        let mut mw = RequestSizeGuard::new(500);
-        mw.before_step(&mut session, 0);
-        assert_eq!(session.messages[0].content, big_sys, "System unchanged");
-        assert_eq!(session.messages[1].content, big_user, "User unchanged");
-    }
-
-    #[test]
-    fn t_f3_skips_assistant_with_tool_call_tag() {
-        // Codex HIGH 1 / Gemini MUST 2: tool_call tag を含む Assistant は skip
-        let big = format!(
-            "{}<tool_call>{{\"name\":\"shell\",\"arguments\":{{}}}}</tool_call>",
-            "x".repeat(10000)
-        );
-        let mut session = make_session_with(vec![Message::assistant(big.clone())]);
-        let mut mw = RequestSizeGuard::new(500);
-        mw.before_step(&mut session, 0);
-        assert_eq!(
-            session.messages[0].content, big,
-            "Assistant with <tool_call> must NOT be truncated"
-        );
-    }
-
-    #[test]
-    fn t_f3_skips_assistant_with_function_call_tag() {
-        // Codex HIGH 1: <start_function_call>...<end_function_call> も保護
-        let big = format!(
-            "{}<start_function_call>call:shell{{cmd:date}}<end_function_call>",
-            "y".repeat(10000)
-        );
-        let mut session = make_session_with(vec![Message::assistant(big.clone())]);
-        let mut mw = RequestSizeGuard::new(500);
-        mw.before_step(&mut session, 0);
-        assert_eq!(
-            session.messages[0].content, big,
-            "Assistant with function_call tag must NOT be truncated"
-        );
-    }
-
-    #[test]
-    fn t_f3_idempotent_does_not_accumulate_suffix() {
-        // Gemini MUST 1: 2 回 before_step を通しても suffix は 1 回のみ
-        let big = "p".repeat(10000);
-        let mut session = make_session_with(vec![Message::assistant(big)]);
-        let mut mw = RequestSizeGuard::new(500);
-        mw.before_step(&mut session, 0);
-        let after_first = session.messages[0].content.clone();
-        mw.before_step(&mut session, 1);
-        assert_eq!(
-            session.messages[0].content, after_first,
-            "Second pass must not modify already-truncated message"
-        );
-        // suffix が 1 回しか出現しないことを確認
-        let suffix = "[truncated by F3 size_guard]";
-        let count = session.messages[0].content.matches(suffix).count();
-        assert_eq!(count, 1, "Suffix appears exactly once (idempotent)");
-    }
-
-    #[test]
-    fn t_f3_token_estimator_handles_japanese() {
-        // Codex MEDIUM 1: 日本語混在で hybrid estimator が char 単純比と異なる挙動
-        // "あ" (1 char, UTF-8 3 bytes) → estimate ≈ max(1/3, 3*0.4) = 1.2 tokens
-        // つまり日本語の方が char 数比でトークンが大きく見積もられる。
-        let jp = "あ".repeat(5000); // 5000 chars = 15000 bytes ≈ 6000 tokens
-        let mut session = make_session_with(vec![Message::tool(jp, "call_jp")]);
-        let mut mw = RequestSizeGuard::new(500); // 500 tokens threshold
-        mw.before_step(&mut session, 0);
-        let new_content = &session.messages[0].content;
-        assert!(
-            new_content.contains("[truncated by F3 size_guard]"),
-            "Japanese-heavy content over threshold must be truncated"
-        );
-        // 結果の token 数は threshold 以下のはず (suffix 込みで近似)
-        let new_tokens = estimate_message_tokens(new_content);
-        assert!(
-            new_tokens <= 500,
-            "After truncation tokens={} must be <= 500",
-            new_tokens
-        );
-    }
-
-    #[test]
-    fn t_build_default_chain_includes_f3() {
-        // Codex MEDIUM 2: chain.len()==5、names に "request_size_guard" を含む
-        let chain = build_default_chain("test", None, None, 4915);
-        assert_eq!(chain.len(), 5, "Chain has 5 middlewares with F3");
-        let names = chain.names();
-        assert!(
-            names.contains(&"request_size_guard"),
-            "Chain must include request_size_guard, got: {:?}",
-            names
-        );
-        // F3 が ToolTrack の後、Compaction の前に配置されることを確認
-        let f3_idx = names
-            .iter()
-            .position(|n| *n == "request_size_guard")
-            .unwrap();
-        let compaction_idx = names.iter().position(|n| *n == "compaction").unwrap();
-        let tooltrack_idx = names.iter().position(|n| *n == "tool_tracking").unwrap();
-        assert!(
-            tooltrack_idx < f3_idx && f3_idx < compaction_idx,
-            "F3 order must be: tool_tracking < request_size_guard < compaction"
-        );
-    }
-
-    #[test]
-    fn t_f3_has_protected_tags_helper() {
-        // helper の検出網羅性を確認 (4 種類すべて)
-        assert!(RequestSizeGuard::has_protected_tags("foo<tool_call>bar"));
-        assert!(RequestSizeGuard::has_protected_tags("foo</tool_call>"));
-        assert!(RequestSizeGuard::has_protected_tags(
-            "<start_function_call>"
-        ));
-        assert!(RequestSizeGuard::has_protected_tags("<end_function_call>"));
-        assert!(!RequestSizeGuard::has_protected_tags("plain text"));
-        assert!(!RequestSizeGuard::has_protected_tags("<think>foo</think>"));
-    }
-
-    // --- Phase 3 統合 test (F3 + F2 chain edge cases、v2 plan G-3 検証) ---
-
-    #[test]
-    fn t_f3_active_f2_no_fire() {
-        // F3 truncate 後、累積 token < F2 budget で F2 不発火、messages.len() 不変
-        let mut chain = build_default_chain("test_f3_only", None, None, 100);
-        let mut session = make_session_with(vec![
-            Message::system("system prompt"),
-            Message::user("task"),
-            Message::tool("z".repeat(1500), "call_001"),
-        ]);
-        let len_before = session.messages.len();
-        let signal = chain.run_before_step(&mut session, 0);
-        assert!(signal.is_none(), "F2 不発火で abort なし");
-        assert_eq!(
-            session.messages.len(),
-            len_before,
-            "messages.len() 不変 (F2 不発火、F3 は truncate のみ)"
-        );
-        let tool_content = &session.messages[2].content;
-        assert!(
-            tool_content.contains("[truncated by F3 size_guard]"),
-            "F3 が tool message を truncate"
-        );
-    }
-
-    #[test]
-    fn t_f3_no_fire_f2_compact() {
-        // F3 threshold 大で F3 不発火、F2 budget は通常 (n_ctx=8192) で
-        // 累積超過時に圧縮発火 (既存 t_context_overflow_guard_compacts_before_llm_call と同パターン)
-        // F3 threshold = 999_999 (実質無効、no-fire)
-        use crate::agent::compaction::estimate_tokens;
-        let mut chain = build_default_chain("test_f2_only", None, Some(8192), 999_999);
-        let mut session = Session::new();
-        session.add_message(Message::system("s"));
-        for i in 0..12 {
-            session.add_message(Message::user(format!("q{i}")));
-            session.add_message(Message::assistant("あ".repeat(700)));
-            session.add_message(Message::tool("い".repeat(700), format!("tool-{i}")));
-        }
-        assert!(
-            estimate_tokens(&session.messages) > 6000,
-            "事前: budget 5734 を超過する累積"
-        );
-
-        let signal = chain.run_before_step(&mut session, 0);
-        assert!(signal.is_none(), "F2 圧縮成功 (Abort なし)");
-        // F2 が圧縮した
-        assert!(
-            estimate_tokens(&session.messages) < 6000,
-            "F2 圧縮で budget 内"
-        );
-        assert!(
-            session.messages.len() <= 6,
-            "F2 emergency_keep+handoff 動作"
-        );
-        // F3 は truncate していない (threshold 999_999、Assistant content は短いもの含めて全て threshold 以下)
-        let has_f3_suffix = session
-            .messages
-            .iter()
-            .any(|m| m.content.contains("[truncated by F3 size_guard]"));
-        assert!(!has_f3_suffix, "F3 threshold 大で F3 不発火");
-    }
-
-    #[test]
-    fn t_f3_and_f2_both_active_in_one_step() {
-        // F3 + F2 両方発火: F3 で各 tool message を 500 tokens に切り詰め後、
-        // 累積もまだ budget 超過なら F2 が compact する
-        // F3 threshold = 500 tokens、F2 budget = 8192 * 0.7 = 5734 tokens
-        use crate::agent::compaction::estimate_tokens;
-        let mut chain = build_default_chain("test_f3_and_f2", None, Some(8192), 500);
-        let mut session = Session::new();
-        session.add_message(Message::system("agent prompt"));
-        // 各 tool message 約 1000 tokens (700 chars 日本語)、12 件で約 12000 tokens
-        // F3 が各 tool を 500 tokens 以下に切り詰めても累積は budget 超過のまま
-        for i in 0..12 {
-            session.add_message(Message::user(format!("q{i}")));
-            session.add_message(Message::assistant("あ".repeat(700)));
-            session.add_message(Message::tool("い".repeat(700), format!("tool-{i}")));
-        }
-        let tokens_before_chain = estimate_tokens(&session.messages);
-        assert!(
-            tokens_before_chain > 6000,
-            "事前: F3 通過前の累積 budget 超過"
-        );
-
-        let signal = chain.run_before_step(&mut session, 0);
-        assert!(signal.is_none(), "F3+F2 chain で graceful 完了");
-
-        // F3 suffix or F2 handoff のいずれかが残る (両 middleware 動作の証跡)
-        let has_f3_suffix = session
-            .messages
-            .iter()
-            .any(|m| m.content.contains("[truncated by F3 size_guard]"));
-        let has_handoff = session
-            .messages
-            .iter()
-            .any(|m| m.content.contains("Context handoff"));
-        assert!(
-            has_f3_suffix || has_handoff,
-            "F3 suffix or F2 handoff のいずれかが残る (両 middleware 動作)"
-        );
-        // 最終的に budget 内に収束
-        assert!(
-            estimate_tokens(&session.messages) <= 5734,
-            "chain 通過後 budget 内"
-        );
-    }
 }

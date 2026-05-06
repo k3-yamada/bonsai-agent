@@ -34,10 +34,6 @@ pub struct AgentConfig {
     /// `None` で legacy compaction 動作 (max_context_tokens=14000) を維持。
     /// `Some(n)` で `CompactionConfig::from_n_ctx_budget(Some(n))` 経由で派生 (n*0.7)。
     pub n_ctx_budget: Option<u32>,
-    /// 項目 190 F3 RequestSizeGuard: 単発 message size guard の token 上限。
-    /// `0` で disabled (legacy 互換)、`>0` で個別 message を `n` token に
-    /// truncate (Tool/Assistant role のみ、tool_call tag を含む Assistant は skip)。
-    pub f3_max_message_tokens: u32,
     /// 項目 179: 追加メモリブロック（[[memory.blocks]] config 由来）
     pub memory_blocks: Vec<MemoryBlockConfig>,
 }
@@ -58,7 +54,6 @@ impl Default for AgentConfig {
             task_timeout: None,
             soul_path: None,
             n_ctx_budget: None,
-            f3_max_message_tokens: 0,
             memory_blocks: Vec::new(),
         }
     }

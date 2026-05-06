@@ -896,7 +896,6 @@ impl BenchmarkSuite {
                     task_timeout: config.task_timeout,
                     soul_path: config.soul_path.clone(),
                     n_ctx_budget: config.n_ctx_budget,
-                    f3_max_message_tokens: config.f3_max_message_tokens,
                     memory_blocks: config.memory_blocks.clone(),
                 };
                 let result = run_agent_loop(
@@ -975,7 +974,6 @@ impl BenchmarkSuite {
                 task_timeout: config.task_timeout,
                 soul_path: config.soul_path.clone(),
                 n_ctx_budget: config.n_ctx_budget,
-                f3_max_message_tokens: config.f3_max_message_tokens,
                 memory_blocks: config.memory_blocks.clone(),
             };
 
