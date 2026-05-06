@@ -376,6 +376,42 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // テスト9: think内のJSON literalがtool_callとして誤検出されない
+    //         CLAUDE.md 項目 192 / handoff 05-06d 副次「textual tool_call leak」のregression-proof。
+    //         真因はparser誤検出ではなくLLM出力スタイル + console可視化だが、parserの正しい
+    //         切り分け動作を将来のリファクタから守る安全網として固定する。
+    #[test]
+    fn test_think_with_untagged_json_does_not_create_tool_call() {
+        let input = r#"<think>shellツールを呼ぼう: {"name": "shell", "arguments": {"command": "date"}}</think>"#;
+        let result = parse_assistant_output(input).unwrap();
+        assert_eq!(
+            result.thinking,
+            Some(
+                r#"shellツールを呼ぼう: {"name": "shell", "arguments": {"command": "date"}}"#
+                    .to_string()
+            )
+        );
+        assert!(
+            result.tool_calls.is_empty(),
+            "think内の素JSONはtool_callとして誤検出されない"
+        );
+        assert!(result.text.is_none());
+    }
+
+    // テスト10: プレーンテキスト内のJSON literalもtool_callとして誤検出されない
+    #[test]
+    fn test_plain_text_json_does_not_create_tool_call() {
+        let input =
+            r#"このツールは {"name": "file_read", "arguments": {"path": "x"}} のように呼びます。"#;
+        let result = parse_assistant_output(input).unwrap();
+        assert!(
+            result.tool_calls.is_empty(),
+            "plain text内の素JSONはtool_callとして誤検出されない"
+        );
+        let text = result.text.unwrap();
+        assert!(text.contains(r#"{"name": "file_read""#));
+    }
+
     #[test]
     fn test_coerce_string_to_int() {
         let mut v = serde_json::json!({"count": "42", "name": "test"});
