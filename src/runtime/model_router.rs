@@ -676,20 +676,36 @@ pub struct FallbackChain {
     entries: Vec<FallbackEntry>,
     current_idx: AtomicUsize,
     consecutive_failures: AtomicUsize,
+    /// フォールバック中の連続成功カウンタ（項目 195、recovery 用）
+    consecutive_successes_on_fallback: AtomicUsize,
     max_failures_before_fallback: usize,
+    /// フォールバック中に N 回連続成功したらプライマリへ復帰 probe（項目 195）
+    /// 0 = recovery 無効（既存 sticky 挙動 100% 維持、後方互換）
+    recover_after_n_success: usize,
 }
 
 impl FallbackChain {
     pub fn new(entries: Vec<FallbackEntry>) -> Self {
-        Self::with_threshold(entries, 2)
+        Self::with_options(entries, 2, 0)
     }
 
     pub fn with_threshold(entries: Vec<FallbackEntry>, max_failures: usize) -> Self {
+        Self::with_options(entries, max_failures, 0)
+    }
+
+    /// recovery threshold 含む全オプションを指定（項目 195）
+    pub fn with_options(
+        entries: Vec<FallbackEntry>,
+        max_failures: usize,
+        recover_after_n_success: usize,
+    ) -> Self {
         Self {
             entries,
             current_idx: AtomicUsize::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            consecutive_successes_on_fallback: AtomicUsize::new(0),
             max_failures_before_fallback: max_failures.max(1),
+            recover_after_n_success,
         }
     }
 
@@ -702,6 +718,9 @@ impl FallbackChain {
     /// 失敗を記録、必要なら次のバックエンドへ切替（戻り値は切替先、無ければ None）
     pub fn record_failure(&self) -> Option<&FallbackEntry> {
         let count = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        // フォールバック中の失敗で recovery success counter リセット（項目 195）
+        self.consecutive_successes_on_fallback
+            .store(0, Ordering::SeqCst);
         if count >= self.max_failures_before_fallback {
             let next_idx = self.current_idx.load(Ordering::SeqCst) + 1;
             if next_idx < self.entries.len() {
@@ -713,9 +732,25 @@ impl FallbackChain {
         None
     }
 
-    /// 成功を記録、failure カウンタをリセット（位置は保持）
+    /// 成功を記録、failure カウンタをリセット
+    /// 項目 195: recover_after_n_success > 0 かつフォールバック中なら、
+    /// 連続成功 N 回でプライマリへ自動復帰。primary 時は no-op。
     pub fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::SeqCst);
+        let idx = self.current_idx.load(Ordering::SeqCst);
+        if idx == 0 || self.recover_after_n_success == 0 {
+            // primary または recovery 無効: 既存挙動維持
+            return;
+        }
+        let n = self
+            .consecutive_successes_on_fallback
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
+        if n >= self.recover_after_n_success {
+            self.current_idx.store(0, Ordering::SeqCst);
+            self.consecutive_successes_on_fallback
+                .store(0, Ordering::SeqCst);
+        }
     }
 
     /// プライマリへ手動復帰
@@ -1164,6 +1199,76 @@ mod tests {
         chain.record_failure();
         // threshold=3 なので 2 回ではまだ切替えない
         assert_eq!(chain.current().unwrap().model_id, "a");
+        chain.record_failure();
+        assert_eq!(chain.current().unwrap().model_id, "b");
+    }
+
+    // ─── 項目 195: sticky fallback recovery (handoff 05-06e ★ TODO) ─────
+    //
+    // 既存挙動: フォールバック後の record_success は consecutive_failures のみリセット、
+    // current_idx は永久に保持 (sticky)。MLX primary + llama fallback 構成で
+    // -27% 品質劣化 (項目 188) の真因。recover_after_n_success > 0 で
+    // フォールバック中の連続成功 N 回でプライマリ復帰を probe。
+    // default 0 = 既存 sticky 挙動 100% 維持 (後方互換)。
+
+    #[test]
+    fn t_fallback_chain_recovery_default_disabled() {
+        // default では recovery 無効、fallback 後の success で primary に戻らない
+        let chain = FallbackChain::new(vec![fb_entry("a"), fb_entry("b")]);
+        chain.record_failure();
+        chain.record_failure(); // → b に切替
+        assert_eq!(chain.current().unwrap().model_id, "b");
+        for _ in 0..100 {
+            chain.record_success();
+        }
+        // recovery 無効なので b のまま
+        assert_eq!(chain.current().unwrap().model_id, "b");
+    }
+
+    #[test]
+    fn t_fallback_chain_recovery_returns_to_primary_after_n_success() {
+        // recover_after_n_success=3、fallback 中 3 回連続成功で primary に戻る
+        let chain = FallbackChain::with_options(vec![fb_entry("a"), fb_entry("b")], 2, 3);
+        chain.record_failure();
+        chain.record_failure(); // → b
+        assert_eq!(chain.current().unwrap().model_id, "b");
+        chain.record_success();
+        chain.record_success();
+        // まだ 2 回、しきい値未達
+        assert_eq!(chain.current().unwrap().model_id, "b");
+        chain.record_success();
+        // 3 回目で primary に戻る
+        assert_eq!(chain.current().unwrap().model_id, "a");
+    }
+
+    #[test]
+    fn t_fallback_chain_recovery_failure_resets_success_counter() {
+        // fallback 中に失敗が混じると success counter は 0 にリセット
+        let chain = FallbackChain::with_options(vec![fb_entry("a"), fb_entry("b")], 2, 3);
+        chain.record_failure();
+        chain.record_failure(); // → b
+        chain.record_success();
+        chain.record_success(); // 2/3
+        chain.record_failure(); // success counter リセット (max_failures に到達せず entry 維持)
+        chain.record_success();
+        chain.record_success();
+        // 失敗でリセットされたので 2/3 でまだ primary に戻らない
+        assert_eq!(chain.current().unwrap().model_id, "b");
+        chain.record_success();
+        // 3/3 で復帰
+        assert_eq!(chain.current().unwrap().model_id, "a");
+    }
+
+    #[test]
+    fn t_fallback_chain_recovery_does_nothing_on_primary() {
+        // primary 時の record_success は recovery counter を操作しない
+        let chain = FallbackChain::with_options(vec![fb_entry("a"), fb_entry("b")], 2, 3);
+        for _ in 0..10 {
+            chain.record_success();
+        }
+        assert_eq!(chain.current().unwrap().model_id, "a");
+        // primary success の影響なく fallback 動作は通常通り
+        chain.record_failure();
         chain.record_failure();
         assert_eq!(chain.current().unwrap().model_id, "b");
     }

@@ -35,6 +35,9 @@ pub struct AppConfig {
 pub struct FallbackChainSettings {
     /// 連続失敗 N 回で次のエントリへ切替（デフォルト 2）
     pub max_failures: Option<usize>,
+    /// 項目 195: フォールバック中の連続成功 N 回でプライマリへ自動復帰
+    /// 0 または未指定 = recovery 無効（既存 sticky 挙動、後方互換）
+    pub recover_after_n_success: Option<usize>,
     /// プライマリ + フォールバック先のリスト（先頭がプライマリ）
     pub entries: Vec<crate::runtime::model_router::FallbackEntry>,
 }
@@ -48,9 +51,11 @@ impl FallbackChainSettings {
             return None;
         }
         let threshold = self.max_failures.unwrap_or(2);
-        Some(crate::runtime::model_router::FallbackChain::with_threshold(
+        let recover = self.recover_after_n_success.unwrap_or(0);
+        Some(crate::runtime::model_router::FallbackChain::with_options(
             self.entries.clone(),
             threshold,
+            recover,
         ))
     }
 }
