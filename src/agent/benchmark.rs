@@ -506,12 +506,13 @@ pub struct BenchmarkSuite {
 /// `smoke_tasks()` でこの ID に一致するタスクのみを返し、Lab 中の dev iteration
 /// を 1/8 に短縮する（k=3 で 15 ラン vs 120 ラン）。
 const SMOKE_TASK_IDS: &[&str] = &[
-    "file_read_simple",         // ToolUse: 単純ファイル読み取り
-    "multi_step_write_read",    // MultiStep: 書込→読込
-    "error_recovery",           // ErrorRecovery: エラー後の代替試行
-    "tool_selection_git",       // ToolSelection: 適切なツール選択
-    "code_gen_fizzbuzz",        // CodeGeneration: コード生成
+    "file_read_simple",            // ToolUse: 単純ファイル読み取り
+    "multi_step_write_read",       // MultiStep: 書込→読込
+    "error_recovery",              // ErrorRecovery: エラー後の代替試行
+    "tool_selection_git",          // ToolSelection: 適切なツール選択
+    "code_gen_fizzbuzz",           // CodeGeneration: コード生成
     "smoke_failure_chain_pair", // ErrorRecovery (handoff 05-07g Phase 5 Phase 4): 2 step + 全 fail で AgentHER failed パス検証
+    "smoke_partial_success_chain", // ErrorRecovery (handoff 05-07h 後継): 1 success + 1 fail = HSL relabel 候補 (relabels>=1 実証用)
 ];
 
 impl BenchmarkSuite {
@@ -686,6 +687,30 @@ impl BenchmarkSuite {
                         .into(),
                     expected_tools: vec!["file_read".into()],
                     expected_keywords: vec![
+                        "存在".into(),
+                        "見つかり".into(),
+                        "error".into(),
+                        "Error".into(),
+                        "not found".into(),
+                    ],
+                    max_iterations: 4,
+                    category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Core,
+                },
+                // handoff 05-07h 後継: AgentHER HSL relabel 実機実証用 mixed-success task。
+                // existing file (Cargo.toml) と nonexistent file を **両方** 読ませることで:
+                //   - tool_success_rate = 1/2 = 0.5 < 0.8 → extract_failed_trajectories 対象
+                //   - total_steps >= 2 → min_steps 閾値クリア
+                //   - 失敗 trajectory 内に **成功 subgoal が 1 件存在** → HSL relabel 候補
+                // 期待: AgentHER post-Lab で relabels>=1 / skills>=1 / insights>=1。
+                BenchmarkTask {
+                    id: "smoke_partial_success_chain".into(),
+                    name: "部分成功連鎖 (1 success + 1 fail)".into(),
+                    input: "Cargo.toml と /tmp/bonsai_phase5_nonexistent.md の内容を読んで diff を要約して"
+                        .into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![
+                        "Cargo".into(),
                         "存在".into(),
                         "見つかり".into(),
                         "error".into(),
@@ -1127,10 +1152,7 @@ impl BenchmarkSuite {
                     Err(e) => log_event(
                         LogLevel::Warn,
                         "benchmark",
-                        &format!(
-                            "events export failed (non-fatal) task={}: {e}",
-                            task.id
-                        ),
+                        &format!("events export failed (non-fatal) task={}: {e}", task.id),
                     ),
                 }
             }
@@ -1408,8 +1430,8 @@ mod tests {
         let suite = BenchmarkSuite::default_tasks();
         assert_eq!(
             suite.tasks.len(),
-            41,
-            "default = 41 (handoff 05-07g Phase 5 で smoke_failure_chain_pair 追加)"
+            42,
+            "default = 42 (handoff 05-07h 後継で smoke_partial_success_chain 追加)"
         );
     }
 
@@ -1431,8 +1453,8 @@ mod tests {
         let suite = BenchmarkSuite::core_tasks();
         assert_eq!(
             suite.tasks.len(),
-            23,
-            "core tier は 23 タスク (handoff 05-07g Phase 5 で smoke_failure_chain_pair 追加、tier=Core)"
+            24,
+            "core tier は 24 タスク (handoff 05-07h 後継で smoke_partial_success_chain 追加、tier=Core)"
         );
     }
 
@@ -1449,9 +1471,13 @@ mod tests {
     #[test]
     fn test_default_equals_core_plus_extended() {
         let all = BenchmarkSuite::default_tasks();
-        assert_eq!(all.tasks.len(), 41, "default は core(23) + extended(18) = 41");
+        assert_eq!(
+            all.tasks.len(),
+            42,
+            "default は core(24) + extended(18) = 42"
+        );
         let ids: std::collections::HashSet<_> = all.tasks.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(ids.len(), 41, "重複なし");
+        assert_eq!(ids.len(), 42, "重複なし");
     }
 
     #[test]
@@ -1512,8 +1538,8 @@ mod tests {
         let default = BenchmarkSuite::default_tasks();
         assert_eq!(
             smoke.tasks.len(),
-            6,
-            "smoke は 6 タスク (handoff 05-07g Phase 5 で smoke_failure_chain_pair 追加)"
+            7,
+            "smoke は 7 タスク (handoff 05-07h 後継で smoke_partial_success_chain 追加)"
         );
         assert!(smoke.tasks.len() < default.tasks.len(), "smoke ⊂ default");
         // すべての smoke ID は default に含まれる
@@ -2170,8 +2196,9 @@ mod tests {
     fn test_expanded_tasks_count() {
         // 22→40タスクへの拡張を検証（Phase C: +18タスク）
         // handoff 05-07g Phase 5: smoke_failure_chain_pair 追加で 41
+        // handoff 05-07h 後継: smoke_partial_success_chain 追加で 42
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 41, "タスク数は 41 であるべき");
+        assert_eq!(suite.tasks.len(), 42, "タスク数は 42 であるべき");
     }
 
     #[test]
