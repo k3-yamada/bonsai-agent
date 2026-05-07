@@ -1034,7 +1034,7 @@ impl BenchmarkSuite {
     /// `store` は AgentHER post-Lab pass で参照される persistent `MemoryStore`。各 run の
     /// events は `run_agent_loop` 内の `emit_event` 経由で直接ここに書き込まれる
     /// (Option A 移行、agenther-option-a-migration.md)。run 毎の messages/sessions/memories
-    /// は `reset_session_data` で each run 開始前にリセットして isolation を維持
+    /// は `reset_session_data_for_lab` で each run 開始前にリセットして isolation を維持
     /// (events table は保護される)。pre-screen は呼出側で `MemoryStore::in_memory()?` を
     /// scratch として作成し本 method に渡すことで persistent.events 汚染を回避する。
     #[allow(clippy::too_many_arguments)]
@@ -1070,7 +1070,7 @@ impl BenchmarkSuite {
                 // Option A 移行: persistent store を直接使うため、run 毎に
                 // messages/sessions/memories をクリアして per-run / per-task isolation を維持
                 // (events / experiences / skills は保護)。run_idx==0 を含む全 run で reset。
-                store.reset_session_data()?;
+                store.reset_session_data_for_lab()?;
 
                 // jitter_seed時はプロンプトに実行番号を付加してキャッシュ回避
                 let system_prompt = if multi.jitter_seed {

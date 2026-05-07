@@ -79,15 +79,16 @@ impl MemoryStore {
         &self.conn
     }
 
-    /// セッション関連データをリセット（ベンチマークのk回実行間で使用）
+    /// Lab cycle 専用のセッションデータリセット（ベンチマーク k 回実行 / task 切替で使用）
     ///
     /// **WARNING**: `messages` / `sessions` / `memories` を全 DELETE する破壊的操作。
     /// `events` / `experiences` / `skills` / `knowledge_graph` 等は保護される。
-    /// Option A 移行 (agenther-option-a-migration.md) 後は persistent store に対しても
-    /// 呼ばれるが、bonsai-agent は実時間で persistent の messages/sessions/memories を
-    /// 使わない (Lab cycle 中のみ書込) ため安全。将来 persistent.messages を活用する
-    /// 機能を追加する場合は、本 method を Lab scope 限定に rename することを検討。
-    pub fn reset_session_data(&self) -> Result<()> {
+    /// Option A 移行 (項目 205) で persistent store に対しても呼ばれるようになったため、
+    /// 名前で「Lab 限定の意図」を明示し誤用を防ぐ。bonsai-agent は実時間で
+    /// persistent の messages/sessions/memories を使わない (Lab cycle 中のみ書込) ため
+    /// 安全。将来 persistent.messages/sessions/memories を実時間活用する機能を追加する
+    /// 場合は、本 method を呼ばず別 path で run-isolation を実装すること。
+    pub fn reset_session_data_for_lab(&self) -> Result<()> {
         self.conn
             .execute_batch("DELETE FROM messages; DELETE FROM sessions; DELETE FROM memories;")?;
         Ok(())
@@ -620,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_session_data() {
+    fn test_reset_session_data_for_lab() {
         let store = test_store();
 
         // メモリを挿入
@@ -630,7 +631,7 @@ mod tests {
         assert!(store.memory_count().unwrap() > 0);
 
         // リセットでデータがクリアされる
-        store.reset_session_data().unwrap();
+        store.reset_session_data_for_lab().unwrap();
         assert_eq!(store.memory_count().unwrap(), 0);
 
         // リセット後もスキーマは正常（新規データ保存可能）
