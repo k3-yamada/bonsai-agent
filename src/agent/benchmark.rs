@@ -506,11 +506,12 @@ pub struct BenchmarkSuite {
 /// `smoke_tasks()` でこの ID に一致するタスクのみを返し、Lab 中の dev iteration
 /// を 1/8 に短縮する（k=3 で 15 ラン vs 120 ラン）。
 const SMOKE_TASK_IDS: &[&str] = &[
-    "file_read_simple",      // ToolUse: 単純ファイル読み取り
-    "multi_step_write_read", // MultiStep: 書込→読込
-    "error_recovery",        // ErrorRecovery: エラー後の代替試行
-    "tool_selection_git",    // ToolSelection: 適切なツール選択
-    "code_gen_fizzbuzz",     // CodeGeneration: コード生成
+    "file_read_simple",         // ToolUse: 単純ファイル読み取り
+    "multi_step_write_read",    // MultiStep: 書込→読込
+    "error_recovery",           // ErrorRecovery: エラー後の代替試行
+    "tool_selection_git",       // ToolSelection: 適切なツール選択
+    "code_gen_fizzbuzz",        // CodeGeneration: コード生成
+    "smoke_failure_chain_pair", // ErrorRecovery (handoff 05-07g Phase 5 Phase 4): 2 step + 全 fail で AgentHER failed パス検証
 ];
 
 impl BenchmarkSuite {
@@ -669,6 +670,29 @@ impl BenchmarkSuite {
                     expected_tools: vec!["file_read".into()],
                     expected_keywords: vec![],
                     max_iterations: 3,
+                    category: TaskCategory::ErrorRecovery,
+                    tier: TaskTier::Core,
+                },
+                // handoff 05-07g Phase 5 Phase 4: AgentHER failed パス検証用 smoke task
+                // 2 つの非存在ファイルを **両方とも** 読ませ、tool_success_rate=0 < 0.8 と
+                // total_steps>=2 を必ず踏ませることで `extract_failed_trajectories(0.8, 2)`
+                // が確実に 1 セッションを extract できるようにする (1bit Bonsai-8B で頻出する
+                // 1-step 完結を回避)。max_iterations=4 で model にリトライ余裕を与え、
+                // 確実に 2 つの file_read を試行させる。
+                BenchmarkTask {
+                    id: "smoke_failure_chain_pair".into(),
+                    name: "失敗連鎖 (2 ファイル)".into(),
+                    input: "/tmp/bonsai_phase4_a.txt と /tmp/bonsai_phase4_b.txt の内容を読んで diff を要約して"
+                        .into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec![
+                        "存在".into(),
+                        "見つかり".into(),
+                        "error".into(),
+                        "Error".into(),
+                        "not found".into(),
+                    ],
+                    max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Core,
                 },
@@ -1382,7 +1406,11 @@ mod tests {
     #[test]
     fn test_default_tasks_count() {
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 40);
+        assert_eq!(
+            suite.tasks.len(),
+            41,
+            "default = 41 (handoff 05-07g Phase 5 で smoke_failure_chain_pair 追加)"
+        );
     }
 
     #[test]
@@ -1401,7 +1429,11 @@ mod tests {
     #[test]
     fn test_core_tasks_count_22() {
         let suite = BenchmarkSuite::core_tasks();
-        assert_eq!(suite.tasks.len(), 22, "core tier は 22 タスク");
+        assert_eq!(
+            suite.tasks.len(),
+            23,
+            "core tier は 23 タスク (handoff 05-07g Phase 5 で smoke_failure_chain_pair 追加、tier=Core)"
+        );
     }
 
     #[test]
@@ -1417,9 +1449,9 @@ mod tests {
     #[test]
     fn test_default_equals_core_plus_extended() {
         let all = BenchmarkSuite::default_tasks();
-        assert_eq!(all.tasks.len(), 40, "default は core + extended = 40");
+        assert_eq!(all.tasks.len(), 41, "default は core(23) + extended(18) = 41");
         let ids: std::collections::HashSet<_> = all.tasks.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(ids.len(), 40, "重複なし");
+        assert_eq!(ids.len(), 41, "重複なし");
     }
 
     #[test]
@@ -1478,7 +1510,11 @@ mod tests {
     fn test_smoke_tasks_subset_of_default() {
         let smoke = BenchmarkSuite::smoke_tasks();
         let default = BenchmarkSuite::default_tasks();
-        assert_eq!(smoke.tasks.len(), 5, "smoke は 5 タスク");
+        assert_eq!(
+            smoke.tasks.len(),
+            6,
+            "smoke は 6 タスク (handoff 05-07g Phase 5 で smoke_failure_chain_pair 追加)"
+        );
         assert!(smoke.tasks.len() < default.tasks.len(), "smoke ⊂ default");
         // すべての smoke ID は default に含まれる
         let default_ids: std::collections::HashSet<&str> =
@@ -2133,8 +2169,9 @@ mod tests {
     #[test]
     fn test_expanded_tasks_count() {
         // 22→40タスクへの拡張を検証（Phase C: +18タスク）
+        // handoff 05-07g Phase 5: smoke_failure_chain_pair 追加で 41
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 40, "タスク数は40であるべき");
+        assert_eq!(suite.tasks.len(), 41, "タスク数は 41 であるべき");
     }
 
     #[test]
