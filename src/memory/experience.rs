@@ -56,17 +56,12 @@ pub struct RecordParams<'a> {
 /// 案 A: ToolCallEnd.success==true を sub-achievement とみなす
 /// 案 B: 副作用既知ホワイトリスト (file_write/multi_edit/git_commit) のみ
 /// デフォルト: ToolEndSuccessOrSideEffect (recall 重視)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SubgoalJudgeMethod {
     ToolEndSuccess,
     SideEffectOnly,
+    #[default]
     ToolEndSuccessOrSideEffect,
-}
-
-impl Default for SubgoalJudgeMethod {
-    fn default() -> Self {
-        Self::ToolEndSuccessOrSideEffect
-    }
 }
 
 /// AgentHER HSL: 失敗 trajectory から達成済 subgoal を抽出した記録
@@ -90,8 +85,45 @@ impl HindsightRelabel {
     /// achieved_subgoals[subgoal_index] に対応する prefix を tool_sequence とする
     /// TrajectoryCandidate を生成 (SkillStore::promote_from_trajectory への adapter)
     pub fn into_relabeled_candidate(&self, subgoal_index: usize) -> Option<TrajectoryCandidate> {
-        let _ = subgoal_index;
-        todo!("Phase 2 Green: into_relabeled_candidate")
+        if subgoal_index >= self.achieved_subgoals.len() {
+            return None;
+        }
+        let traj_idx = self.subgoal_indices[subgoal_index];
+        if traj_idx >= self.trajectory.len() {
+            return None;
+        }
+        let tool_sequence: Vec<String> = self.trajectory[..=traj_idx].to_vec();
+        if tool_sequence.is_empty() {
+            return None;
+        }
+        let task_description = format!(
+            "{} (subgoal: {})",
+            self.original_goal, self.achieved_subgoals[subgoal_index]
+        );
+        Some(TrajectoryCandidate {
+            session_id: self.session_id.clone(),
+            task_description,
+            tool_sequence,
+            // この prefix までは成功扱い (HSL relabel 意味論)
+            tool_success_rate: 1.0,
+            total_steps: traj_idx + 1,
+            duration_ms: 0,
+        })
+    }
+}
+
+/// SubgoalJudgeMethod に基づく subgoal 達成判定
+fn is_subgoal_achieved(method: SubgoalJudgeMethod, tool_name: &str, success: bool) -> bool {
+    if !success {
+        return false;
+    }
+    match method {
+        SubgoalJudgeMethod::ToolEndSuccess => true,
+        SubgoalJudgeMethod::SideEffectOnly => {
+            matches!(tool_name, "file_write" | "multi_edit" | "git_commit")
+        }
+        // 案 A 包含 (recall 重視のセマンティック分離、実質 ToolEndSuccess と同一)
+        SubgoalJudgeMethod::ToolEndSuccessOrSideEffect => true,
     }
 }
 
@@ -103,8 +135,97 @@ pub fn extract_hindsight_relabels(
     events: &[Event],
     method: SubgoalJudgeMethod,
 ) -> Vec<HindsightRelabel> {
-    let _ = (events, method);
-    todo!("Phase 2 Green: extract_hindsight_relabels")
+    if events.is_empty() {
+        return Vec::new();
+    }
+
+    // SessionEnd 必須 (項目 162 整合)
+    if !events.iter().any(|e| e.event_type == "session_end") {
+        return Vec::new();
+    }
+
+    let session_id = events[0].session_id.clone();
+
+    // original_goal を user_message から抽出
+    let original_goal = events
+        .iter()
+        .find(|e| e.event_type == "user_message")
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.event_data).ok())
+        .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_default();
+
+    let mut trajectory: Vec<String> = Vec::new();
+    let mut achieved_subgoals: Vec<String> = Vec::new();
+    let mut subgoal_indices: Vec<usize> = Vec::new();
+    let mut tool_end_total = 0usize;
+    let mut tool_end_success = 0usize;
+    let mut current_tool_idx: Option<usize> = None;
+    let mut last_tool_name: Option<String> = None;
+
+    for ev in events {
+        match ev.event_type.as_str() {
+            "tool_call_start" => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.event_data)
+                    && let Some(name) = v.get("tool").and_then(|t| t.as_str())
+                {
+                    current_tool_idx = Some(trajectory.len());
+                    trajectory.push(name.to_string());
+                    last_tool_name = Some(name.to_string());
+                }
+            }
+            "tool_call_end" => {
+                tool_end_total += 1;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.event_data) {
+                    let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                    if success {
+                        tool_end_success += 1;
+                    }
+                    let tool_name = v
+                        .get("tool")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| last_tool_name.clone())
+                        .unwrap_or_default();
+                    if is_subgoal_achieved(method, &tool_name, success)
+                        && let Some(idx) = current_tool_idx
+                    {
+                        achieved_subgoals.push(format!("{tool_name} 成功 (step {idx})"));
+                        subgoal_indices.push(idx);
+                    }
+                }
+                current_tool_idx = None;
+            }
+            _ => {}
+        }
+    }
+
+    // min_steps filter (trajectory < 2 → 除外)
+    if trajectory.len() < 2 {
+        return Vec::new();
+    }
+
+    // >= 1 subgoal achievement 必要 (false-positive 防止)
+    if achieved_subgoals.is_empty() {
+        return Vec::new();
+    }
+
+    let tool_success_rate = if tool_end_total == 0 {
+        0.0
+    } else {
+        tool_end_success as f64 / tool_end_total as f64
+    };
+
+    let total_steps = trajectory.len();
+
+    vec![HindsightRelabel {
+        original_goal,
+        achieved_subgoals,
+        subgoal_indices,
+        trajectory,
+        tool_success_rate,
+        session_id,
+        total_steps,
+    }]
 }
 
 /// 経験メモリの操作
@@ -233,8 +354,23 @@ impl<'a> ExperienceStore<'a> {
     /// - lesson       = "失敗 trajectory から hindsight 抽出: 主目標未達だが N 個の subgoal は達成、再利用候補"
     /// - tool_name    = trajectory 末尾 tool
     pub fn record_hindsight_insight(&self, relabel: &HindsightRelabel) -> Result<i64> {
-        let _ = relabel;
-        todo!("Phase 2 Green: record_hindsight_insight")
+        let action = relabel.trajectory.join(" -> ");
+        let outcome = format!("部分達成: {}", relabel.achieved_subgoals.join(", "));
+        let lesson = format!(
+            "失敗 trajectory から hindsight 抽出: 主目標未達だが {} 個の subgoal は達成、再利用候補",
+            relabel.achieved_subgoals.len()
+        );
+        let tool_name = relabel.trajectory.last().map(|s| s.as_str());
+        self.record(&RecordParams {
+            exp_type: ExperienceType::Insight,
+            task_context: &relabel.original_goal,
+            action: &action,
+            outcome: &outcome,
+            lesson: Some(&lesson),
+            tool_name,
+            error_type: None,
+            error_detail: None,
+        })
     }
 }
 
@@ -468,7 +604,11 @@ mod tests {
             "file_write 成功 1 件のみ subgoal"
         );
         assert!(r.achieved_subgoals[0].contains("file_write"));
-        assert_eq!(r.subgoal_indices, vec![0], "trajectory index 0 = file_write");
+        assert_eq!(
+            r.subgoal_indices,
+            vec![0],
+            "trajectory index 0 = file_write"
+        );
         assert_eq!(r.trajectory, vec!["file_write", "shell"]);
         assert!((r.tool_success_rate - 0.5).abs() < 1e-9);
         assert_eq!(r.session_id, "s1");

@@ -164,8 +164,17 @@ impl<'a> EventStore<'a> {
         max_tool_success_rate: f64,
         min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        let _ = (max_tool_success_rate, min_steps);
-        todo!("Phase 2 Green: extract_failed_trajectories")
+        let session_ids = self.list_sessions()?;
+        let mut candidates = Vec::new();
+        for sid in session_ids {
+            if let Some(c) = self.build_trajectory(&sid)?
+                && c.total_steps >= min_steps
+                && c.tool_success_rate < max_tool_success_rate
+            {
+                candidates.push(c);
+            }
+        }
+        Ok(candidates)
     }
 
     fn build_trajectory(&self, session_id: &str) -> Result<Option<TrajectoryCandidate>> {

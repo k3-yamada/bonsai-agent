@@ -163,6 +163,15 @@ impl<'a> SkillStore<'a> {
         &self,
         candidate: &crate::agent::event_store::TrajectoryCandidate,
     ) -> Result<Option<i64>> {
+        self.promote_with_prefix(candidate, "traj_")
+    }
+
+    /// 軌跡候補を任意 prefix で昇格 (promote_from_trajectory / HSL 共通の private helper)
+    fn promote_with_prefix(
+        &self,
+        candidate: &crate::agent::event_store::TrajectoryCandidate,
+        prefix: &str,
+    ) -> Result<Option<i64>> {
         let tool_chain = candidate.tool_chain_key();
         if tool_chain.is_empty() {
             return Ok(None);
@@ -178,7 +187,7 @@ impl<'a> SkillStore<'a> {
             return Ok(None);
         }
 
-        // 名前生成: task_description 先頭30文字 + tool_chain ハッシュ4桁
+        // 名前生成: prefix + task_description 先頭30文字 + tool_chain ハッシュ4桁
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         tool_chain.hash(&mut hasher);
@@ -190,7 +199,7 @@ impl<'a> SkillStore<'a> {
         } else {
             raw_prefix.replace([' ', ':', '/', '\n'], "_")
         };
-        let name = format!("traj_{safe_prefix}_{hash_suffix}");
+        let name = format!("{prefix}{safe_prefix}_{hash_suffix}");
 
         let description = format!(
             "軌跡昇格: {:.0}%成功率 / {}ステップ / {}ms",
@@ -215,8 +224,17 @@ impl<'a> SkillStore<'a> {
         relabel: &crate::memory::experience::HindsightRelabel,
         max_promote: usize,
     ) -> Result<Vec<i64>> {
-        let _ = (relabel, max_promote);
-        todo!("Phase 2 Green: promote_from_hindsight_relabel")
+        let mut promoted = Vec::new();
+        let limit = max_promote.min(relabel.achieved_subgoals.len());
+        for i in 0..limit {
+            let Some(candidate) = relabel.into_relabeled_candidate(i) else {
+                continue;
+            };
+            if let Some(id) = self.promote_with_prefix(&candidate, "hsl_")? {
+                promoted.push(id);
+            }
+        }
+        Ok(promoted)
     }
 
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
@@ -632,10 +650,7 @@ mod tests {
         assert!(id.is_some());
         let all = skills.list_all().unwrap();
         assert_eq!(all.len(), 1);
-        assert!(
-            all[0].name.starts_with("traj_"),
-            "既存 prefix 'traj_' 維持"
-        );
+        assert!(all[0].name.starts_with("traj_"), "既存 prefix 'traj_' 維持");
     }
 
     #[test]
