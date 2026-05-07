@@ -1276,7 +1276,8 @@ fn run_hindsight_pass(store: &MemoryStore, since_event_id: i64) -> Result<Hindsi
     }
 
     // 2. 成功軌跡 (項目 161 dead-code 解消) も symmetric に skill 昇格 (prefix 'traj_')
-    let successful = event_store.extract_successful_trajectories_since_id(since_event_id, 0.8, 2)?;
+    let successful =
+        event_store.extract_successful_trajectories_since_id(since_event_id, 0.8, 2)?;
     summary.successful_sessions = successful.len();
     for candidate in &successful {
         if skill_store.promote_from_trajectory(candidate)?.is_some() {

@@ -705,7 +705,8 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        es.append("old1", &EventType::SessionEnd, "{}", None).unwrap();
+        es.append("old1", &EventType::SessionEnd, "{}", None)
+            .unwrap();
 
         // snapshot 取得 (Lab cycle 開始の境界)
         let snapshot_id: i64 = store
@@ -753,7 +754,8 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        es.append("new1", &EventType::SessionEnd, "{}", None).unwrap();
+        es.append("new1", &EventType::SessionEnd, "{}", None)
+            .unwrap();
 
         // since_id=0 → 全期間で 2 件取得 (既存 extract_failed_trajectories と等価)
         let all = es.extract_failed_trajectories_since_id(0, 0.8, 2).unwrap();
