@@ -977,6 +977,10 @@ pub fn run_experiment_loop(
                     pass_consecutive_k: None,
                     score_variance: None,
                     prescreened: true,
+                    reliability_decay: None,
+                    variance_amplification: None,
+                    graceful_degradation: None,
+                    stability_delta: None,
                 };
                 ExperimentLog::save_to_db(store.conn(), &exp)?;
                 if let Some(tsv) = &loop_config.tsv_path {
@@ -1833,6 +1837,10 @@ mod tests {
                 pass_consecutive_k: None,
                 score_variance: None,
                 prescreened: false,
+                reliability_decay: None,
+                variance_amplification: None,
+                graceful_degradation: None,
+                stability_delta: None,
             },
             Experiment {
                 experiment_id: "e2".into(),
@@ -1848,6 +1856,10 @@ mod tests {
                 pass_consecutive_k: None,
                 score_variance: None,
                 prescreened: false,
+                reliability_decay: None,
+                variance_amplification: None,
+                graceful_degradation: None,
+                stability_delta: None,
             },
             Experiment {
                 experiment_id: "e3".into(),
@@ -1863,6 +1875,10 @@ mod tests {
                 pass_consecutive_k: None,
                 score_variance: None,
                 prescreened: false,
+                reliability_decay: None,
+                variance_amplification: None,
+                graceful_degradation: None,
+                stability_delta: None,
             },
         ];
         let worst = extract_worst_reasoning(&experiments, 5);
@@ -1889,6 +1905,10 @@ mod tests {
                 pass_consecutive_k: None,
                 score_variance: None,
                 prescreened: false,
+                reliability_decay: None,
+                variance_amplification: None,
+                graceful_degradation: None,
+                stability_delta: None,
             })
             .collect();
         let worst = extract_worst_reasoning(&experiments, 3);

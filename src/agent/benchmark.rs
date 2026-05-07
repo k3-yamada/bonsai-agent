@@ -193,6 +193,73 @@ impl Default for MultiRunConfig {
     }
 }
 
+/// 項目 200 (Beyond pass@1): RDC default = 1.0 (減衰なし扱い、旧データ後方互換)
+fn default_reliability_decay() -> f64 {
+    1.0
+}
+
+/// 項目 200: GDS default = 1.0 (全 pass 扱い、旧データ後方互換)
+fn default_graceful_degradation() -> f64 {
+    1.0
+}
+
+/// 項目 200: RDC (Reliability Decay) 計算。
+///
+/// iteration 比 (iter_used / budget) と (1 - score) の負相関を Pearson 相関で
+/// 算出し、`1 - max(0, corr)` を返す (corr が高いほど減衰、RDC 低)。
+///
+/// - 完璧 (全 score=1.0、iter=0): RDC = 1.0
+/// - 完全減衰 (iter↑ で score↓ 強い負相関): RDC < 0.5
+/// - budget=0 or k<2 or 全 score 同値 or 全 iter 同値: RDC = 1.0 (相関未定義 → 減衰なし扱い)
+fn compute_reliability_decay(
+    scores: &[f64],
+    iterations_used: &[usize],
+    iteration_budget: usize,
+) -> f64 {
+    let k = scores.len();
+    if k < 2 || iterations_used.len() != k || iteration_budget == 0 {
+        return 1.0;
+    }
+    let budget = iteration_budget as f64;
+    let xs: Vec<f64> = iterations_used.iter().map(|&u| u as f64 / budget).collect();
+    let ys: Vec<f64> = scores.iter().map(|s| 1.0 - s).collect();
+    let mean_x = xs.iter().sum::<f64>() / k as f64;
+    let mean_y = ys.iter().sum::<f64>() / k as f64;
+    let cov: f64 = xs
+        .iter()
+        .zip(ys.iter())
+        .map(|(x, y)| (x - mean_x) * (y - mean_y))
+        .sum();
+    let var_x: f64 = xs.iter().map(|x| (x - mean_x).powi(2)).sum();
+    let var_y: f64 = ys.iter().map(|y| (y - mean_y).powi(2)).sum();
+    if var_x.abs() < 1e-10 || var_y.abs() < 1e-10 {
+        return 1.0;
+    }
+    let corr = cov / (var_x * var_y).sqrt();
+    // corr in [-1, 1]、正値 = decay (iter↑→1-score↑ → score↓)
+    1.0 - corr.clamp(0.0, 1.0)
+}
+
+/// 項目 200: GDS (Graceful Degradation Score) 計算。
+///
+/// 失敗 run (score < pass_threshold) の score を pass_threshold で正規化した
+/// 近接度の平均を返す。全 pass / threshold==0 の場合は 1.0。
+fn compute_graceful_degradation(scores: &[f64], pass_threshold: f64) -> f64 {
+    if pass_threshold <= 0.0 {
+        return 1.0;
+    }
+    let failures: Vec<f64> = scores
+        .iter()
+        .copied()
+        .filter(|&s| s < pass_threshold)
+        .collect();
+    if failures.is_empty() {
+        return 1.0;
+    }
+    let avg: f64 = failures.iter().map(|s| s / pass_threshold).sum::<f64>() / failures.len() as f64;
+    avg.clamp(0.0, 1.0)
+}
+
 /// 複数回実行時の単一タスクスコア
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiRunTaskScore {
@@ -214,6 +281,14 @@ pub struct MultiRunTaskScore {
     /// 代表 run のツール軌跡（呼出されたツール名の順序、Phase B2: judge gate 用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_trajectory: Option<Vec<String>>,
+    /// RDC スカラー値 [0, 1]（項目 200、Beyond pass@1）。
+    /// 1.0 = 減衰なし、0.0 = 完全減衰。`from_scores_with_metrics` で計算。
+    #[serde(default = "default_reliability_decay")]
+    pub reliability_decay: f64,
+    /// GDS スカラー値 [0, 1]（項目 200、Beyond pass@1）。
+    /// 1.0 = 全 pass or 失敗時も threshold 近く、0.0 = 完全失敗。
+    #[serde(default = "default_graceful_degradation")]
+    pub graceful_degradation: f64,
 }
 
 impl MultiRunTaskScore {
@@ -230,6 +305,8 @@ impl MultiRunTaskScore {
                 individual_scores: vec![],
                 last_response: None,
                 last_trajectory: None,
+                reliability_decay: 1.0,
+                graceful_degradation: 1.0,
             };
         }
 
@@ -265,7 +342,37 @@ impl MultiRunTaskScore {
             individual_scores: scores,
             last_response: None,
             last_trajectory: None,
+            // 項目 200: legacy from_scores は信頼性軸を計算しない (default = 1.0)。
+            // RDC/GDS を計算する経路は from_scores_with_metrics を使う。
+            reliability_decay: 1.0,
+            graceful_degradation: 1.0,
         }
+    }
+
+    /// k 個 scores + iteration 情報から RDC/GDS 込みのフル MultiRunTaskScore を構築
+    /// （項目 200、Beyond pass@1）
+    ///
+    /// `iterations_used` は scores と同じ長さで各 run の使用 iteration 数。
+    /// `iteration_budget` は task の `max_iterations`。
+    ///
+    /// **RDC (Reliability Decay)**: iteration 比 (iter/budget) と (1 - score) の
+    /// 負相関を proxy とする。論文式 (survival function) は取得待ちのため近似。
+    /// budget=0 or k<2 の特殊ケースは 1.0 (減衰なし扱い)。
+    ///
+    /// **GDS (Graceful Degradation)**: 失敗 run の score を pass_threshold で正規化した
+    /// 平均近接度。全 pass なら 1.0、threshold=0 の場合も 1.0。
+    pub fn from_scores_with_metrics(
+        task_id: String,
+        scores: Vec<f64>,
+        iterations_used: Vec<usize>,
+        iteration_budget: usize,
+        pass_threshold: f64,
+    ) -> Self {
+        let mut score = Self::from_scores(task_id, scores.clone(), pass_threshold);
+        score.reliability_decay =
+            compute_reliability_decay(&scores, &iterations_used, iteration_budget);
+        score.graceful_degradation = compute_graceful_degradation(&scores, pass_threshold);
+        score
     }
 
     /// 代表 run の応答と軌跡を後付けで注入するビルダー（Phase B2: judge gate 用）
@@ -348,6 +455,41 @@ impl MultiRunBenchmarkResult {
             return 0.0;
         }
         let sum: f64 = self.task_scores.iter().map(|s| s.variance).sum();
+        sum / self.task_scores.len() as f64
+    }
+
+    /// 全タスクの平均 reliability_decay（項目 200、Beyond pass@1）。
+    /// task_scores が空なら 1.0 (減衰なし扱い)。
+    pub fn composite_reliability_decay(&self) -> f64 {
+        if self.task_scores.is_empty() {
+            return 1.0;
+        }
+        let sum: f64 = self.task_scores.iter().map(|s| s.reliability_decay).sum();
+        sum / self.task_scores.len() as f64
+    }
+
+    /// baseline result との variance 比 (VAF: Variance Amplification Factor、項目 200)。
+    /// `baseline.mean_variance() == 0` なら None。
+    /// 1.0 = 不変 / >1.0 = 不安定化 / <1.0 = 安定化。
+    pub fn variance_amplification_vs(&self, baseline: &Self) -> Option<f64> {
+        let bv = baseline.mean_variance();
+        if bv.abs() < 1e-10 {
+            return None;
+        }
+        Some(self.mean_variance() / bv)
+    }
+
+    /// 全タスクの平均 graceful_degradation（項目 200、Beyond pass@1）。
+    /// task_scores が空なら 1.0 (全 pass 扱い)。
+    pub fn composite_graceful_degradation(&self) -> f64 {
+        if self.task_scores.is_empty() {
+            return 1.0;
+        }
+        let sum: f64 = self
+            .task_scores
+            .iter()
+            .map(|s| s.graceful_degradation)
+            .sum();
         sum / self.task_scores.len() as f64
     }
 }
@@ -859,6 +1001,8 @@ impl BenchmarkSuite {
             }
 
             let mut scores = Vec::new();
+            // 項目 200 (Beyond pass@1): 各 run の使用 iteration を収集して RDC 計算に渡す
+            let mut iterations_per_run: Vec<usize> = Vec::with_capacity(multi.k);
             // 最終 run の代表 trajectory（B2: judge gate 用、最後に成功した run を優先）
             let mut last_run_capture: Option<(String, Vec<String>)> = None;
             // タスク毎に1 DB作成、k回ループ間でリセット（66→22 DB作成に削減）
@@ -913,15 +1057,27 @@ impl BenchmarkSuite {
                         // judge gate 用: 最終 run の応答 + トラジェクトリを保持
                         last_run_capture =
                             Some((loop_result.answer.clone(), loop_result.tools_called.clone()));
+                        // 項目 200: 各 run の iteration 使用数を収集
+                        iterations_per_run.push(loop_result.iterations_used);
                         evaluate_task_response(task, loop_result).score()
                     }
-                    Err(_) => 0.0,
+                    Err(_) => {
+                        // 失敗 run は budget 完全消費とみなす (RDC で late-iteration fail 扱い)
+                        iterations_per_run.push(task.max_iterations);
+                        0.0
+                    }
                 };
                 scores.push(score);
             }
 
-            let mut task_score =
-                MultiRunTaskScore::from_scores(task.id.clone(), scores, pass_threshold);
+            // 項目 200: from_scores_with_metrics で RDC/GDS を計算
+            let mut task_score = MultiRunTaskScore::from_scores_with_metrics(
+                task.id.clone(),
+                scores,
+                iterations_per_run,
+                task.max_iterations,
+                pass_threshold,
+            );
             if let Some((response, trajectory)) = last_run_capture {
                 task_score = task_score.with_last_run(response, trajectory);
             }
@@ -1530,6 +1686,161 @@ mod tests {
         );
         // 既存スコアフィールドは無変化
         assert!((mrt.mean_score - 0.8).abs() < f64::EPSILON);
+    }
+
+    // ─── 項目 200 (Beyond pass@1) Red phase tests ──────────────────────────
+
+    #[test]
+    fn t_rdc_perfect_no_decay() {
+        // 全 run iter=0 完了 + 全 success (score=1.0) → RDC = 1.0 (減衰なし)
+        let task = MultiRunTaskScore::from_scores_with_metrics(
+            "t".into(),
+            vec![1.0, 1.0, 1.0],
+            vec![0, 0, 0],
+            10,
+            0.5,
+        );
+        assert!(
+            (task.reliability_decay - 1.0).abs() < 1e-6,
+            "perfect run RDC should be 1.0, got {}",
+            task.reliability_decay
+        );
+    }
+
+    #[test]
+    fn t_rdc_full_decay_late_iterations_fail() {
+        // 早期 (iter=0) は成功、後期 (iter=9) は失敗 → 強い負相関 → RDC < 0.5
+        let task = MultiRunTaskScore::from_scores_with_metrics(
+            "t".into(),
+            vec![1.0, 0.5, 0.0],
+            vec![0, 5, 9],
+            10,
+            0.5,
+        );
+        assert!(
+            task.reliability_decay < 0.5,
+            "expected RDC < 0.5 (decay observed), got {}",
+            task.reliability_decay
+        );
+    }
+
+    #[test]
+    fn t_vaf_baseline_zero_variance_returns_none() {
+        // baseline 完全一致 (var=0) なら VAF は分母 0 → None
+        let baseline = MultiRunBenchmarkResult {
+            task_scores: vec![MultiRunTaskScore::from_scores(
+                "t".into(),
+                vec![1.0, 1.0, 1.0],
+                0.5,
+            )],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        let experiment = MultiRunBenchmarkResult {
+            task_scores: vec![MultiRunTaskScore::from_scores(
+                "t".into(),
+                vec![1.0, 0.5, 0.0],
+                0.5,
+            )],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        assert!(experiment.variance_amplification_vs(&baseline).is_none());
+    }
+
+    #[test]
+    fn t_vaf_amplification_doubled() {
+        // baseline 軽 variance、experiment 大 variance → VAF > 1.0
+        let baseline = MultiRunBenchmarkResult {
+            task_scores: vec![MultiRunTaskScore::from_scores(
+                "t".into(),
+                vec![1.0, 0.5, 0.0],
+                0.5,
+            )],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        let experiment = MultiRunBenchmarkResult {
+            task_scores: vec![MultiRunTaskScore::from_scores(
+                "t".into(),
+                vec![1.0, 0.0, 0.0],
+                0.5,
+            )],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        let vaf = experiment.variance_amplification_vs(&baseline).unwrap();
+        assert!(vaf > 1.0, "expected amplification VAF > 1.0, got {vaf}");
+    }
+
+    #[test]
+    fn t_gds_all_pass_returns_one() {
+        // 全 score >= pass_threshold → GDS = 1.0 (全 pass)
+        let task = MultiRunTaskScore::from_scores_with_metrics(
+            "t".into(),
+            vec![1.0, 0.8, 0.6],
+            vec![0, 1, 2],
+            10,
+            0.5,
+        );
+        assert!(
+            (task.graceful_degradation - 1.0).abs() < 1e-6,
+            "all-pass GDS should be 1.0, got {}",
+            task.graceful_degradation
+        );
+    }
+
+    #[test]
+    fn t_gds_partial_credit_proximity() {
+        // pass_threshold = 0.5、失敗 run: 0.4, 0.45 → proximity = (0.4 + 0.45) / (2 * 0.5) = 0.85
+        let task = MultiRunTaskScore::from_scores_with_metrics(
+            "t".into(),
+            vec![0.4, 0.45, 1.0],
+            vec![0, 1, 2],
+            10,
+            0.5,
+        );
+        let expected = (0.4 / 0.5 + 0.45 / 0.5) / 2.0;
+        assert!(
+            (task.graceful_degradation - expected).abs() < 1e-6,
+            "GDS partial credit: expected {}, got {}",
+            expected,
+            task.graceful_degradation
+        );
+    }
+
+    #[test]
+    fn t_composite_reliability_decay_average() {
+        // 2 タスクの平均 RDC = (1.0 + 0.5) / 2 = 0.75
+        let mut s_a = MultiRunTaskScore::from_scores("a".into(), vec![1.0, 1.0], 0.5);
+        s_a.reliability_decay = 1.0;
+        let mut s_b = MultiRunTaskScore::from_scores("b".into(), vec![1.0, 0.0], 0.5);
+        s_b.reliability_decay = 0.5;
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![s_a, s_b],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        assert!(
+            (result.composite_reliability_decay() - 0.75).abs() < 1e-6,
+            "composite_reliability_decay should be 0.75, got {}",
+            result.composite_reliability_decay()
+        );
+    }
+
+    #[test]
+    fn t_serde_backward_compat_old_json_loads() {
+        // 旧 JSON (rdc/gds なし) → デフォルト値 1.0 が入って load 成功
+        let old = r#"{"task_id":"x","pass_at_k":1.0,"pass_consecutive_k":1.0,
+                      "mean_score":0.8,"variance":0.0,"individual_scores":[0.8,0.8]}"#;
+        let task: MultiRunTaskScore = serde_json::from_str(old).unwrap();
+        assert!((task.reliability_decay - 1.0).abs() < 1e-6);
+        assert!((task.graceful_degradation - 1.0).abs() < 1e-6);
     }
 
     #[test]

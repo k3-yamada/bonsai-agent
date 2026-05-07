@@ -144,6 +144,21 @@ pub struct Experiment {
     /// プリスクリーニングで早期棄却された実験（フルベンチマーク未実行）
     #[serde(default)]
     pub prescreened: bool,
+    /// 項目 200 (Beyond pass@1): 実験結果の RDC composite。
+    /// `MultiRunBenchmarkResult::composite_reliability_decay` の値。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability_decay: Option<f64>,
+    /// 項目 200: VAF (baseline.mean_variance に対する experiment.mean_variance の比)。
+    /// `baseline.mean_variance() == 0` なら None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variance_amplification: Option<f64>,
+    /// 項目 200: 実験結果の GDS composite。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graceful_degradation: Option<f64>,
+    /// 項目 200: stability_delta = (1 - VAF) + (RDC_exp - RDC_base) + (GDS_exp - GDS_base)。
+    /// 本 plan では計算のみ、ACCEPT 判定には未使用 (active gate 化は別 plan)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability_delta: Option<f64>,
 }
 
 impl Experiment {
@@ -173,6 +188,10 @@ impl Experiment {
             pass_consecutive_k: None,
             score_variance: None,
             prescreened: false,
+            reliability_decay: None,
+            variance_amplification: None,
+            graceful_degradation: None,
+            stability_delta: None,
         }
     }
 
@@ -187,6 +206,14 @@ impl Experiment {
         let baseline_score = baseline.composite_score();
         let experiment_score = experiment.composite_score();
         let delta = experiment_score - baseline_score;
+        // 項目 200 (Beyond pass@1): 信頼性メトリクス 3 軸を集計
+        let vaf = experiment.variance_amplification_vs(baseline);
+        let rdc_exp = experiment.composite_reliability_decay();
+        let rdc_base = baseline.composite_reliability_decay();
+        let gds_exp = experiment.composite_graceful_degradation();
+        let gds_base = baseline.composite_graceful_degradation();
+        // stability_delta は VAF が None なら計算不能 (baseline variance=0 のケース)
+        let stability_delta = vaf.map(|v| (1.0 - v) + (rdc_exp - rdc_base) + (gds_exp - gds_base));
         Self {
             experiment_id,
             mutation_type,
@@ -194,7 +221,7 @@ impl Experiment {
             baseline_score,
             experiment_score,
             delta,
-            accepted: delta > 0.0,
+            accepted: delta > 0.0, // 本 plan では ACCEPT 判定基準は変更しない
             duration_secs: experiment.duration_secs,
             config_snapshot,
             pass_at_k: Some(experiment.composite_pass_at_k()),
@@ -208,6 +235,10 @@ impl Experiment {
                     / experiment.task_scores.len().max(1) as f64,
             ),
             prescreened: false,
+            reliability_decay: Some(rdc_exp),
+            variance_amplification: vaf,
+            graceful_degradation: Some(gds_exp),
+            stability_delta,
         }
     }
 }
@@ -220,8 +251,9 @@ impl ExperimentLog {
     pub fn save_to_db(conn: &Connection, exp: &Experiment) -> Result<()> {
         conn.execute(
             "INSERT INTO experiments (experiment_id, mutation_type, mutation_detail, \
-             baseline_score, experiment_score, delta, accepted, duration_secs, prescreened) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             baseline_score, experiment_score, delta, accepted, duration_secs, prescreened, \
+             reliability_decay, variance_amplification, graceful_degradation, stability_delta) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 exp.experiment_id,
                 exp.mutation_type.as_str(),
@@ -232,6 +264,10 @@ impl ExperimentLog {
                 exp.accepted as i32,
                 exp.duration_secs,
                 exp.prescreened as i32,
+                exp.reliability_decay,
+                exp.variance_amplification,
+                exp.graceful_degradation,
+                exp.stability_delta,
             ],
         )?;
 
@@ -256,13 +292,13 @@ impl ExperimentLog {
         if needs_header {
             writeln!(
                 file,
-                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\tprescreened"
+                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\tprescreened\treliability_decay\tvariance_amplification\tgraceful_degradation"
             )?;
         }
 
         writeln!(
             file,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             exp.experiment_id,
             exp.mutation_type.as_str(),
             exp.mutation_detail.replace('\t', " "),
@@ -277,6 +313,12 @@ impl ExperimentLog {
             exp.score_variance
                 .map_or("-".to_string(), |v| format!("{v:.6}")),
             exp.prescreened,
+            exp.reliability_decay
+                .map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.variance_amplification
+                .map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.graceful_degradation
+                .map_or("-".to_string(), |v| format!("{v:.4}")),
         )?;
         Ok(())
     }
@@ -286,7 +328,8 @@ impl ExperimentLog {
         let mut stmt = conn.prepare(
             "SELECT experiment_id, mutation_type, mutation_detail, \
              baseline_score, experiment_score, delta, accepted, duration_secs, \
-             COALESCE(prescreened, 0) \
+             COALESCE(prescreened, 0), \
+             reliability_decay, variance_amplification, graceful_degradation, stability_delta \
              FROM experiments ORDER BY id DESC LIMIT ?1",
         )?;
 
@@ -301,6 +344,10 @@ impl ExperimentLog {
                 row.get::<_, i32>(6)?,
                 row.get::<_, f64>(7)?,
                 row.get::<_, i32>(8)?,
+                row.get::<_, Option<f64>>(9)?,
+                row.get::<_, Option<f64>>(10)?,
+                row.get::<_, Option<f64>>(11)?,
+                row.get::<_, Option<f64>>(12)?,
             ))
         })?;
 
@@ -311,7 +358,21 @@ impl ExperimentLog {
 
         let mut experiments = Vec::new();
         for row in rows {
-            let (id, mt, detail, baseline, score, delta, accepted, dur, prescreened) = row?;
+            let (
+                id,
+                mt,
+                detail,
+                baseline,
+                score,
+                delta,
+                accepted,
+                dur,
+                prescreened,
+                rdc,
+                vaf,
+                gds,
+                stab,
+            ) = row?;
             let mutation_type = MutationType::parse(&mt).unwrap_or(MutationType::PromptRule);
 
             let config: HashMap<String, String> = config_stmt
@@ -335,6 +396,10 @@ impl ExperimentLog {
                 pass_consecutive_k: None,
                 score_variance: None,
                 prescreened: prescreened != 0,
+                reliability_decay: rdc,
+                variance_amplification: vaf,
+                graceful_degradation: gds,
+                stability_delta: stab,
             });
         }
         Ok(experiments)
@@ -364,8 +429,8 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // V7まで適用（prescreenedカラム含む）
-        for version in [1, 2, 7] {
+        // V1, V2, V7 (prescreened), V9 (項目 200 信頼性メトリクス 4 カラム) 適用
+        for version in [1, 2, 7, 9] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -387,6 +452,10 @@ mod tests {
             pass_consecutive_k: None,
             score_variance: None,
             prescreened: false,
+            reliability_decay: None,
+            variance_amplification: None,
+            graceful_degradation: None,
+            stability_delta: None,
         }
     }
 
@@ -512,7 +581,8 @@ mod tests {
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
         let data_line = content.lines().nth(1).unwrap();
-        assert_eq!(data_line.split('\t').count(), 12);
+        // 項目 200: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) = 15 列
+        assert_eq!(data_line.split('\t').count(), 15);
     }
 
     #[test]
@@ -572,6 +642,58 @@ mod tests {
         assert_eq!(archive[0].detail, "test mutation detail");
         assert!((archive[0].delta - 0.15).abs() < 0.001);
         assert!((archive[0].baseline_score - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn t_experiment_from_multi_results_includes_stability_delta() {
+        // 項目 200 (Beyond pass@1): from_multi_results が信頼性メトリクスを設定すること
+        use crate::agent::benchmark::{MultiRunBenchmarkResult, MultiRunTaskScore};
+        let baseline = MultiRunBenchmarkResult {
+            task_scores: vec![MultiRunTaskScore::from_scores(
+                "t".into(),
+                vec![1.0, 1.0, 1.0],
+                0.5,
+            )], // var=0 → VAF=None
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        let experiment = MultiRunBenchmarkResult {
+            task_scores: vec![MultiRunTaskScore::from_scores(
+                "t".into(),
+                vec![1.0, 0.5, 0.0],
+                0.5,
+            )],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+        };
+        let exp = Experiment::from_multi_results(
+            "e1".into(),
+            MutationType::PromptRule,
+            "test".into(),
+            &baseline,
+            &experiment,
+            HashMap::new(),
+        );
+        // RDC/GDS は composite メソッドから設定される
+        assert!(
+            exp.reliability_decay.is_some(),
+            "reliability_decay should be Some after from_multi_results"
+        );
+        assert!(
+            exp.graceful_degradation.is_some(),
+            "graceful_degradation should be Some after from_multi_results"
+        );
+        // baseline var=0 → VAF=None → stability_delta=None
+        assert!(
+            exp.variance_amplification.is_none(),
+            "VAF should be None when baseline variance is 0"
+        );
+        assert!(
+            exp.stability_delta.is_none(),
+            "stability_delta should be None when VAF is None"
+        );
     }
 
     #[test]

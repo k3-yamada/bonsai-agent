@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 pub const MIGRATIONS: &[Migration] = &[
@@ -42,6 +42,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         description: "実験インデックス: accepted+mutation_detail複合インデックス",
         sql: SCHEMA_V8,
+    },
+    Migration {
+        version: 9,
+        description: "Beyond pass@1 信頼性メトリクス: rdc/vaf/gds/stability_delta カラム追加 (項目 200)",
+        sql: SCHEMA_V9,
     },
 ];
 
@@ -218,6 +223,15 @@ ALTER TABLE experiments ADD COLUMN prescreened INTEGER NOT NULL DEFAULT 0;
 
 const SCHEMA_V8: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_experiments_accepted_detail ON experiments(accepted, mutation_detail);
+"#;
+
+/// 項目 200 (Beyond pass@1): 信頼性メトリクス 4 カラム追加。
+/// すべて REAL NULL で旧データは NULL のまま (後方互換)。
+const SCHEMA_V9: &str = r#"
+ALTER TABLE experiments ADD COLUMN reliability_decay REAL;
+ALTER TABLE experiments ADD COLUMN variance_amplification REAL;
+ALTER TABLE experiments ADD COLUMN graceful_degradation REAL;
+ALTER TABLE experiments ADD COLUMN stability_delta REAL;
 "#;
 
 #[cfg(test)]
