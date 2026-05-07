@@ -2543,4 +2543,33 @@ mod tests {
     fn phase_c_tool_fact_check() {
         assert_task_present("tool_fact_check");
     }
+
+    // ========================================================================
+    // Phase 1 Red — Option A migration (.claude/plan/agenther-option-a-migration.md)
+    //
+    // Why: handoff 05-07h の Option B (run_k が `Option<&MemoryStore>` を取り、内部で
+    // ephemeral store の events を `export_to` で persistent に bulk copy) は移行措置。
+    // Option A 完成形では run_k が persistent `&MemoryStore` を必須引数で受け取り、
+    // events は直接 persistent に書き込まれる (ephemeral / export_to 廃止)。
+    //
+    // 本 typecheck fn は実行されない (`#[allow(dead_code)]`)。コンパイル時に run_k の
+    // 最終引数が `&MemoryStore` (Option ではない) であることを強制する。
+    // 現状 (Option<&MemoryStore>): E0308 で build red → cargo test がそもそも通らない。
+    // Phase 2 で signature を `&MemoryStore` に変更したら build green。
+    // ========================================================================
+
+    #[allow(dead_code)]
+    fn _phase1_red_run_k_signature_typecheck(
+        suite: &BenchmarkSuite,
+        cfg: &AgentConfig,
+        backend: &dyn LlmBackend,
+        tools: &ToolRegistry,
+        path_guard: &PathGuard,
+        cancel: &CancellationToken,
+        multi: &MultiRunConfig,
+        store: &MemoryStore,
+    ) -> Result<MultiRunBenchmarkResult> {
+        // Option A 後の呼び出し形 (`&store` を直接渡す、`Some(..)` 不要)
+        suite.run_k(cfg, backend, tools, path_guard, cancel, multi, 0.5, store)
+    }
 }
