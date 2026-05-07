@@ -1188,6 +1188,29 @@ pub fn run_experiment_loop(
         }
     );
 
+    // AgentHER post-Lab pass: 失敗 trajectory の HSL relabel + 成功軌跡の symmetric promotion
+    // (handoff 05-07e TODO #1、項目 161/201 dead-code 解消)
+    // non-fatal: エラーは Warn log のみで握り潰し、Lab 結果は通常通り返す
+    match run_hindsight_pass(store) {
+        Ok(s) => log_event(
+            LogLevel::Info,
+            "lab.agenther",
+            &format!(
+                "AgentHER post-Lab: failed={} successful={} relabels={} skills={} insights={}",
+                s.failed_sessions,
+                s.successful_sessions,
+                s.relabels,
+                s.skills_promoted,
+                s.insights_recorded,
+            ),
+        ),
+        Err(e) => log_event(
+            LogLevel::Warn,
+            "lab.agenther",
+            &format!("AgentHER post-Lab pass failed (non-fatal): {e}"),
+        ),
+    }
+
     Ok(experiments)
 }
 
@@ -1204,8 +1227,43 @@ pub(crate) struct HindsightSummary {
 /// Lab 完走後に呼び出され、events から失敗 trajectory の hindsight relabel を抽出 + 成功 trajectory も symmetric に skill 昇格 (項目 161/201 dead-code 解消)。
 ///
 /// non-fatal: 任意のエラーは呼出側で `Warn` log にして握り潰す（Lab 結果を破壊しない）。
-fn run_hindsight_pass(_store: &MemoryStore) -> Result<HindsightSummary> {
-    todo!("run_hindsight_pass: Phase 2 Green で実装")
+fn run_hindsight_pass(store: &MemoryStore) -> Result<HindsightSummary> {
+    let conn = store.conn();
+    let event_store = EventStore::new(conn);
+    let skill_store = SkillStore::new(conn);
+    let exp_store = ExperienceStore::new(conn);
+    let mut summary = HindsightSummary::default();
+
+    // 1. 失敗 session (success_rate < 0.8 / steps >= 2) の HSL relabel + ECHO insight
+    let failed = event_store.extract_failed_trajectories(0.8, 2)?;
+    summary.failed_sessions = failed.len();
+    for candidate in &failed {
+        let events = event_store.replay(&candidate.session_id)?;
+        let relabels = extract_hindsight_relabels(
+            &events,
+            SubgoalJudgeMethod::ToolEndSuccessOrSideEffect, // recall 重視 default
+        );
+        summary.relabels += relabels.len();
+        for relabel in &relabels {
+            // (a) skill 昇格 (max_promote=3 で爆発防止、tool_chain UNIQUE で dedup)
+            let ids = skill_store.promote_from_hindsight_relabel(relabel, 3)?;
+            summary.skills_promoted += ids.len();
+            // (b) ECHO insight 記録 (ExperienceType::Insight)
+            exp_store.record_hindsight_insight(relabel)?;
+            summary.insights_recorded += 1;
+        }
+    }
+
+    // 2. 成功軌跡 (項目 161 dead-code 解消) も symmetric に skill 昇格 (prefix 'traj_')
+    let successful = event_store.extract_successful_trajectories(0.8, 2)?;
+    summary.successful_sessions = successful.len();
+    for candidate in &successful {
+        if skill_store.promote_from_trajectory(candidate)?.is_some() {
+            summary.skills_promoted += 1;
+        }
+    }
+
+    Ok(summary)
 }
 
 /// judge gate の判定結果（B2: ACCEPT 判定の補助シグナル）
