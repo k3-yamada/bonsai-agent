@@ -849,6 +849,16 @@ pub fn run_experiment_loop(
     };
     let pass_threshold = 0.5;
 
+    // handoff 05-07g Phase 5 scoping: Lab cycle 開始時の events.id snapshot。
+    // 終端 AgentHER pass はこの id < event.id の events のみ対象とし、
+    // 過去 cycle の累積汚染を回避する。`COALESCE(MAX(id), 0)` で空 DB 時 0。
+    let lab_start_event_id: i64 = store
+        .conn()
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+
     // 1. ベースライン計測（pass^k版）
     log_event(
         LogLevel::Info,
@@ -1196,7 +1206,9 @@ pub fn run_experiment_loop(
     // AgentHER post-Lab pass: 失敗 trajectory の HSL relabel + 成功軌跡の symmetric promotion
     // (handoff 05-07e TODO #1、項目 161/201 dead-code 解消)
     // non-fatal: エラーは Warn log のみで握り潰し、Lab 結果は通常通り返す
-    match run_hindsight_pass(store) {
+    // handoff 05-07g Phase 5 scoping: lab_start_event_id < event.id の events
+    // のみ AgentHER 対象 (繰り返し Lab cycle 跨ぎの累積汚染を回避)
+    match run_hindsight_pass(store, lab_start_event_id) {
         Ok(s) => log_event(
             LogLevel::Info,
             "lab.agenther",
@@ -1232,7 +1244,11 @@ pub(crate) struct HindsightSummary {
 /// Lab 完走後に呼び出され、events から失敗 trajectory の hindsight relabel を抽出 + 成功 trajectory も symmetric に skill 昇格 (項目 161/201 dead-code 解消)。
 ///
 /// non-fatal: 任意のエラーは呼出側で `Warn` log にして握り潰す（Lab 結果を破壊しない）。
-fn run_hindsight_pass(store: &MemoryStore) -> Result<HindsightSummary> {
+///
+/// `since_event_id` は当該 Lab cycle 開始時の `MAX(events.id)` (handoff 05-07g
+/// Phase 5 scoping)。`since_event_id < event.id` の events のみが AgentHER pass の
+/// 対象になり、過去 cycle の events 累積汚染を回避する。`0` で全期間 = 既存挙動。
+fn run_hindsight_pass(store: &MemoryStore, since_event_id: i64) -> Result<HindsightSummary> {
     let conn = store.conn();
     let event_store = EventStore::new(conn);
     let skill_store = SkillStore::new(conn);
@@ -1240,7 +1256,7 @@ fn run_hindsight_pass(store: &MemoryStore) -> Result<HindsightSummary> {
     let mut summary = HindsightSummary::default();
 
     // 1. 失敗 session (success_rate < 0.8 / steps >= 2) の HSL relabel + ECHO insight
-    let failed = event_store.extract_failed_trajectories(0.8, 2)?;
+    let failed = event_store.extract_failed_trajectories_since_id(since_event_id, 0.8, 2)?;
     summary.failed_sessions = failed.len();
     for candidate in &failed {
         let events = event_store.replay(&candidate.session_id)?;
@@ -1260,7 +1276,7 @@ fn run_hindsight_pass(store: &MemoryStore) -> Result<HindsightSummary> {
     }
 
     // 2. 成功軌跡 (項目 161 dead-code 解消) も symmetric に skill 昇格 (prefix 'traj_')
-    let successful = event_store.extract_successful_trajectories(0.8, 2)?;
+    let successful = event_store.extract_successful_trajectories_since_id(since_event_id, 0.8, 2)?;
     summary.successful_sessions = successful.len();
     for candidate in &successful {
         if skill_store.promote_from_trajectory(candidate)?.is_some() {
@@ -2294,7 +2310,7 @@ mod tests {
     #[test]
     fn t_hindsight_pass_no_events_returns_zero_summary() {
         let store = MemoryStore::in_memory().unwrap();
-        let summary = run_hindsight_pass(&store).unwrap();
+        let summary = run_hindsight_pass(&store, 0).unwrap();
         assert_eq!(summary, HindsightSummary::default());
     }
 
@@ -2309,7 +2325,7 @@ mod tests {
             "FizzBuzz実装",
             &[("file_write", true), ("shell", false)],
         );
-        let summary = run_hindsight_pass(&store).unwrap();
+        let summary = run_hindsight_pass(&store, 0).unwrap();
         assert_eq!(summary.failed_sessions, 1, "1 failed session");
         assert!(summary.relabels >= 1, "1 file_write 成功で >= 1 relabel");
         assert!(summary.insights_recorded >= 1, "ECHO insight 記録");
@@ -2327,7 +2343,7 @@ mod tests {
             "ファイル処理",
             &[("shell", true), ("shell", true)],
         );
-        let summary = run_hindsight_pass(&store).unwrap();
+        let summary = run_hindsight_pass(&store, 0).unwrap();
         assert_eq!(summary.failed_sessions, 0);
         assert_eq!(summary.successful_sessions, 1, "1 successful session");
         assert!(summary.skills_promoted >= 1, "traj_ skill 1 件以上");
@@ -2352,7 +2368,7 @@ mod tests {
                 ("shell", false),
             ],
         );
-        let summary = run_hindsight_pass(&store).unwrap();
+        let summary = run_hindsight_pass(&store, 0).unwrap();
         assert_eq!(summary.failed_sessions, 1);
         assert!(summary.relabels >= 1);
         // 1 relabel × max_promote=3 で 1 session あたり最大 3 hsl_ skills

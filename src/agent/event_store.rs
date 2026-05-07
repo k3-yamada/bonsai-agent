@@ -138,14 +138,38 @@ impl<'a> EventStore<'a> {
     /// - UserMessage: `{"content": "タスク記述"}`
     /// - ToolCallStart: `{"tool": "shell"}` (tool名のみ必須)
     /// - ToolCallEnd:   `{"tool": "shell", "success": true}` (successのみ必須)
+    ///
+    /// 本 method は `extract_successful_trajectories_since_id(0, ...)` の薄いラッパ
+    /// (handoff 05-07g Phase 5 で scoping 機構導入時に delegate 化、互換維持)。
     pub fn extract_successful_trajectories(
         &self,
         min_tool_success_rate: f64,
         min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        let session_ids = self.list_sessions()?;
-        let mut candidates = Vec::new();
+        self.extract_successful_trajectories_since_id(0, min_tool_success_rate, min_steps)
+    }
 
+    /// 成功軌跡抽出 (Lab cycle scoping 対応、handoff 05-07g Phase 5)。
+    ///
+    /// `since_event_id` より大きい id を持つ SessionStart event の session のみを
+    /// 対象とする。`extract_failed_trajectories_since_id` の対称、判定は `>=`。
+    /// `since_event_id=0` で全期間 = `extract_successful_trajectories` と等価。
+    pub fn extract_successful_trajectories_since_id(
+        &self,
+        since_event_id: i64,
+        min_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT session_id FROM events
+             WHERE event_type = 'session_start' AND id > ?1
+             ORDER BY id",
+        )?;
+        let session_ids: Vec<String> = stmt
+            .query_map(params![since_event_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut candidates = Vec::new();
         for sid in session_ids {
             if let Some(c) = self.build_trajectory(&sid)?
                 && c.total_steps >= min_steps
@@ -231,12 +255,13 @@ impl<'a> EventStore<'a> {
 
         let count = rows.len();
         let dest_conn = dest.conn();
+        // prepared INSERT を 1 回 prepare して reuse (N event でも prepare 1 回、効率優先)
+        let mut ins = dest_conn.prepare(
+            "INSERT INTO events (session_id, event_type, event_data, step_index, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
         for (sid, et, ed, si, ca) in rows {
-            dest_conn.execute(
-                "INSERT INTO events (session_id, event_type, event_data, step_index, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![sid, et, ed, si, ca],
-            )?;
+            ins.execute(params![sid, et, ed, si, ca])?;
         }
         Ok(count)
     }
