@@ -179,6 +179,21 @@ impl<'a> EventStore<'a> {
         Ok(candidates)
     }
 
+    /// 現時点での `events` テーブルの `MAX(id)` を返す (events 空なら 0)。
+    ///
+    /// Lab cycle 開始時に snapshot して `extract_*_trajectories_since_id(snapshot, ..)`
+    /// の引数として渡せば、当該 cycle 内に記録された events だけを AgentHER pass の
+    /// 対象にできる (handoff 05-07g Phase 5 / 項目 203 scoping)。
+    /// SQL レベルのエラーは Result で伝播 (cold-start で events 空でも `COALESCE` で 0)。
+    pub fn current_max_id(&self) -> Result<i64> {
+        let id: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(id)
+    }
+
     /// AgentHER: 失敗 trajectory を抽出 (success_rate < max_tool_success_rate)
     ///
     /// `extract_successful_trajectories` の対称、SessionEnd 必須・min_steps 適用。
@@ -561,6 +576,26 @@ mod tests {
         assert_eq!(EventType::SessionStart.as_str(), "session_start");
         assert_eq!(EventType::ToolCallEnd.as_str(), "tool_call_end");
         assert_eq!(EventType::PlanGenerated.as_str(), "plan_generated");
+    }
+
+    #[test]
+    fn test_current_max_id_empty_returns_zero() {
+        // events 空 (cold-start) で COALESCE(MAX(id), 0) が 0 を返す
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        assert_eq!(es.current_max_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_current_max_id_returns_max_after_appends() {
+        // 2 events append 後に MAX(id) >= 2 を返す (AUTOINCREMENT 開始 1)
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append("s1", &EventType::SessionEnd, "{}", None).unwrap();
+        let max = es.current_max_id().unwrap();
+        assert!(max >= 2, "expected MAX(id) >= 2 after 2 appends, got {max}");
     }
 
     // === scoping test (agenther-event-flow-fix Phase 5 / Option A 移行で生存) ===

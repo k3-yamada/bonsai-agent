@@ -855,13 +855,8 @@ pub fn run_experiment_loop(
 
     // handoff 05-07g Phase 5 scoping: Lab cycle 開始時の events.id snapshot。
     // 終端 AgentHER pass はこの id < event.id の events のみ対象とし、
-    // 過去 cycle の累積汚染を回避する。`COALESCE(MAX(id), 0)` で空 DB 時 0。
-    let lab_start_event_id: i64 = store
-        .conn()
-        .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
-            row.get(0)
-        })
-        .unwrap_or(0);
+    // 過去 cycle の累積汚染を回避する。SQL レベルのエラーは 0 fallback (cold-start 互換)。
+    let lab_start_event_id: i64 = EventStore::new(store.conn()).current_max_id().unwrap_or(0);
 
     // 1. ベースライン計測（pass^k版）
     log_event(
