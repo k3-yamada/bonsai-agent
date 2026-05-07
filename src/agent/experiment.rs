@@ -4,12 +4,15 @@ use std::collections::HashMap;
 
 use crate::agent::agent_loop::AgentConfig;
 use crate::agent::benchmark::{BenchmarkSuite, MultiRunBenchmarkResult, MultiRunConfig};
+use crate::agent::event_store::EventStore;
 use crate::agent::experiment_log::{
     AcceptedMutation, Experiment, ExperimentLog, MutationTheme, MutationType, load_accepted_archive,
 };
 use crate::agent::judge::{HttpAdvisorJudge, LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
+use crate::memory::experience::{ExperienceStore, SubgoalJudgeMethod, extract_hindsight_relabels};
+use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
 use crate::runtime::inference::LlmBackend;
 use crate::tools::ToolRegistry;
@@ -1188,6 +1191,23 @@ pub fn run_experiment_loop(
     Ok(experiments)
 }
 
+/// AgentHER post-Lab pass で集計するメトリクス（項目 201 / handoff 05-07e TODO #1）
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct HindsightSummary {
+    pub failed_sessions: usize,
+    pub successful_sessions: usize,
+    pub relabels: usize,
+    pub skills_promoted: usize,
+    pub insights_recorded: usize,
+}
+
+/// Lab 完走後に呼び出され、events から失敗 trajectory の hindsight relabel を抽出 + 成功 trajectory も symmetric に skill 昇格 (項目 161/201 dead-code 解消)。
+///
+/// non-fatal: 任意のエラーは呼出側で `Warn` log にして握り潰す（Lab 結果を破壊しない）。
+fn run_hindsight_pass(_store: &MemoryStore) -> Result<HindsightSummary> {
+    todo!("run_hindsight_pass: Phase 2 Green で実装")
+}
+
 /// judge gate の判定結果（B2: ACCEPT 判定の補助シグナル）
 ///
 /// `passed` は `mean_composite >= threshold` を満たすかどうか。
@@ -2154,5 +2174,129 @@ mod tests {
         let outcome = judge_gate_check(&mut judge, &result, 0.7, 1, &descs).unwrap();
         assert_eq!(judge.call_count, 1, "sample_size=1 should judge 1 task");
         assert_eq!(outcome.scores.len(), 1);
+    }
+
+    // ===== AgentHER runtime integration tests (handoff 05-07e TODO #1, 項目 201/161 dead-code 解消) =====
+
+    /// 1 session 分の events を append する test helper。
+    /// `tool_results: &[(tool_name, success)]` で各ツール呼出のシーケンスを指定。
+    fn seed_session_events(
+        es: &EventStore,
+        session_id: &str,
+        user_content: &str,
+        tool_results: &[(&str, bool)],
+    ) {
+        es.append(
+            session_id,
+            &crate::agent::event_store::EventType::SessionStart,
+            "{}",
+            None,
+        )
+        .unwrap();
+        let user_payload = format!(r#"{{"content":"{}"}}"#, user_content);
+        es.append(
+            session_id,
+            &crate::agent::event_store::EventType::UserMessage,
+            &user_payload,
+            Some(0),
+        )
+        .unwrap();
+        for (i, (tool, success)) in tool_results.iter().enumerate() {
+            let start_payload = format!(r#"{{"tool":"{}"}}"#, tool);
+            es.append(
+                session_id,
+                &crate::agent::event_store::EventType::ToolCallStart,
+                &start_payload,
+                Some(i),
+            )
+            .unwrap();
+            let end_payload = format!(r#"{{"tool":"{}","success":{}}}"#, tool, success);
+            es.append(
+                session_id,
+                &crate::agent::event_store::EventType::ToolCallEnd,
+                &end_payload,
+                Some(i),
+            )
+            .unwrap();
+        }
+        es.append(
+            session_id,
+            &crate::agent::event_store::EventType::SessionEnd,
+            "{}",
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn t_hindsight_pass_no_events_returns_zero_summary() {
+        let store = MemoryStore::in_memory().unwrap();
+        let summary = run_hindsight_pass(&store).unwrap();
+        assert_eq!(summary, HindsightSummary::default());
+    }
+
+    #[test]
+    fn t_hindsight_pass_extracts_subgoals_from_failed_session() {
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        // success_rate = 1/2 = 0.5 < 0.8 → failed、file_write 1 件 → 1 subgoal
+        seed_session_events(
+            &es,
+            "fail1",
+            "FizzBuzz実装",
+            &[("file_write", true), ("shell", false)],
+        );
+        let summary = run_hindsight_pass(&store).unwrap();
+        assert_eq!(summary.failed_sessions, 1, "1 failed session");
+        assert!(summary.relabels >= 1, "1 file_write 成功で >= 1 relabel");
+        assert!(summary.insights_recorded >= 1, "ECHO insight 記録");
+        assert!(summary.skills_promoted >= 1, "hsl_ skill 1 件以上");
+    }
+
+    #[test]
+    fn t_hindsight_pass_promotes_successful_trajectory_symmetric() {
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        // success_rate=1.0 >= 0.8 / steps=2 → 成功軌跡として extract、symmetric promotion
+        seed_session_events(
+            &es,
+            "ok1",
+            "ファイル処理",
+            &[("shell", true), ("shell", true)],
+        );
+        let summary = run_hindsight_pass(&store).unwrap();
+        assert_eq!(summary.failed_sessions, 0);
+        assert_eq!(summary.successful_sessions, 1, "1 successful session");
+        assert!(summary.skills_promoted >= 1, "traj_ skill 1 件以上");
+    }
+
+    #[test]
+    fn t_hindsight_pass_max_promote_caps_skill_explosion() {
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        // 4 success + 2 fail = success_rate 0.667 < 0.8 → failed
+        // 4 異なる tool successes → 4 subgoals、max_promote=3 で skills_promoted ≤ 3
+        seed_session_events(
+            &es,
+            "fail2",
+            "複数ファイル処理",
+            &[
+                ("file_write", true),
+                ("multi_edit", true),
+                ("git_commit", true),
+                ("file_write", true),
+                ("shell", false),
+                ("shell", false),
+            ],
+        );
+        let summary = run_hindsight_pass(&store).unwrap();
+        assert_eq!(summary.failed_sessions, 1);
+        assert!(summary.relabels >= 1);
+        // 1 relabel × max_promote=3 で 1 session あたり最大 3 hsl_ skills
+        assert!(
+            summary.skills_promoted <= 3,
+            "max_promote=3 cap で skills_promoted={} <= 3",
+            summary.skills_promoted
+        );
     }
 }
