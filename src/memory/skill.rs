@@ -205,6 +205,20 @@ impl<'a> SkillStore<'a> {
         Ok(Some(id))
     }
 
+    /// AgentHER HSL: HindsightRelabel から skill を昇格 (HSL ラッパー、prefix 'hsl_')
+    ///
+    /// achieved_subgoals 各要素を `into_relabeled_candidate(i)` で TrajectoryCandidate 化、
+    /// 既存 `promote_from_trajectory` の dedup を踏襲しつつ name prefix を `hsl_` に置換。
+    /// `max_promote` で昇格件数を上限クランプ (skill 爆発防止、デフォルト推奨 3)。
+    pub fn promote_from_hindsight_relabel(
+        &self,
+        relabel: &crate::memory::experience::HindsightRelabel,
+        max_promote: usize,
+    ) -> Result<Vec<i64>> {
+        let _ = (relabel, max_promote);
+        todo!("Phase 2 Green: promote_from_hindsight_relabel")
+    }
+
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
     /// frequency(0.4) + recency(0.35) + diversity(0.25)
     pub fn promote_from_experiences(
@@ -511,6 +525,116 @@ mod tests {
         assert!(
             skills.promote_from_trajectory(&c).unwrap().is_none(),
             "tool_sequence 空は昇格しない"
+        );
+    }
+
+    // ============ AgentHER HSL テスト (Phase 1 Red) ============
+
+    fn make_relabel(
+        achieved: Vec<&str>,
+        indices: Vec<usize>,
+        trajectory: Vec<&str>,
+        goal: &str,
+    ) -> crate::memory::experience::HindsightRelabel {
+        crate::memory::experience::HindsightRelabel {
+            original_goal: goal.to_string(),
+            achieved_subgoals: achieved.iter().map(|s| s.to_string()).collect(),
+            subgoal_indices: indices,
+            trajectory: trajectory.iter().map(|s| s.to_string()).collect(),
+            tool_success_rate: 0.5,
+            session_id: "s1".to_string(),
+            total_steps: trajectory.len(),
+        }
+    }
+
+    #[test]
+    fn t_promote_hsl_basic() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        let relabel = make_relabel(
+            vec!["file_write 成功", "shell 成功"],
+            vec![0, 1],
+            vec!["file_write", "shell"],
+            "FizzBuzz実装",
+        );
+        let ids = skills.promote_from_hindsight_relabel(&relabel, 2).unwrap();
+        assert_eq!(ids.len(), 2, "2 subgoals → 2 skills 昇格");
+
+        let all = skills.list_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            all.iter().all(|s| s.name.starts_with("hsl_")),
+            "name prefix hsl_"
+        );
+    }
+
+    #[test]
+    fn t_promote_hsl_dedup() {
+        use crate::agent::event_store::TrajectoryCandidate;
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        // 既存 success trajectory を昇格
+        let candidate = TrajectoryCandidate {
+            session_id: "s0".into(),
+            task_description: "既存タスク".into(),
+            tool_sequence: vec!["file_write".into()],
+            tool_success_rate: 1.0,
+            total_steps: 1,
+            duration_ms: 100,
+        };
+        skills.promote_from_trajectory(&candidate).unwrap();
+        assert_eq!(skills.list_all().unwrap().len(), 1);
+
+        // 同じ tool_chain を含む HSL は dedup される
+        let relabel = make_relabel(
+            vec!["file_write 成功"],
+            vec![0],
+            vec!["file_write"],
+            "失敗タスク",
+        );
+        let ids = skills.promote_from_hindsight_relabel(&relabel, 1).unwrap();
+        assert!(ids.is_empty(), "既存 traj_ と tool_chain 一致なら dedup");
+
+        assert_eq!(skills.list_all().unwrap().len(), 1, "skill 数不変");
+    }
+
+    #[test]
+    fn t_promote_hsl_max_promote_clamps() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        let relabel = make_relabel(
+            vec!["a", "b", "c"],
+            vec![0, 1, 2],
+            vec!["file_write", "multi_edit", "git_commit"],
+            "MultiTask",
+        );
+        let ids = skills.promote_from_hindsight_relabel(&relabel, 1).unwrap();
+        assert_eq!(ids.len(), 1, "max_promote=1 で 1 件のみ");
+
+        assert_eq!(skills.list_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn t_existing_promote_from_trajectory_unaffected() {
+        // 既存 promote_from_trajectory が無変更で動くことを確認 (regression check)
+        use crate::agent::event_store::TrajectoryCandidate;
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        let candidate = TrajectoryCandidate {
+            session_id: "s1".into(),
+            task_description: "既存パスチェック".into(),
+            tool_sequence: vec!["shell".into(), "file_read".into()],
+            tool_success_rate: 1.0,
+            total_steps: 2,
+            duration_ms: 100,
+        };
+        let id = skills.promote_from_trajectory(&candidate).unwrap();
+        assert!(id.is_some());
+        let all = skills.list_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(
+            all[0].name.starts_with("traj_"),
+            "既存 prefix 'traj_' 維持"
         );
     }
 

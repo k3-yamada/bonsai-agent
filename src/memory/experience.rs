@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::event_store::{Event, TrajectoryCandidate};
+
 /// 経験の種類
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,6 +49,62 @@ pub struct RecordParams<'a> {
     pub tool_name: Option<&'a str>,
     pub error_type: Option<&'a str>,
     pub error_detail: Option<&'a str>,
+}
+
+/// AgentHER HSL: subgoal 達成判定方式
+///
+/// 案 A: ToolCallEnd.success==true を sub-achievement とみなす
+/// 案 B: 副作用既知ホワイトリスト (file_write/multi_edit/git_commit) のみ
+/// デフォルト: ToolEndSuccessOrSideEffect (recall 重視)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubgoalJudgeMethod {
+    ToolEndSuccess,
+    SideEffectOnly,
+    ToolEndSuccessOrSideEffect,
+}
+
+impl Default for SubgoalJudgeMethod {
+    fn default() -> Self {
+        Self::ToolEndSuccessOrSideEffect
+    }
+}
+
+/// AgentHER HSL: 失敗 trajectory から達成済 subgoal を抽出した記録
+///
+/// `trajectory` は session 全体の tool 列、`achieved_subgoals[i]` は対応する
+/// `trajectory[subgoal_indices[i]]` 位置で達成された subgoal の記述。
+/// invariant: `achieved_subgoals.len() == subgoal_indices.len()` かつ
+/// 全 i で `subgoal_indices[i] < trajectory.len()`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HindsightRelabel {
+    pub original_goal: String,
+    pub achieved_subgoals: Vec<String>,
+    pub subgoal_indices: Vec<usize>,
+    pub trajectory: Vec<String>,
+    pub tool_success_rate: f64,
+    pub session_id: String,
+    pub total_steps: usize,
+}
+
+impl HindsightRelabel {
+    /// achieved_subgoals[subgoal_index] に対応する prefix を tool_sequence とする
+    /// TrajectoryCandidate を生成 (SkillStore::promote_from_trajectory への adapter)
+    pub fn into_relabeled_candidate(&self, subgoal_index: usize) -> Option<TrajectoryCandidate> {
+        let _ = subgoal_index;
+        todo!("Phase 2 Green: into_relabeled_candidate")
+    }
+}
+
+/// AgentHER HSL: Event 列から HindsightRelabel を mining
+///
+/// フィルタ: SessionEnd 必須、ToolCallStart >= 2 件、>= 1 subgoal 達成。
+/// 単一 session の events を期待 (multi-session 分割は呼出側責務)。
+pub fn extract_hindsight_relabels(
+    events: &[Event],
+    method: SubgoalJudgeMethod,
+) -> Vec<HindsightRelabel> {
+    let _ = (events, method);
+    todo!("Phase 2 Green: extract_hindsight_relabels")
 }
 
 /// 経験メモリの操作
@@ -164,6 +222,19 @@ impl<'a> ExperienceStore<'a> {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// AgentHER ECHO: HindsightRelabel から「失敗だが部分達成」を Insight として記録
+    ///
+    /// 1 trajectory につき 1 レコード:
+    /// - task_context = original_goal
+    /// - action       = trajectory.join(" -> ")
+    /// - outcome      = 部分達成: {achieved_subgoals.join(", ")}
+    /// - lesson       = "失敗 trajectory から hindsight 抽出: 主目標未達だが N 個の subgoal は達成、再利用候補"
+    /// - tool_name    = trajectory 末尾 tool
+    pub fn record_hindsight_insight(&self, relabel: &HindsightRelabel) -> Result<i64> {
+        let _ = relabel;
+        todo!("Phase 2 Green: record_hindsight_insight")
     }
 }
 
@@ -349,5 +420,198 @@ mod tests {
         .unwrap();
 
         assert_eq!(exp.success_count("shell").unwrap(), 2);
+    }
+
+    // ============ AgentHER HSL/ECHO テスト (Phase 1 Red) ============
+
+    fn make_event(id: i64, session_id: &str, event_type: &str, data: &str) -> Event {
+        Event {
+            id,
+            session_id: session_id.to_string(),
+            event_type: event_type.to_string(),
+            event_data: data.to_string(),
+            step_index: None,
+            created_at: "2026-05-07T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn t_extract_hsl_basic_success_subgoal() {
+        // file_write 成功 + shell 失敗 = 1 trajectory に 1 subgoal
+        let events = vec![
+            make_event(1, "s1", "session_start", "{}"),
+            make_event(2, "s1", "user_message", r#"{"content":"FizzBuzz実装"}"#),
+            make_event(3, "s1", "tool_call_start", r#"{"tool":"file_write"}"#),
+            make_event(
+                4,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"file_write","success":true}"#,
+            ),
+            make_event(5, "s1", "tool_call_start", r#"{"tool":"shell"}"#),
+            make_event(
+                6,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"shell","success":false}"#,
+            ),
+            make_event(7, "s1", "session_end", "{}"),
+        ];
+        let result =
+            extract_hindsight_relabels(&events, SubgoalJudgeMethod::ToolEndSuccessOrSideEffect);
+        assert_eq!(result.len(), 1, "1 trajectory から 1 HindsightRelabel");
+        let r = &result[0];
+        assert_eq!(r.original_goal, "FizzBuzz実装");
+        assert_eq!(
+            r.achieved_subgoals.len(),
+            1,
+            "file_write 成功 1 件のみ subgoal"
+        );
+        assert!(r.achieved_subgoals[0].contains("file_write"));
+        assert_eq!(r.subgoal_indices, vec![0], "trajectory index 0 = file_write");
+        assert_eq!(r.trajectory, vec!["file_write", "shell"]);
+        assert!((r.tool_success_rate - 0.5).abs() < 1e-9);
+        assert_eq!(r.session_id, "s1");
+        assert_eq!(r.total_steps, 2);
+    }
+
+    #[test]
+    fn t_extract_hsl_filters_all_failures() {
+        // 全 ToolCallEnd success=false → 0 件 (false-positive 防止)
+        let events = vec![
+            make_event(1, "s1", "session_start", "{}"),
+            make_event(2, "s1", "user_message", r#"{"content":"全失敗タスク"}"#),
+            make_event(3, "s1", "tool_call_start", r#"{"tool":"shell"}"#),
+            make_event(
+                4,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"shell","success":false}"#,
+            ),
+            make_event(5, "s1", "tool_call_start", r#"{"tool":"file_write"}"#),
+            make_event(
+                6,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"file_write","success":false}"#,
+            ),
+            make_event(7, "s1", "session_end", "{}"),
+        ];
+        let result =
+            extract_hindsight_relabels(&events, SubgoalJudgeMethod::ToolEndSuccessOrSideEffect);
+        assert!(result.is_empty(), "全 success=false なら relabel 0 件");
+    }
+
+    #[test]
+    fn t_extract_hsl_side_effect_method() {
+        // SideEffectOnly: shell exit 0 を除外、file_write のみ subgoal
+        let events = vec![
+            make_event(1, "s1", "session_start", "{}"),
+            make_event(2, "s1", "user_message", r#"{"content":"混合タスク"}"#),
+            make_event(3, "s1", "tool_call_start", r#"{"tool":"shell"}"#),
+            make_event(
+                4,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"shell","success":true}"#,
+            ),
+            make_event(5, "s1", "tool_call_start", r#"{"tool":"file_write"}"#),
+            make_event(
+                6,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"file_write","success":true}"#,
+            ),
+            make_event(7, "s1", "session_end", "{}"),
+        ];
+        let result = extract_hindsight_relabels(&events, SubgoalJudgeMethod::SideEffectOnly);
+        assert_eq!(result.len(), 1);
+        let r = &result[0];
+        assert_eq!(
+            r.achieved_subgoals.len(),
+            1,
+            "SideEffectOnly では shell を除外、file_write のみ"
+        );
+        assert_eq!(
+            r.subgoal_indices,
+            vec![1],
+            "trajectory index 1 = file_write"
+        );
+        assert!(r.achieved_subgoals[0].contains("file_write"));
+    }
+
+    #[test]
+    fn t_extract_hsl_session_end_required() {
+        // SessionEnd 不在 trajectory は除外 (項目 162 整合)
+        let events = vec![
+            make_event(1, "s1", "session_start", "{}"),
+            make_event(2, "s1", "user_message", r#"{"content":"未完了タスク"}"#),
+            make_event(3, "s1", "tool_call_start", r#"{"tool":"file_write"}"#),
+            make_event(
+                4,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"file_write","success":true}"#,
+            ),
+            make_event(5, "s1", "tool_call_start", r#"{"tool":"file_write"}"#),
+            make_event(
+                6,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"file_write","success":true}"#,
+            ),
+            // SessionEnd なし
+        ];
+        let result =
+            extract_hindsight_relabels(&events, SubgoalJudgeMethod::ToolEndSuccessOrSideEffect);
+        assert!(result.is_empty(), "SessionEnd 不在は除外");
+    }
+
+    #[test]
+    fn t_extract_hsl_min_steps_filter() {
+        // tool_call_start < 2 (min_steps) は除外
+        let events = vec![
+            make_event(1, "s1", "session_start", "{}"),
+            make_event(2, "s1", "user_message", r#"{"content":"短すぎ"}"#),
+            make_event(3, "s1", "tool_call_start", r#"{"tool":"file_write"}"#),
+            make_event(
+                4,
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"file_write","success":true}"#,
+            ),
+            make_event(5, "s1", "session_end", "{}"),
+        ];
+        let result =
+            extract_hindsight_relabels(&events, SubgoalJudgeMethod::ToolEndSuccessOrSideEffect);
+        assert!(result.is_empty(), "tool_call < 2 (min_steps) は除外");
+    }
+
+    #[test]
+    fn t_record_hindsight_insight_creates_experience() {
+        // ExperienceStore に type=insight で 1 レコード追加
+        let store = test_conn();
+        let exp = ExperienceStore::new(store.conn());
+        let relabel = HindsightRelabel {
+            original_goal: "FizzBuzz実装".into(),
+            achieved_subgoals: vec!["file_write 成功".into()],
+            subgoal_indices: vec![0],
+            trajectory: vec!["file_write".into(), "shell".into()],
+            tool_success_rate: 0.5,
+            session_id: "s1".into(),
+            total_steps: 2,
+        };
+        let id = exp.record_hindsight_insight(&relabel).unwrap();
+        assert!(id > 0);
+
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM experiences WHERE type = 'insight' AND task_context LIKE '%FizzBuzz%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "type=insight で 1 レコード追加");
     }
 }

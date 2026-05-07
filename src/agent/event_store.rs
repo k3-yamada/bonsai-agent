@@ -155,6 +155,19 @@ impl<'a> EventStore<'a> {
         Ok(candidates)
     }
 
+    /// AgentHER: 失敗 trajectory を抽出 (success_rate < max_tool_success_rate)
+    ///
+    /// `extract_successful_trajectories` の対称、SessionEnd 必須・min_steps 適用。
+    /// 戻り値は同じ TrajectoryCandidate (互換最優先、success/failure 判別は呼出側責務)。
+    pub fn extract_failed_trajectories(
+        &self,
+        max_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        let _ = (max_tool_success_rate, min_steps);
+        todo!("Phase 2 Green: extract_failed_trajectories")
+    }
+
     fn build_trajectory(&self, session_id: &str) -> Result<Option<TrajectoryCandidate>> {
         let events = self.replay(session_id)?;
         if events.is_empty() {
