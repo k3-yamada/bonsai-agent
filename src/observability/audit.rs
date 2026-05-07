@@ -67,6 +67,19 @@ pub enum AuditAction {
         /// nudge 文字列の長さ（システムメッセージ追加トークン量の指標）
         nudge_len: usize,
     },
+    /// 項目 210 (Self-Verification Dilemma): Advisor 検証 step 動的 skip 発火。
+    ///
+    /// `EventRepository::verification_success_rate(task_type, min_samples)` が
+    /// `dynamic_skip_threshold` 未満を返した場合に `inject_verification_step`
+    /// が skip 判断した瞬間を記録 (G-6 Audit emit 検証用)。
+    AdvisorSkip {
+        /// skip 理由 (例: "rate=0.20<threshold=0.40 (task=code_edit, n=8)")
+        reason: String,
+        /// 観測された success_rate (0.0..=1.0)
+        rate: f64,
+        /// 設定上の threshold (`AdvisorConfig::dynamic_skip_threshold`)
+        threshold: f64,
+    },
     // 項目 193 (2026-05-06d): F3SizeGuard variant 削除。
     // F3 RequestSizeGuard を削除したため、対応する audit variant も不要化。
     // 既存 audit_log table 内の action_type='f3_size_guard' row は残存 (data loss なし)。
@@ -93,6 +106,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::AdvisorCall { .. } => "advisor_call",
             AuditAction::TaskComplete { .. } => "task_complete",
             AuditAction::MultiFileNudge { .. } => "multi_file_nudge",
+            AuditAction::AdvisorSkip { .. } => "advisor_skip",
         };
         let action_data = serde_json::to_string(action)?;
 

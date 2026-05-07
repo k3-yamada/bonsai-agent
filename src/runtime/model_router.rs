@@ -74,6 +74,16 @@ pub struct AdvisorConfig {
     /// セッションごとにクローンされるため、セッション境界で自動リセット
     #[doc(hidden)]
     pub cache: HashMap<u64, String>,
+    /// Self-Verification Dilemma (項目 210、arxiv 2602.03485) — 動的 skip 閾値。
+    ///
+    /// `EventRepository::verification_success_rate(task_type, min_samples)` が
+    /// 本値未満を返した場合、`inject_verification_step` で検証 step を skip。
+    /// `0.0` (default) で OFF、後方互換 (既存挙動 100% 維持)。
+    /// 推奨: `0.4` (Lab variant 化で ACCEPT 判定後に defaults 昇格)。
+    pub dynamic_skip_threshold: f64,
+    /// 動的 skip 判定の最小 sample 数 (default 5)。これ未満では
+    /// `verification_success_rate` が None を返し既存挙動 fallback。
+    pub min_samples_for_skip: usize,
 }
 
 /// デフォルトの完了前自己検証プロンプト
@@ -201,6 +211,9 @@ impl Default for AdvisorConfig {
             backend: AdvisorBackend::default(),
             retry_policy: RetryPolicy::default(),
             cache: HashMap::new(),
+            // 項目 210 Self-Verify 動的 skip — default OFF (0.0) で既存挙動完全維持
+            dynamic_skip_threshold: 0.0,
+            min_samples_for_skip: 5,
         }
     }
 }

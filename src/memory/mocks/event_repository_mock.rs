@@ -159,6 +159,14 @@ impl EventRepository for MockEventRepository {
         // cold-start で next_id=1 → 0 を返す (SQLite COALESCE(MAX(id), 0) parity)
         Ok(*self.next_id.lock().unwrap() - 1)
     }
+
+    fn verification_success_rate(
+        &self,
+        _task_type: &str,
+        _min_samples: usize,
+    ) -> Result<Option<f64>> {
+        todo!("Phase 2 Green で in-memory events 走査 + task_type 分類 + 成功率計算")
+    }
 }
 
 impl MockEventRepository {

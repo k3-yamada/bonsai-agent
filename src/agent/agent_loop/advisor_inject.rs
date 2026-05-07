@@ -178,6 +178,28 @@ pub(super) fn inject_verification_step(
     {
         return false;
     }
+    // 項目 210 Self-Verification Dilemma — 経験ベース動的 skip 判定
+    if let Some((rate, threshold)) = should_skip_verification(advisor, store, task_context) {
+        let task_type = classify_task_type(task_context);
+        let reason = format!("rate={rate:.2}<threshold={threshold:.2} (task={task_type})");
+        log_event(
+            LogLevel::Info,
+            "advisor.skip",
+            &format!("検証 step skip: {reason}"),
+        );
+        if let Some(s) = store {
+            let audit = AuditLog::new(s.conn());
+            let _ = audit.log(
+                Some(&session.id),
+                &AuditAction::AdvisorSkip {
+                    reason,
+                    rate,
+                    threshold,
+                },
+            );
+        }
+        return false;
+    }
     let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Verification, task_context);
     log_advisor_call(store, session, AdvisorRole::Verification, &resolution);
     session.add_message(Message::system(resolution.prompt));
@@ -211,6 +233,37 @@ pub(super) fn inject_verification_step(
     true
 }
 
+/// task_context から task_type を deterministic 分類 (項目 210)。
+///
+/// 4 カテゴリ: `code_edit` / `code_read` / `shell_exec` / `other`。
+/// `verification_success_rate(task_type, ...)` の集計バケット決定に使用。
+///
+/// Phase 1 Red: `todo!()` stub。Phase 2 Green で regex / keyword で実装。
+fn classify_task_type(_task_context: &str) -> &'static str {
+    todo!("Phase 2 Green で regex / keyword 4 カテゴリ分類")
+}
+
+/// 経験ベース skip 判定 (項目 210 Self-Verification Dilemma)。
+///
+/// Returns:
+/// - `Some((rate, threshold))` if skip should fire (rate < threshold)
+/// - `None` if no skip (threshold=0.0 default OR sample 不足 OR rate >= threshold)
+///
+/// Default threshold=0.0 (OFF) で短絡 → 既存 1064 test の後方互換維持。
+/// Phase 1 Red: threshold > 0 ならば `todo!()` で fail (Red 確証)、
+/// Phase 2 Green で `EventRepository::verification_success_rate` 経由で実装。
+fn should_skip_verification(
+    advisor: &AdvisorConfig,
+    store: Option<&MemoryStore>,
+    task_context: &str,
+) -> Option<(f64, f64)> {
+    if advisor.dynamic_skip_threshold <= 0.0 {
+        return None;
+    }
+    let _ = (store, task_context);
+    todo!("Phase 2 Green で EventRepository::verification_success_rate 経由 skip 判定")
+}
+
 /// 複雑タスクに計画プレステップを注入
 pub(super) fn inject_planning_step(session: &mut Session, task_context: &str) {
     if detect_task_complexity(task_context) {
@@ -238,5 +291,242 @@ pub(super) fn inject_planning_step(session: &mut Session, task_context: &str) {
             "advisor",
             "複雑タスク検出 → 簡潔計画プレステップ注入",
         );
+    }
+}
+
+#[cfg(test)]
+mod verify_skip_tests {
+    //! 項目 210 Self-Verification Dilemma — 動的 skip 機構の test (Phase 1 Red)
+    //!
+    //! Phase 1: 9 件 todo!() panic / 1 件 threshold=0.0 short-circuit pass。
+    //! Phase 2 Green で全 10 件 PASS を目標。
+
+    use super::*;
+    use crate::agent::conversation::Session;
+    use crate::agent::error_recovery::TrialSummary;
+    use crate::agent::event_store::{EventRepository, EventStore, EventType};
+    use crate::memory::mocks::MockEventRepository;
+    use crate::memory::store::MemoryStore;
+    use crate::runtime::model_router::AdvisorConfig;
+
+    // === classify_task_type (4 cases) ===
+
+    #[test]
+    fn test_classify_task_type_code_edit() {
+        assert_eq!(classify_task_type("ファイルを編集して"), "code_edit");
+        assert_eq!(classify_task_type("config.toml を修正して"), "code_edit");
+    }
+
+    #[test]
+    fn test_classify_task_type_code_read() {
+        assert_eq!(classify_task_type("ファイル内容を確認して"), "code_read");
+        assert_eq!(classify_task_type("CLAUDE.md を読んで"), "code_read");
+    }
+
+    #[test]
+    fn test_classify_task_type_shell_exec() {
+        assert_eq!(classify_task_type("cargo test を実行"), "shell_exec");
+        assert_eq!(classify_task_type("ls -la を実行"), "shell_exec");
+    }
+
+    #[test]
+    fn test_classify_task_type_other() {
+        assert_eq!(classify_task_type("こんにちは"), "other");
+        assert_eq!(classify_task_type(""), "other");
+    }
+
+    // === should_skip_verification ===
+
+    #[test]
+    fn test_should_skip_returns_none_when_threshold_zero() {
+        // default threshold=0.0 で短絡 → Phase 1 Red でも pass (後方互換確保)
+        let advisor = AdvisorConfig::default();
+        assert_eq!(advisor.dynamic_skip_threshold, 0.0);
+        let store = MemoryStore::in_memory().unwrap();
+        let result = should_skip_verification(&advisor, Some(&store), "実装して");
+        assert!(result.is_none(), "threshold=0.0 で None 返却");
+    }
+
+    // === inject_verification_step end-to-end ===
+
+    fn make_advisor_with_threshold(t: f64) -> AdvisorConfig {
+        let mut a = AdvisorConfig::default();
+        a.dynamic_skip_threshold = t;
+        a
+    }
+
+    #[test]
+    fn test_inject_verification_step_skip_with_low_rate() {
+        // threshold=0.4 + 過去 5 件全失敗 verification → skip 発火 (return false)
+        // Phase 1 Red: should_skip_verification の todo!() で panic
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let mut advisor = make_advisor_with_threshold(0.4);
+        let trial = TrialSummary::default();
+        let result = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "実装してください", // detect_task_complexity=true
+            "wip answer (no marker)",
+            1,
+            10,
+            Some(&store),
+            &trial,
+        );
+        assert!(!result, "skip 発火で false 返却");
+    }
+
+    #[test]
+    fn test_inject_verification_step_no_skip_with_insufficient_samples() {
+        // sample 不足 (3 件、min=5) → None → 既存挙動 (検証 step 注入)
+        // Phase 1 Red: should_skip_verification の todo!() で panic
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let mut advisor = make_advisor_with_threshold(0.4);
+        let trial = TrialSummary::default();
+        let result = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "実装してください",
+            "wip answer",
+            1,
+            10,
+            Some(&store),
+            &trial,
+        );
+        assert!(result, "sample 不足で既存挙動 (検証 step 注入)");
+    }
+
+    #[test]
+    fn test_inject_verification_step_emits_audit_log_on_skip() {
+        // skip 発火時 AuditAction::AdvisorSkip が audit_log に書き込まれる
+        // Phase 1 Red: should_skip_verification の todo!() で panic
+        let store = MemoryStore::in_memory().unwrap();
+        let mut session = Session::new();
+        let mut advisor = make_advisor_with_threshold(0.4);
+        let trial = TrialSummary::default();
+        let _ = inject_verification_step(
+            &mut session,
+            &mut advisor,
+            "実装してください",
+            "wip",
+            1,
+            10,
+            Some(&store),
+            &trial,
+        );
+        // Phase 2 Green で skip 発火後 audit_log に "advisor_skip" row を確認
+        let audit = AuditLog::new(store.conn());
+        let recent = audit.recent(10).unwrap();
+        assert!(
+            recent.iter().any(|e| e.action_type == "advisor_skip"),
+            "AuditLog に advisor_skip row が無い"
+        );
+    }
+
+    // === verification_success_rate (EventRepository trait method) ===
+
+    #[test]
+    fn test_verification_success_rate_empty_returns_none() {
+        // events 空 → None (cold-start)
+        // Phase 1 Red: todo!() で panic
+        let mock = MockEventRepository::new();
+        let result = mock.verification_success_rate("code_edit", 5).unwrap();
+        assert!(result.is_none(), "events 空で None 返却");
+    }
+
+    #[test]
+    fn test_verification_success_rate_with_samples_returns_ratio() {
+        // 5 sessions seed (3 success [検証済]+tool_success / 2 fail) → 0.6
+        // Phase 1 Red: todo!() で panic
+        let mock = MockEventRepository::new();
+        for i in 0..5 {
+            let sid = format!("s{i}");
+            mock.append(&sid, &EventType::SessionStart, "{}", None)
+                .unwrap();
+            mock.append(
+                &sid,
+                &EventType::UserMessage,
+                r#"{"content":"ファイルを編集して"}"#, // → code_edit
+                None,
+            )
+            .unwrap();
+            mock.append(
+                &sid,
+                &EventType::ToolCallStart,
+                r#"{"tool":"file_write"}"#,
+                Some(0),
+            )
+            .unwrap();
+            let success = i < 3;
+            let payload = format!(r#"{{"tool":"file_write","success":{success}}}"#);
+            mock.append(&sid, &EventType::ToolCallEnd, &payload, Some(0))
+                .unwrap();
+            let answer = if success { "完了 [検証済]" } else { "失敗" };
+            let asst = format!(r#"{{"content":"{answer}"}}"#);
+            mock.append(&sid, &EventType::AssistantMessage, &asst, None)
+                .unwrap();
+            mock.append(&sid, &EventType::SessionEnd, "{}", None)
+                .unwrap();
+        }
+        let rate = mock
+            .verification_success_rate("code_edit", 5)
+            .unwrap()
+            .expect("5 sample 揃えば Some");
+        assert!(
+            (rate - 0.6).abs() < 0.01,
+            "expected 3/5=0.6, got {rate}"
+        );
+    }
+
+    // === SQLite + Mock parity ===
+
+    #[test]
+    fn test_verification_success_rate_sqlite_mock_parity() {
+        // 同じシナリオを SQLite と Mock 両方に seed、結果が一致することを確認
+        // Phase 1 Red: 両方とも todo!() で panic
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        let mock = MockEventRepository::new();
+        for i in 0..5 {
+            let sid = format!("s{i}");
+            for backend in [&es as &dyn EventRepository, &mock as &dyn EventRepository] {
+                backend
+                    .append(&sid, &EventType::SessionStart, "{}", None)
+                    .unwrap();
+                backend
+                    .append(
+                        &sid,
+                        &EventType::UserMessage,
+                        r#"{"content":"ファイルを編集して"}"#,
+                        None,
+                    )
+                    .unwrap();
+                backend
+                    .append(
+                        &sid,
+                        &EventType::ToolCallStart,
+                        r#"{"tool":"file_write"}"#,
+                        Some(0),
+                    )
+                    .unwrap();
+                let success = i < 3;
+                let payload = format!(r#"{{"tool":"file_write","success":{success}}}"#);
+                backend
+                    .append(&sid, &EventType::ToolCallEnd, &payload, Some(0))
+                    .unwrap();
+                let answer = if success { "完了 [検証済]" } else { "失敗" };
+                let asst = format!(r#"{{"content":"{answer}"}}"#);
+                backend
+                    .append(&sid, &EventType::AssistantMessage, &asst, None)
+                    .unwrap();
+                backend
+                    .append(&sid, &EventType::SessionEnd, "{}", None)
+                    .unwrap();
+            }
+        }
+        let sql_rate = es.verification_success_rate("code_edit", 5).unwrap();
+        let mock_rate = mock.verification_success_rate("code_edit", 5).unwrap();
+        assert_eq!(sql_rate, mock_rate, "SQLite/Mock parity 違反");
     }
 }

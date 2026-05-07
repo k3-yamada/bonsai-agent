@@ -143,6 +143,9 @@ impl AdvisorSettings {
             backend,
             retry_policy: crate::runtime::model_router::RetryPolicy::default(),
             cache: std::collections::HashMap::new(),
+            // 項目 210 Self-Verify default OFF (TOML 経由設定は別 PR で追加予定)
+            dynamic_skip_threshold: 0.0,
+            min_samples_for_skip: 5,
         }
     }
 

@@ -179,6 +179,18 @@ impl<'a> EventStore<'a> {
         Ok(candidates)
     }
 
+    /// 検証 step 経験的成功率 (項目 210、Self-Verification Dilemma)。
+    ///
+    /// Phase 1 Red: `todo!()` stub。Phase 2 Green で events から task_type 分類 +
+    /// FinalAnswer に `[検証済]` 含有 + ToolCallEnd error_count = 0 で「成功」判定。
+    pub fn verification_success_rate(
+        &self,
+        _task_type: &str,
+        _min_samples: usize,
+    ) -> Result<Option<f64>> {
+        todo!("Phase 2 Green で events 走査 + task_type 分類 + 成功率計算")
+    }
+
     /// 現時点での `events` テーブルの `MAX(id)` を返す (events 空なら 0)。
     ///
     /// Lab cycle 開始時に snapshot して `extract_*_trajectories_since_id(snapshot, ..)`
@@ -421,6 +433,20 @@ pub trait EventRepository {
 
     /// 現時点の events.id MAX (Lab cycle 開始時 snapshot 用、項目 206)。
     fn current_max_id(&self) -> Result<i64>;
+
+    /// 検証 step の経験的成功率 (Self-Verification Dilemma、項目 210、arxiv 2602.03485)。
+    ///
+    /// task_type 別に過去の SessionEnd を辿り、`[検証済]` を含む FinalAnswer かつ
+    /// 全 ToolCallEnd success の session を「成功」と定義してその比率を返す。
+    /// sample 数が `min_samples` 未満なら `None` (cold-start fallback で skip 無効)。
+    ///
+    /// 用途: `AdvisorConfig::dynamic_skip_threshold` と比較して
+    /// `inject_verification_step` の skip 判断に使用。
+    fn verification_success_rate(
+        &self,
+        task_type: &str,
+        min_samples: usize,
+    ) -> Result<Option<f64>>;
 }
 
 impl<'a> EventRepository for EventStore<'a> {
@@ -497,6 +523,14 @@ impl<'a> EventRepository for EventStore<'a> {
 
     fn current_max_id(&self) -> Result<i64> {
         EventStore::current_max_id(self)
+    }
+
+    fn verification_success_rate(
+        &self,
+        task_type: &str,
+        min_samples: usize,
+    ) -> Result<Option<f64>> {
+        EventStore::verification_success_rate(self, task_type, min_samples)
     }
 }
 
