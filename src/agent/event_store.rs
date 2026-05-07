@@ -244,70 +244,82 @@ impl<'a> EventStore<'a> {
 
     fn build_trajectory(&self, session_id: &str) -> Result<Option<TrajectoryCandidate>> {
         let events = self.replay(session_id)?;
-        if events.is_empty() {
-            return Ok(None);
-        }
-
-        let has_session_end = events.iter().any(|e| e.event_type == "session_end");
-        if !has_session_end {
-            return Ok(None);
-        }
-
-        let task_description = events
-            .iter()
-            .find(|e| e.event_type == "user_message")
-            .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.event_data).ok())
-            .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
-            .unwrap_or_default();
-
-        let mut tool_sequence = Vec::new();
-        let mut tool_end_total = 0usize;
-        let mut tool_end_success = 0usize;
-
-        for ev in &events {
-            match ev.event_type.as_str() {
-                "tool_call_start" => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.event_data)
-                        && let Some(name) = v.get("tool").and_then(|t| t.as_str())
-                    {
-                        tool_sequence.push(name.to_string());
-                    }
-                }
-                "tool_call_end" => {
-                    tool_end_total += 1;
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.event_data)
-                        && v.get("success").and_then(|s| s.as_bool()).unwrap_or(false)
-                    {
-                        tool_end_success += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let tool_success_rate = if tool_end_total == 0 {
-            0.0
-        } else {
-            tool_end_success as f64 / tool_end_total as f64
-        };
-
-        let duration_ms = match (events.first(), events.last()) {
-            (Some(start), Some(end)) => compute_duration_ms(&start.created_at, &end.created_at),
-            _ => 0,
-        };
-
-        Ok(Some(TrajectoryCandidate {
-            session_id: session_id.to_string(),
-            task_description,
-            tool_sequence,
-            tool_success_rate,
-            total_steps: events
-                .iter()
-                .filter(|e| e.event_type == "tool_call_start")
-                .count(),
-            duration_ms,
-        }))
+        Ok(build_trajectory_from_events(session_id, &events))
     }
+}
+
+/// `&[Event]` から TrajectoryCandidate を構築する pure helper (項目 209)。
+///
+/// `EventStore::build_trajectory` (SQLite) と `MockEventRepository` (in-memory) の
+/// 両方から共有される。SessionEnd 不在時は `None`、tool_call_start/end の JSON
+/// payload から `tool_sequence` と `tool_success_rate` を計算する。
+pub(crate) fn build_trajectory_from_events(
+    session_id: &str,
+    events: &[Event],
+) -> Option<TrajectoryCandidate> {
+    if events.is_empty() {
+        return None;
+    }
+
+    let has_session_end = events.iter().any(|e| e.event_type == "session_end");
+    if !has_session_end {
+        return None;
+    }
+
+    let task_description = events
+        .iter()
+        .find(|e| e.event_type == "user_message")
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.event_data).ok())
+        .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_default();
+
+    let mut tool_sequence = Vec::new();
+    let mut tool_end_total = 0usize;
+    let mut tool_end_success = 0usize;
+
+    for ev in events {
+        match ev.event_type.as_str() {
+            "tool_call_start" => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.event_data)
+                    && let Some(name) = v.get("tool").and_then(|t| t.as_str())
+                {
+                    tool_sequence.push(name.to_string());
+                }
+            }
+            "tool_call_end" => {
+                tool_end_total += 1;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.event_data)
+                    && v.get("success").and_then(|s| s.as_bool()).unwrap_or(false)
+                {
+                    tool_end_success += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let tool_success_rate = if tool_end_total == 0 {
+        0.0
+    } else {
+        tool_end_success as f64 / tool_end_total as f64
+    };
+
+    let duration_ms = match (events.first(), events.last()) {
+        (Some(start), Some(end)) => compute_duration_ms(&start.created_at, &end.created_at),
+        _ => 0,
+    };
+
+    Some(TrajectoryCandidate {
+        session_id: session_id.to_string(),
+        task_description,
+        tool_sequence,
+        tool_success_rate,
+        total_steps: events
+            .iter()
+            .filter(|e| e.event_type == "tool_call_start")
+            .count(),
+        duration_ms,
+    })
 }
 
 /// 成功軌跡候補（スキル昇格元）
@@ -406,66 +418,77 @@ pub trait EventRepository {
 impl<'a> EventRepository for EventStore<'a> {
     fn append(
         &self,
-        _session_id: &str,
-        _event_type: &EventType,
-        _event_data: &str,
-        _step_index: Option<usize>,
+        session_id: &str,
+        event_type: &EventType,
+        event_data: &str,
+        step_index: Option<usize>,
     ) -> Result<i64> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        // inherent method 委譲 (method resolution は inherent 優先、recursion せず)
+        EventStore::append(self, session_id, event_type, event_data, step_index)
     }
 
-    fn replay(&self, _session_id: &str) -> Result<Vec<Event>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+    fn replay(&self, session_id: &str) -> Result<Vec<Event>> {
+        EventStore::replay(self, session_id)
     }
 
-    fn count_by_type(&self, _session_id: &str) -> Result<Vec<(String, usize)>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+    fn count_by_type(&self, session_id: &str) -> Result<Vec<(String, usize)>> {
+        EventStore::count_by_type(self, session_id)
     }
 
     fn total_count(&self) -> Result<usize> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::total_count(self)
     }
 
     fn list_sessions(&self) -> Result<Vec<String>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::list_sessions(self)
     }
 
     fn extract_successful_trajectories(
         &self,
-        _min_tool_success_rate: f64,
-        _min_steps: usize,
+        min_tool_success_rate: f64,
+        min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::extract_successful_trajectories(self, min_tool_success_rate, min_steps)
     }
 
     fn extract_successful_trajectories_since_id(
         &self,
-        _since_event_id: i64,
-        _min_tool_success_rate: f64,
-        _min_steps: usize,
+        since_event_id: i64,
+        min_tool_success_rate: f64,
+        min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::extract_successful_trajectories_since_id(
+            self,
+            since_event_id,
+            min_tool_success_rate,
+            min_steps,
+        )
     }
 
     fn extract_failed_trajectories(
         &self,
-        _max_tool_success_rate: f64,
-        _min_steps: usize,
+        max_tool_success_rate: f64,
+        min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::extract_failed_trajectories(self, max_tool_success_rate, min_steps)
     }
 
     fn extract_failed_trajectories_since_id(
         &self,
-        _since_event_id: i64,
-        _max_tool_success_rate: f64,
-        _min_steps: usize,
+        since_event_id: i64,
+        max_tool_success_rate: f64,
+        min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::extract_failed_trajectories_since_id(
+            self,
+            since_event_id,
+            max_tool_success_rate,
+            min_steps,
+        )
     }
 
     fn current_max_id(&self) -> Result<i64> {
-        todo!("Phase 2 Green で inherent method 委譲")
+        EventStore::current_max_id(self)
     }
 }
 
@@ -754,7 +777,9 @@ mod tests {
     fn test_mock_event_repository_append_and_replay() {
         // Mock 単独で SQLite なしで append → replay が動作する
         let mock = MockEventRepository::new();
-        let id1 = mock.append("s1", &EventType::SessionStart, "{}", None).unwrap();
+        let id1 = mock
+            .append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
         let id2 = mock
             .append(
                 "s1",
@@ -798,7 +823,11 @@ mod tests {
             .unwrap();
 
         let failed = mock.extract_failed_trajectories(0.8, 2).unwrap();
-        assert_eq!(failed.len(), 1, "1 session should match max_success_rate=0.8");
+        assert_eq!(
+            failed.len(),
+            1,
+            "1 session should match max_success_rate=0.8"
+        );
         assert_eq!(failed[0].session_id, "s1");
         assert!(
             (failed[0].tool_success_rate - 1.0 / 3.0).abs() < 0.01,
