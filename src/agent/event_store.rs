@@ -359,6 +359,14 @@ fn compute_duration_ms(start: &str, end: &str) -> u64 {
 ///
 /// 既存 inherent method は無変更で残置 (21 callsite 後方互換)、本 trait は
 /// 委譲 impl のみ提供 (gradual migration、breaking change なし)。
+///
+/// # 設計判断 (Phase 3 Refactor)
+/// - **`Send + Sync` bound**: 付与しない (最小制約)。multi-thread 配信が必要に
+///   なれば後付けで `: Send + Sync` 追加可。Mock は `Mutex` で thread-safe。
+/// - **`TrajectoryCandidate::tool_chain_key`**: trait に含めず inherent 維持
+///   (Event-agnostic な構造体 method、trait 化すると mock 側で重複定義必要)。
+/// - **Mock の feature gate**: 採用せず production binary 込み (~150 行で size
+///   影響軽微、ERL/Self-Verify 等の別モジュール test から import 容易)。
 pub trait EventRepository {
     /// イベントを追加し、付与された id を返す。
     fn append(
@@ -841,6 +849,16 @@ mod tests {
         // cold-start で MAX(id) = 0 (EventStore SQLite 実装と等価挙動)
         let mock = MockEventRepository::new();
         assert_eq!(mock.current_max_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_mock_event_repository_is_send_sync() {
+        // Phase 3 Refactor: Mock の thread safety を compile-time で固定
+        // (multi-thread 配信が必要になった場合の regression 防止)
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<MockEventRepository>();
+        assert_sync::<MockEventRepository>();
     }
 
     #[test]
