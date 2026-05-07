@@ -6,7 +6,6 @@ use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
-use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::AdvisorConfig;
 use crate::tools::ToolRegistry;
@@ -1032,10 +1031,12 @@ impl BenchmarkSuite {
 
     /// 各タスクをk回実行してpass^k指標を計算
     ///
-    /// `persistent_store` が `Some(store)` のとき、k loop 完了後に各 task の
-    /// ephemeral store の events を `EventStore::export_to(store)` で persistent
-    /// 側に bulk copy する (handoff 05-07g Phase 5 / agenther-event-flow-fix plan)。
-    /// `None` のときは既存挙動 (events は ephemeral 内で破棄) を維持し、後方互換。
+    /// `store` は AgentHER post-Lab pass で参照される persistent `MemoryStore`。各 run の
+    /// events は `run_agent_loop` 内の `emit_event` 経由で直接ここに書き込まれる
+    /// (Option A 移行、agenther-option-a-migration.md)。run 毎の messages/sessions/memories
+    /// は `reset_session_data` で each run 開始前にリセットして isolation を維持
+    /// (events table は保護される)。pre-screen は呼出側で `MemoryStore::in_memory()?` を
+    /// scratch として作成し本 method に渡すことで persistent.events 汚染を回避する。
     #[allow(clippy::too_many_arguments)]
     pub fn run_k(
         &self,
@@ -1046,7 +1047,7 @@ impl BenchmarkSuite {
         cancel: &CancellationToken,
         multi: &MultiRunConfig,
         pass_threshold: f64,
-        persistent_store: Option<&MemoryStore>,
+        store: &MemoryStore,
     ) -> Result<MultiRunBenchmarkResult> {
         let start = std::time::Instant::now();
         let mut task_scores = Vec::new();
@@ -1061,16 +1062,15 @@ impl BenchmarkSuite {
             let mut iterations_per_run: Vec<usize> = Vec::with_capacity(multi.k);
             // 最終 run の代表 trajectory（B2: judge gate 用、最後に成功した run を優先）
             let mut last_run_capture: Option<(String, Vec<String>)> = None;
-            // タスク毎に1 DB作成、k回ループ間でリセット（66→22 DB作成に削減）
-            let store = MemoryStore::in_memory()?;
             for run_idx in 0..multi.k {
                 if cancel.is_cancelled() {
                     break;
                 }
 
-                if run_idx > 0 {
-                    store.reset_session_data()?;
-                }
+                // Option A 移行: persistent store を直接使うため、run 毎に
+                // messages/sessions/memories をクリアして per-run / per-task isolation を維持
+                // (events / experiences / skills は保護)。run_idx==0 を含む全 run で reset。
+                store.reset_session_data()?;
 
                 // jitter_seed時はプロンプトに実行番号を付加してキャッシュ回避
                 let system_prompt = if multi.jitter_seed {
@@ -1105,7 +1105,7 @@ impl BenchmarkSuite {
                     path_guard,
                     &task_config,
                     cancel,
-                    Some(&store),
+                    Some(store),
                 );
 
                 let score = match result {
@@ -1138,24 +1138,8 @@ impl BenchmarkSuite {
                 task_score = task_score.with_last_run(response, trajectory);
             }
             task_scores.push(task_score);
-
-            // handoff 05-07g Phase 5: ephemeral → persistent への events export
-            // (AgentHER post-Lab pass の入力に到達させる)。store はこの直後 drop。
-            if let Some(dest) = persistent_store {
-                let es = crate::agent::event_store::EventStore::new(store.conn());
-                match es.export_to(dest) {
-                    Ok(copied) => log_event(
-                        LogLevel::Debug,
-                        "benchmark",
-                        &format!("events exported task={} count={copied}", task.id),
-                    ),
-                    Err(e) => log_event(
-                        LogLevel::Warn,
-                        "benchmark",
-                        &format!("events export failed (non-fatal) task={}: {e}", task.id),
-                    ),
-                }
-            }
+            // Option A: events は run_agent_loop 内で persistent `store` に直接 emit されるため、
+            // export_to による bulk copy 不要 (Option B の冗長性解消)。
         }
 
         // 項目 172 P1: tier 別平均 mean_score 集計（仮説 X / Y 分離用）

@@ -2,8 +2,6 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::memory::store::MemoryStore;
-
 /// イベントの種類
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
@@ -227,43 +225,6 @@ impl<'a> EventStore<'a> {
             }
         }
         Ok(candidates)
-    }
-
-    /// 自 store の events を別 store に bulk copy する (handoff 05-07g Phase 5)。
-    ///
-    /// AgentHER post-Lab pass で、benchmark の ephemeral store に積まれた events を
-    /// `run_experiment_loop` の persistent store に流すために使用する。`id` は dest 側の
-    /// AUTOINCREMENT に再付与し、それ以外の 5 列 (session_id / event_type / event_data /
-    /// step_index / created_at) を保持する。重複検出は呼出側責務 (本 method は冪等性を
-    /// 保証しない)。戻り値は copy した event 数。
-    pub fn export_to(&self, dest: &MemoryStore) -> Result<usize> {
-        let mut stmt = self.conn.prepare(
-            "SELECT session_id, event_type, event_data, step_index, created_at
-             FROM events ORDER BY id",
-        )?;
-        let rows: Vec<(String, String, String, Option<i64>, String)> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
-        let count = rows.len();
-        let dest_conn = dest.conn();
-        // prepared INSERT を 1 回 prepare して reuse (N event でも prepare 1 回、効率優先)
-        let mut ins = dest_conn.prepare(
-            "INSERT INTO events (session_id, event_type, event_data, step_index, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
-        for (sid, et, ed, si, ca) in rows {
-            ins.execute(params![sid, et, ed, si, ca])?;
-        }
-        Ok(count)
     }
 
     fn build_trajectory(&self, session_id: &str) -> Result<Option<TrajectoryCandidate>> {
@@ -602,66 +563,10 @@ mod tests {
         assert_eq!(EventType::PlanGenerated.as_str(), "plan_generated");
     }
 
-    // === Phase 5 Red (agenther-event-flow-fix plan) ===
-    // 以下の 2 test は新規 API (`export_to`, `extract_failed_trajectories_since_id`) が
-    // 未実装なためコンパイルエラーで Red、Phase 2 Green で実装後に PASS する想定。
-
-    #[test]
-    fn test_export_to_basic() {
-        // src store に 5 events を append、dest store に export → count==5、event_type 配列同一
-        let src_store = test_store();
-        let dest_store = test_store();
-        let src_es = EventStore::new(src_store.conn());
-
-        src_es
-            .append("s1", &EventType::SessionStart, "{}", None)
-            .unwrap();
-        src_es
-            .append(
-                "s1",
-                &EventType::ToolCallStart,
-                r#"{"tool":"shell"}"#,
-                Some(0),
-            )
-            .unwrap();
-        src_es
-            .append(
-                "s1",
-                &EventType::ToolCallEnd,
-                r#"{"tool":"shell","success":true}"#,
-                Some(0),
-            )
-            .unwrap();
-        src_es
-            .append("s1", &EventType::AssistantMessage, r#"{"text":"ok"}"#, None)
-            .unwrap();
-        src_es
-            .append("s1", &EventType::SessionEnd, "{}", None)
-            .unwrap();
-
-        let copied = src_es.export_to(&dest_store).unwrap();
-        assert_eq!(copied, 5, "5 events copied");
-
-        // dest 側で event_type 配列を replay 検証
-        let dest_es = EventStore::new(dest_store.conn());
-        let events = dest_es.replay("s1").unwrap();
-        assert_eq!(events.len(), 5);
-        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
-        assert_eq!(
-            types,
-            vec![
-                "session_start",
-                "tool_call_start",
-                "tool_call_end",
-                "assistant_message",
-                "session_end"
-            ]
-        );
-
-        // session_id / event_data / step_index も保持されること
-        assert_eq!(events[1].event_data, r#"{"tool":"shell"}"#);
-        assert_eq!(events[1].step_index, Some(0));
-    }
+    // === scoping test (agenther-event-flow-fix Phase 5 / Option A 移行で生存) ===
+    // `extract_failed_trajectories_since_id` は AgentHER post-Lab pass で
+    // `run_hindsight_pass(store, lab_start_event_id)` から使用される。`export_to` は
+    // Option A 移行 (agenther-option-a-migration.md) で削除済み。
 
     #[test]
     fn test_extract_failed_trajectories_since_id_scoping() {

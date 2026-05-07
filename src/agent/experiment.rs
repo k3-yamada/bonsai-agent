@@ -577,8 +577,12 @@ pub fn estimate_mutation_effect_with_baseline(
     };
     let pass_threshold = 0.5;
 
+    // pre-screen は AgentHER 対象外。Option A 移行 (agenther-option-a-migration.md A3) で
+    // run_k は &MemoryStore 必須化されたため、persistent.events 汚染回避のため scratch を作る。
+    // scratch_store は本 fn scope 抜けで drop → events も消える (旧 None 渡しと同等挙動)。
+    let scratch_store = MemoryStore::in_memory()?;
+
     // サンプルタスク上でベースライン計測（フルスイートのスコアとは異なる可能性がある）
-    // pre-screen は store 不要 (AgentHER 対象外、ephemeral events で完結)
     let baseline = sample_suite.run_k(
         base_config,
         backend,
@@ -587,7 +591,7 @@ pub fn estimate_mutation_effect_with_baseline(
         cancel,
         &quick_multi,
         pass_threshold,
-        None,
+        &scratch_store,
     )?;
 
     // 変異適用後（サンプルタスクのみ）
@@ -600,7 +604,7 @@ pub fn estimate_mutation_effect_with_baseline(
         cancel,
         &quick_multi,
         pass_threshold,
-        None,
+        &scratch_store,
     )?;
 
     let delta = experiment.composite_score() - baseline.composite_score();
@@ -873,7 +877,7 @@ pub fn run_experiment_loop(
         cancel,
         &multi,
         pass_threshold,
-        Some(store),
+        store,
     )?;
     eprintln!(
         "[lab] ベースライン: score={:.4} pass@k={:.4} pass_consec={:.4} ({:.1}s)",
@@ -1022,7 +1026,7 @@ pub fn run_experiment_loop(
             cancel,
             &multi,
             pass_threshold,
-            Some(store),
+            store,
         )?;
         let snapshot = config_snapshot(&modified_config);
 
