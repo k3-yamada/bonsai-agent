@@ -336,6 +336,139 @@ fn compute_duration_ms(start: &str, end: &str) -> u64 {
     }
 }
 
+/// Event 永続化抽象 (Clean Architecture / Repository pattern、項目 209)。
+///
+/// SQLite/in-memory 詳細から callers を分離し、`&dyn EventRepository` で
+/// AgentHER / ERL / Self-Verify の test 容易性を改善する。
+///
+/// 実装:
+/// - `EventStore<'a>` (本番、SQLite-backed、`&'a Connection` 保持)
+/// - `MockEventRepository` (test、`Vec<Event>` ベース、SQLite 不要)
+///
+/// 既存 inherent method は無変更で残置 (21 callsite 後方互換)、本 trait は
+/// 委譲 impl のみ提供 (gradual migration、breaking change なし)。
+pub trait EventRepository {
+    /// イベントを追加し、付与された id を返す。
+    fn append(
+        &self,
+        session_id: &str,
+        event_type: &EventType,
+        event_data: &str,
+        step_index: Option<usize>,
+    ) -> Result<i64>;
+
+    /// session_id 内の全 event を id 昇順で返す (リプレイ用)。
+    fn replay(&self, session_id: &str) -> Result<Vec<Event>>;
+
+    /// session_id 内の event 種別ごとの件数 ((event_type, count) tuple Vec)。
+    fn count_by_type(&self, session_id: &str) -> Result<Vec<(String, usize)>>;
+
+    /// 全 session を通した event 総数。
+    fn total_count(&self) -> Result<usize>;
+
+    /// SessionStart event を持つ session_id 一覧 (distinct、id 昇順)。
+    fn list_sessions(&self) -> Result<Vec<String>>;
+
+    /// 成功軌跡を抽出 (スキル昇格候補、AgentHER HSL)。
+    fn extract_successful_trajectories(
+        &self,
+        min_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>>;
+
+    /// since_event_id より新しい event のみから成功 trajectory 抽出 (Lab cycle scoping、項目 162/203)。
+    fn extract_successful_trajectories_since_id(
+        &self,
+        since_event_id: i64,
+        min_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>>;
+
+    /// 失敗軌跡を抽出 (AgentHER HSL relabel 候補)。
+    fn extract_failed_trajectories(
+        &self,
+        max_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>>;
+
+    /// since_event_id より新しい event のみから失敗 trajectory 抽出 (Lab cycle scoping)。
+    fn extract_failed_trajectories_since_id(
+        &self,
+        since_event_id: i64,
+        max_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>>;
+
+    /// 現時点の events.id MAX (Lab cycle 開始時 snapshot 用、項目 206)。
+    fn current_max_id(&self) -> Result<i64>;
+}
+
+impl<'a> EventRepository for EventStore<'a> {
+    fn append(
+        &self,
+        _session_id: &str,
+        _event_type: &EventType,
+        _event_data: &str,
+        _step_index: Option<usize>,
+    ) -> Result<i64> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn replay(&self, _session_id: &str) -> Result<Vec<Event>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn count_by_type(&self, _session_id: &str) -> Result<Vec<(String, usize)>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn total_count(&self) -> Result<usize> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn list_sessions(&self) -> Result<Vec<String>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn extract_successful_trajectories(
+        &self,
+        _min_tool_success_rate: f64,
+        _min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn extract_successful_trajectories_since_id(
+        &self,
+        _since_event_id: i64,
+        _min_tool_success_rate: f64,
+        _min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn extract_failed_trajectories(
+        &self,
+        _max_tool_success_rate: f64,
+        _min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn extract_failed_trajectories_since_id(
+        &self,
+        _since_event_id: i64,
+        _max_tool_success_rate: f64,
+        _min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+
+    fn current_max_id(&self) -> Result<i64> {
+        todo!("Phase 2 Green で inherent method 委譲")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +729,110 @@ mod tests {
         es.append("s1", &EventType::SessionEnd, "{}", None).unwrap();
         let max = es.current_max_id().unwrap();
         assert!(max >= 2, "expected MAX(id) >= 2 after 2 appends, got {max}");
+    }
+
+    // === EventRepository trait test (Phase 1 Red、項目 209) ===
+    //
+    // 5 test:
+    //   1. EventStore<'_> が EventRepository を impl していることの compile-time 確認
+    //   2. Mock の append → replay round-trip
+    //   3. Mock の extract_failed_trajectories で score filter
+    //   4. Mock の current_max_id (cold-start で 0)
+    //   5. trait object (`&dyn EventRepository`) 経由の polymorphism (SQLite + Mock 両方)
+
+    use crate::memory::mocks::MockEventRepository;
+
+    #[test]
+    fn test_event_store_impls_event_repository() {
+        // compile-time guarantee: EventStore<'_> が EventRepository を満たす
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        let _repo: &dyn EventRepository = &es;
+    }
+
+    #[test]
+    fn test_mock_event_repository_append_and_replay() {
+        // Mock 単独で SQLite なしで append → replay が動作する
+        let mock = MockEventRepository::new();
+        let id1 = mock.append("s1", &EventType::SessionStart, "{}", None).unwrap();
+        let id2 = mock
+            .append(
+                "s1",
+                &EventType::UserMessage,
+                r#"{"content":"hi"}"#,
+                Some(0),
+            )
+            .unwrap();
+        assert!(id1 >= 1, "first id should be >= 1, got {id1}");
+        assert!(id2 > id1, "second id should be > first, got {id2} vs {id1}");
+
+        let events = mock.replay("s1").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "session_start");
+        assert_eq!(events[1].event_type, "user_message");
+        assert_eq!(events[1].step_index, Some(0));
+    }
+
+    #[test]
+    fn test_mock_event_repository_extract_failed_filters_by_score() {
+        // 1 session で 2 失敗 + 1 成功 (success_rate=1/3 ≈ 0.333) を seed、
+        // max=0.8 で extract_failed → 1 件取得 (failure score 閾値以下)
+        let mock = MockEventRepository::new();
+        mock.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        mock.append("s1", &EventType::UserMessage, r#"{"content":"t"}"#, None)
+            .unwrap();
+        for (i, success) in [false, false, true].iter().enumerate() {
+            mock.append(
+                "s1",
+                &EventType::ToolCallStart,
+                r#"{"tool":"shell"}"#,
+                Some(i),
+            )
+            .unwrap();
+            let payload = format!(r#"{{"tool":"shell","success":{success}}}"#);
+            mock.append("s1", &EventType::ToolCallEnd, &payload, Some(i))
+                .unwrap();
+        }
+        mock.append("s1", &EventType::SessionEnd, "{}", None)
+            .unwrap();
+
+        let failed = mock.extract_failed_trajectories(0.8, 2).unwrap();
+        assert_eq!(failed.len(), 1, "1 session should match max_success_rate=0.8");
+        assert_eq!(failed[0].session_id, "s1");
+        assert!(
+            (failed[0].tool_success_rate - 1.0 / 3.0).abs() < 0.01,
+            "expected ~0.333, got {}",
+            failed[0].tool_success_rate
+        );
+    }
+
+    #[test]
+    fn test_mock_event_repository_current_max_id_empty_returns_zero() {
+        // cold-start で MAX(id) = 0 (EventStore SQLite 実装と等価挙動)
+        let mock = MockEventRepository::new();
+        assert_eq!(mock.current_max_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_event_repository_trait_object_can_be_passed() {
+        // `&dyn EventRepository` で SQLite-backed と Mock 両方を受けられる
+        fn helper(repo: &dyn EventRepository) -> usize {
+            repo.total_count().unwrap()
+        }
+
+        // SQLite-backed (concrete EventStore)
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        assert_eq!(helper(&es), 1, "SQLite-backed total_count");
+
+        // Mock-backed
+        let mock = MockEventRepository::new();
+        mock.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        assert_eq!(helper(&mock), 1, "Mock-backed total_count");
     }
 
     // === scoping test (agenther-event-flow-fix Phase 5 / Option A 移行で生存) ===
