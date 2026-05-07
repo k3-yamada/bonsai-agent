@@ -80,6 +80,13 @@ impl MemoryStore {
     }
 
     /// セッション関連データをリセット（ベンチマークのk回実行間で使用）
+    ///
+    /// **WARNING**: `messages` / `sessions` / `memories` を全 DELETE する破壊的操作。
+    /// `events` / `experiences` / `skills` / `knowledge_graph` 等は保護される。
+    /// Option A 移行 (agenther-option-a-migration.md) 後は persistent store に対しても
+    /// 呼ばれるが、bonsai-agent は実時間で persistent の messages/sessions/memories を
+    /// 使わない (Lab cycle 中のみ書込) ため安全。将来 persistent.messages を活用する
+    /// 機能を追加する場合は、本 method を Lab scope 限定に rename することを検討。
     pub fn reset_session_data(&self) -> Result<()> {
         self.conn
             .execute_batch("DELETE FROM messages; DELETE FROM sessions; DELETE FROM memories;")?;
