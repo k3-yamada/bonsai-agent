@@ -578,6 +578,7 @@ pub fn estimate_mutation_effect_with_baseline(
     let pass_threshold = 0.5;
 
     // サンプルタスク上でベースライン計測（フルスイートのスコアとは異なる可能性がある）
+    // pre-screen は store 不要 (AgentHER 対象外、ephemeral events で完結)
     let baseline = sample_suite.run_k(
         base_config,
         backend,
@@ -586,6 +587,7 @@ pub fn estimate_mutation_effect_with_baseline(
         cancel,
         &quick_multi,
         pass_threshold,
+        None,
     )?;
 
     // 変異適用後（サンプルタスクのみ）
@@ -598,6 +600,7 @@ pub fn estimate_mutation_effect_with_baseline(
         cancel,
         &quick_multi,
         pass_threshold,
+        None,
     )?;
 
     let delta = experiment.composite_score() - baseline.composite_score();
@@ -860,6 +863,7 @@ pub fn run_experiment_loop(
         cancel,
         &multi,
         pass_threshold,
+        Some(store),
     )?;
     eprintln!(
         "[lab] ベースライン: score={:.4} pass@k={:.4} pass_consec={:.4} ({:.1}s)",
@@ -1008,6 +1012,7 @@ pub fn run_experiment_loop(
             cancel,
             &multi,
             pass_threshold,
+            Some(store),
         )?;
         let snapshot = config_snapshot(&modified_config);
 

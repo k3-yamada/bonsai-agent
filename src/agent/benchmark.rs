@@ -6,6 +6,7 @@ use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
+use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::AdvisorConfig;
 use crate::tools::ToolRegistry;
@@ -981,6 +982,11 @@ impl BenchmarkSuite {
     }
 
     /// 各タスクをk回実行してpass^k指標を計算
+    ///
+    /// `persistent_store` が `Some(store)` のとき、k loop 完了後に各 task の
+    /// ephemeral store の events を `EventStore::export_to(store)` で persistent
+    /// 側に bulk copy する (handoff 05-07g Phase 5 / agenther-event-flow-fix plan)。
+    /// `None` のときは既存挙動 (events は ephemeral 内で破棄) を維持し、後方互換。
     #[allow(clippy::too_many_arguments)]
     pub fn run_k(
         &self,
@@ -991,6 +997,7 @@ impl BenchmarkSuite {
         cancel: &CancellationToken,
         multi: &MultiRunConfig,
         pass_threshold: f64,
+        persistent_store: Option<&MemoryStore>,
     ) -> Result<MultiRunBenchmarkResult> {
         let start = std::time::Instant::now();
         let mut task_scores = Vec::new();
@@ -1082,6 +1089,27 @@ impl BenchmarkSuite {
                 task_score = task_score.with_last_run(response, trajectory);
             }
             task_scores.push(task_score);
+
+            // handoff 05-07g Phase 5: ephemeral → persistent への events export
+            // (AgentHER post-Lab pass の入力に到達させる)。store はこの直後 drop。
+            if let Some(dest) = persistent_store {
+                let es = crate::agent::event_store::EventStore::new(store.conn());
+                match es.export_to(dest) {
+                    Ok(copied) => log_event(
+                        LogLevel::Debug,
+                        "benchmark",
+                        &format!("events exported task={} count={copied}", task.id),
+                    ),
+                    Err(e) => log_event(
+                        LogLevel::Warn,
+                        "benchmark",
+                        &format!(
+                            "events export failed (non-fatal) task={}: {e}",
+                            task.id
+                        ),
+                    ),
+                }
+            }
         }
 
         // 項目 172 P1: tier 別平均 mean_score 集計（仮説 X / Y 分離用）

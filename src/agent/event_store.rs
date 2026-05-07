@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use crate::memory::store::MemoryStore;
+
 /// イベントの種類
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
@@ -159,12 +161,38 @@ impl<'a> EventStore<'a> {
     ///
     /// `extract_successful_trajectories` の対称、SessionEnd 必須・min_steps 適用。
     /// 戻り値は同じ TrajectoryCandidate (互換最優先、success/failure 判別は呼出側責務)。
+    /// 本 method は `extract_failed_trajectories_since_id(0, ...)` の薄いラッパ
+    /// (handoff 05-07g の Phase 5 で scoping 機構導入時に delegate 化、互換維持)。
     pub fn extract_failed_trajectories(
         &self,
         max_tool_success_rate: f64,
         min_steps: usize,
     ) -> Result<Vec<TrajectoryCandidate>> {
-        let session_ids = self.list_sessions()?;
+        self.extract_failed_trajectories_since_id(0, max_tool_success_rate, min_steps)
+    }
+
+    /// 失敗 trajectory 抽出 (Lab cycle scoping 対応、handoff 05-07g Phase 5)。
+    ///
+    /// `since_event_id` より大きい id を持つ SessionStart event の session のみを
+    /// 対象とする。`run_experiment_loop` 開始時に `MAX(id)` を snapshot しておけば、
+    /// 当該 cycle 内の events だけが AgentHER pass の対象になり、過去 cycle の
+    /// 累積汚染を回避できる。`since_event_id=0` で全期間 = `extract_failed_trajectories`
+    /// と等価。
+    pub fn extract_failed_trajectories_since_id(
+        &self,
+        since_event_id: i64,
+        max_tool_success_rate: f64,
+        min_steps: usize,
+    ) -> Result<Vec<TrajectoryCandidate>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT session_id FROM events
+             WHERE event_type = 'session_start' AND id > ?1
+             ORDER BY id",
+        )?;
+        let session_ids: Vec<String> = stmt
+            .query_map(params![since_event_id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
         let mut candidates = Vec::new();
         for sid in session_ids {
             if let Some(c) = self.build_trajectory(&sid)?
@@ -175,6 +203,42 @@ impl<'a> EventStore<'a> {
             }
         }
         Ok(candidates)
+    }
+
+    /// 自 store の events を別 store に bulk copy する (handoff 05-07g Phase 5)。
+    ///
+    /// AgentHER post-Lab pass で、benchmark の ephemeral store に積まれた events を
+    /// `run_experiment_loop` の persistent store に流すために使用する。`id` は dest 側の
+    /// AUTOINCREMENT に再付与し、それ以外の 5 列 (session_id / event_type / event_data /
+    /// step_index / created_at) を保持する。重複検出は呼出側責務 (本 method は冪等性を
+    /// 保証しない)。戻り値は copy した event 数。
+    pub fn export_to(&self, dest: &MemoryStore) -> Result<usize> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, event_type, event_data, step_index, created_at
+             FROM events ORDER BY id",
+        )?;
+        let rows: Vec<(String, String, String, Option<i64>, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let count = rows.len();
+        let dest_conn = dest.conn();
+        for (sid, et, ed, si, ca) in rows {
+            dest_conn.execute(
+                "INSERT INTO events (session_id, event_type, event_data, step_index, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![sid, et, ed, si, ca],
+            )?;
+        }
+        Ok(count)
     }
 
     fn build_trajectory(&self, session_id: &str) -> Result<Option<TrajectoryCandidate>> {
