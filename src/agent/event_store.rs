@@ -512,4 +512,173 @@ mod tests {
         assert_eq!(EventType::ToolCallEnd.as_str(), "tool_call_end");
         assert_eq!(EventType::PlanGenerated.as_str(), "plan_generated");
     }
+
+    // === Phase 5 Red (agenther-event-flow-fix plan) ===
+    // 以下の 2 test は新規 API (`export_to`, `extract_failed_trajectories_since_id`) が
+    // 未実装なためコンパイルエラーで Red、Phase 2 Green で実装後に PASS する想定。
+
+    #[test]
+    fn test_export_to_basic() {
+        // src store に 5 events を append、dest store に export → count==5、event_type 配列同一
+        let src_store = test_store();
+        let dest_store = test_store();
+        let src_es = EventStore::new(src_store.conn());
+
+        src_es
+            .append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        src_es
+            .append(
+                "s1",
+                &EventType::ToolCallStart,
+                r#"{"tool":"shell"}"#,
+                Some(0),
+            )
+            .unwrap();
+        src_es
+            .append(
+                "s1",
+                &EventType::ToolCallEnd,
+                r#"{"tool":"shell","success":true}"#,
+                Some(0),
+            )
+            .unwrap();
+        src_es
+            .append("s1", &EventType::AssistantMessage, r#"{"text":"ok"}"#, None)
+            .unwrap();
+        src_es
+            .append("s1", &EventType::SessionEnd, "{}", None)
+            .unwrap();
+
+        let copied = src_es.export_to(&dest_store).unwrap();
+        assert_eq!(copied, 5, "5 events copied");
+
+        // dest 側で event_type 配列を replay 検証
+        let dest_es = EventStore::new(dest_store.conn());
+        let events = dest_es.replay("s1").unwrap();
+        assert_eq!(events.len(), 5);
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(
+            types,
+            vec![
+                "session_start",
+                "tool_call_start",
+                "tool_call_end",
+                "assistant_message",
+                "session_end"
+            ]
+        );
+
+        // session_id / event_data / step_index も保持されること
+        assert_eq!(events[1].event_data, r#"{"tool":"shell"}"#);
+        assert_eq!(events[1].step_index, Some(0));
+    }
+
+    #[test]
+    fn test_extract_failed_trajectories_since_id_scoping() {
+        // 1 cycle 目: failed session を 1 件 seed
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        es.append("old1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append(
+            "old1",
+            &EventType::UserMessage,
+            r#"{"content":"古いタスク"}"#,
+            None,
+        )
+        .unwrap();
+        es.append(
+            "old1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"shell"}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "old1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"shell","success":false}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "old1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"shell"}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append(
+            "old1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"shell","success":false}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append("old1", &EventType::SessionEnd, "{}", None).unwrap();
+
+        // snapshot 取得 (Lab cycle 開始の境界)
+        let snapshot_id: i64 = store
+            .conn()
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        // 2 cycle 目: 同じく failed session を 1 件 seed
+        es.append("new1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append(
+            "new1",
+            &EventType::UserMessage,
+            r#"{"content":"新しいタスク"}"#,
+            None,
+        )
+        .unwrap();
+        es.append(
+            "new1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"shell"}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "new1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"shell","success":false}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "new1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"shell"}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append(
+            "new1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"shell","success":false}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append("new1", &EventType::SessionEnd, "{}", None).unwrap();
+
+        // since_id=0 → 全期間で 2 件取得 (既存 extract_failed_trajectories と等価)
+        let all = es.extract_failed_trajectories_since_id(0, 0.8, 2).unwrap();
+        assert_eq!(all.len(), 2, "since_id=0 で 2 件 (old1+new1)");
+
+        // since_id=snapshot_id → cycle 2 のみ 1 件
+        let scoped = es
+            .extract_failed_trajectories_since_id(snapshot_id, 0.8, 2)
+            .unwrap();
+        assert_eq!(
+            scoped.len(),
+            1,
+            "snapshot_id 以降の cycle 2 のみ 1 件 (new1)"
+        );
+        assert_eq!(scoped[0].session_id, "new1");
+    }
 }
