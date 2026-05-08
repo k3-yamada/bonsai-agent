@@ -28,6 +28,19 @@ use crate::runtime::inference::LlmBackend;
 /// Reflection prompt template (`prompts/heuristic_reflection.txt`、compile-time embed)。
 const REFLECTION_PROMPT_TEMPLATE: &str = include_str!("../../prompts/heuristic_reflection.txt");
 
+/// `BONSAI_ERL_DISABLED=1` (or "true"、case-insensitive) で ERL 機構全体を short-circuit。
+///
+/// - production default = env unset = false 返却 = 通常動作 (項目 213 ON)
+/// - Lab v17 OFF variant: `BONSAI_ERL_DISABLED=1` で `inject_heuristics` +
+///   `run_heuristics_pass` を一括 skip し、effectiveness paired t-test の
+///   コントロール cycle として機能する (plan v17 §4.1)
+/// - 値が "0" / "false" / 空文字列など `1`/`true` 以外なら disabled 扱いせず false
+pub(crate) fn is_erl_disabled() -> bool {
+    std::env::var("BONSAI_ERL_DISABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// `detect_tool_chain_in_advice` のデフォルト ALLOWLIST。
 /// 現行 ToolRegistry に含まれる tool 名と整合 (項目 213 plan §4.4)。
 pub const KNOWN_TOOLS: &[&str] = &[
@@ -848,6 +861,68 @@ mod tests {
     // ===========================================================================
     // Mock event repository test (1 件、項目 209 dividend、F8 audit)
     // ===========================================================================
+
+    // ===========================================================================
+    // is_erl_disabled toggle (Lab v17 Phase 1 Red、env BONSAI_ERL_DISABLED)
+    //
+    // env mutation race を避けるため module-local Mutex で serialize する
+    // (smoke_correction tests と同パターン、serial_test crate を増やさない方針)。
+    // ===========================================================================
+
+    static ERL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_erl_env() {
+        unsafe {
+            std::env::remove_var("BONSAI_ERL_DISABLED");
+        }
+    }
+
+    #[test]
+    fn t_is_erl_disabled_default_unset() {
+        let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_erl_env();
+        assert!(
+            !is_erl_disabled(),
+            "env unset で false (production default = enabled)"
+        );
+    }
+
+    #[test]
+    fn t_is_erl_disabled_explicit_1() {
+        let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_erl_env();
+        unsafe {
+            std::env::set_var("BONSAI_ERL_DISABLED", "1");
+        }
+        assert!(is_erl_disabled(), "env=1 で true (Lab v17 OFF variant)");
+        reset_erl_env();
+    }
+
+    #[test]
+    fn t_is_erl_disabled_case_insensitive_true() {
+        let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_erl_env();
+        for value in ["true", "TRUE", "True"] {
+            unsafe {
+                std::env::set_var("BONSAI_ERL_DISABLED", value);
+            }
+            assert!(is_erl_disabled(), "env={value} (case-insensitive) で true");
+        }
+        reset_erl_env();
+    }
+
+    #[test]
+    fn t_is_erl_disabled_other_values_treated_as_false() {
+        let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_erl_env();
+        for value in ["0", "false", "no", ""] {
+            unsafe {
+                std::env::set_var("BONSAI_ERL_DISABLED", value);
+            }
+            assert!(!is_erl_disabled(), "env={value} は disabled 扱いせず false");
+        }
+        reset_erl_env();
+    }
 
     #[test]
     fn t_extract_heuristics_with_mock_event_repository() {

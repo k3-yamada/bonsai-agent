@@ -89,9 +89,10 @@ pub(super) fn record_success(
 /// 注入された ERL heuristic IDs に対し task 完了結果を反映 (項目 213、plan §4.5/§4.6)。
 ///
 /// `inject_heuristics` の戻り値を `LoopState::injected_heuristic_ids` 経由で受取、
-/// `HeuristicStore::record_outcome` で `used_count++` + `success_after_use += task_succeeded as i64`
-/// + `last_used_at` 更新。store 未設定 / id 空ならば no-op。任意の per-id エラーは
-/// 握り潰し (Lab cycle / 通常 task の終了パスを破壊しない)。
+/// `HeuristicStore::record_outcome` で `used_count` を 1 加算、`task_succeeded` が
+/// `true` のとき `success_after_use` も 1 加算、`last_used_at` を更新する。
+/// store 未設定 / id 空ならば no-op。任意の per-id エラーは握り潰し
+/// (Lab cycle / 通常 task の終了パスを破壊しない)。
 pub(super) fn record_heuristic_outcomes(
     store: Option<&MemoryStore>,
     heuristic_ids: &[i64],

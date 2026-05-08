@@ -12,7 +12,9 @@ use crate::agent::judge::{HttpAdvisorJudge, LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, SubgoalJudgeMethod, extract_hindsight_relabels};
-use crate::memory::heuristics::{HeuristicStore, HeuristicSummary, extract_reflection_full};
+use crate::memory::heuristics::{
+    HeuristicStore, HeuristicSummary, extract_reflection_full, is_erl_disabled,
+};
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
 use crate::runtime::inference::LlmBackend;
@@ -1399,6 +1401,12 @@ fn run_heuristics_pass(
     since_event_id: i64,
     backend: &dyn LlmBackend,
 ) -> Result<HeuristicSummary> {
+    // Lab v17 toggle (項目 213 Phase 5、F10 falsifiable hypothesis 検証用):
+    // `BONSAI_ERL_DISABLED=1` で OFF cycle として post-Lab pass 全体を skip。
+    // production default は env unset = 通常動作 (項目 213 Phase 2 Green と同挙動)。
+    if is_erl_disabled() {
+        return Ok(HeuristicSummary::default());
+    }
     let conn = store.conn();
     let event_store = EventStore::new(conn);
     let h_store = HeuristicStore::new(conn);

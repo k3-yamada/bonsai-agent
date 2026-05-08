@@ -8,7 +8,7 @@ use crate::agent::conversation::{Message, Session};
 use crate::knowledge::vault::Vault;
 use crate::memory::experience::{ExperienceStore, ExperienceType};
 use crate::memory::graph::KnowledgeGraph;
-use crate::memory::heuristics::HeuristicStore;
+use crate::memory::heuristics::{HeuristicStore, is_erl_disabled};
 use crate::memory::search::HybridSearch;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
@@ -208,6 +208,12 @@ pub(crate) fn inject_heuristics(
     task_context: &str,
     store: Option<&MemoryStore>,
 ) -> Vec<i64> {
+    // Lab v17 toggle (項目 213 Phase 5、F10 falsifiable hypothesis 検証用):
+    // `BONSAI_ERL_DISABLED=1` で OFF cycle として全 heuristics 注入を skip。
+    // production default は env unset = false = 通常動作。
+    if is_erl_disabled() {
+        return Vec::new();
+    }
     let Some(s) = store else {
         return Vec::new();
     };
@@ -571,5 +577,49 @@ mod tests {
         );
         // 環境次第（.bonsai/SOUL.md があれば 1）だが、≤ before+1 を保証
         assert!(session.messages.len() <= before + 1);
+    }
+
+    // === Lab v17 Phase 1 Red: BONSAI_ERL_DISABLED toggle short-circuit ===
+
+    static ERL_INJECT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn t_inject_heuristics_short_circuits_when_disabled() {
+        // env mutation race を避けるため module-local Mutex で serialize
+        let _g = ERL_INJECT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 1 heuristic を pool に投入 → 通常なら inject_heuristics で 1 件 hit
+        let store = MemoryStore::in_memory().unwrap();
+        let h_store = crate::memory::heuristics::HeuristicStore::new(store.conn());
+        h_store
+            .save(
+                "テスト用 advice for short-circuit",
+                &["short_circuit_test".to_string(), "lab_v17".to_string()],
+                None,
+                "test task",
+                "efficiency",
+            )
+            .unwrap();
+
+        // disabled=true で短絡 → 空 Vec + メッセージ追加なし
+        unsafe {
+            std::env::set_var("BONSAI_ERL_DISABLED", "1");
+        }
+        let mut session = Session::new();
+        let before = session.messages.len();
+        let ids = inject_heuristics(&mut session, "short_circuit_test lab_v17", Some(&store));
+        assert!(
+            ids.is_empty(),
+            "BONSAI_ERL_DISABLED=1 で空 Vec 返却 (record_outcome 用 IDs も空)"
+        );
+        assert_eq!(
+            session.messages.len(),
+            before,
+            "session メッセージ追加なし (heuristics タグ不在)"
+        );
+        unsafe {
+            std::env::remove_var("BONSAI_ERL_DISABLED");
+        }
     }
 }
