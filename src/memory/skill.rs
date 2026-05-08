@@ -237,6 +237,23 @@ impl<'a> SkillStore<'a> {
         Ok(promoted)
     }
 
+    /// ERL (項目 213) で reflection から得た自然言語助言のうち、tool_chain
+    /// 表現可能 (`detect_tool_chain_in_advice` 検出) のものを skill として昇格。
+    ///
+    /// `tool_chain` は順序付き tool 名の Vec、`advice` は元の自然言語助言、
+    /// `source_session_id` は由来 session。prefix は `erl_` (HSL の `hsl_` /
+    /// 軌跡の `traj_` と並ぶ独立 source 識別)。dedup は既存の tool_chain UNIQUE
+    /// 制約に従い、重複なら `None` を返す。
+    pub fn promote_from_erl_advice(
+        &self,
+        tool_chain: &[String],
+        advice: &str,
+        source_session_id: &str,
+    ) -> Result<Option<i64>> {
+        let _ = (&self.conn, tool_chain, advice, source_session_id);
+        todo!("Phase 2 Green: SkillStore::promote_from_erl_advice (項目 213)")
+    }
+
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）
     /// frequency(0.4) + recency(0.35) + diversity(0.25)
     pub fn promote_from_experiences(
@@ -651,6 +668,31 @@ mod tests {
         let all = skills.list_all().unwrap();
         assert_eq!(all.len(), 1);
         assert!(all[0].name.starts_with("traj_"), "既存 prefix 'traj_' 維持");
+    }
+
+    // ============ ERL (項目 213) 自然言語助言 → tool_chain skill 昇格テスト ============
+
+    #[test]
+    fn t_promote_from_erl_advice_basic() {
+        let store = test_store();
+        let skills = SkillStore::new(store.conn());
+        let tool_chain = vec!["file_read".to_string(), "shell".to_string()];
+        let id = skills
+            .promote_from_erl_advice(
+                &tool_chain,
+                "Use file_read then shell to verify the result",
+                "session_erl_001",
+            )
+            .unwrap();
+        assert!(id.is_some(), "tool_chain advice → skill 昇格成功");
+
+        let all = skills.list_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(
+            all[0].name.starts_with("erl_"),
+            "ERL 由来 skill は `erl_` prefix"
+        );
+        assert_eq!(all[0].tool_chain, "file_read -> shell");
     }
 
     #[test]
