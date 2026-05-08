@@ -2,7 +2,7 @@
 
 19 ファイルの状態と関係を一覧化。新規セッションで最初に参照する起点。
 
-**Last Updated:** 2026-04-27
+**Last Updated:** 2026-05-08
 
 ---
 
@@ -63,6 +63,15 @@ post-lab-v13-roadmap.md (★ 起点)
 
 structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 ```
+
+## 🆕 外部 OSS 取込み (構造変異 from external repo)
+
+| ファイル | 由来 | 工数 | 採否ゲート |
+|---|---|---|---|
+| `cerememory-decay-port-impl.md` | `co-r-e/cerememory` ADR-005 (commit b08d201、MIT) | 0.5 day | Lab v18 paired t-test (decay ON/OFF) で Δscore ≥ +0.015 |
+| `cerememory-review-state-v12-impl.md` | `co-r-e/cerememory` ADR-011 (Strength/Freshness 分離) | 1.5 day | Lab v19 paired t-test (freshness gate ON/OFF) で Δscore ≥ +0.015 |
+
+両 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)、Lab v17 完了後着手必須。
 
 ## メンテナンス方針
 
