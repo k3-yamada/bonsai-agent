@@ -46,6 +46,8 @@ pub enum MutationAction {
     SetTemperature(f64),
     /// ツール出力サイズ上限を変更
     SetMaxToolOutputChars(usize),
+    /// AdvisorConfig::dynamic_skip_threshold を変更 (Self-Verification Dilemma 動的 skip 閾値、項目 210/211)
+    SetAdvisorThreshold(f64),
 }
 
 /// 仮説生成器: ルールベースで次の変異候補を選択
@@ -146,6 +148,19 @@ fn param_mutations() -> Vec<ParamMutation> {
             detail: "max_tool_output_chars: 8000 (大容量)",
             action: MutationAction::SetMaxToolOutputChars(8000),
         },
+        // --- Self-Verification Dilemma Phase 5 (項目 211): 動的 skip threshold variant ---
+        ParamMutation {
+            detail: "advisor.dynamic_skip_threshold: 0.3 (低閾値、過剰 skip 抑制)",
+            action: MutationAction::SetAdvisorThreshold(0.3),
+        },
+        ParamMutation {
+            detail: "advisor.dynamic_skip_threshold: 0.4 (中閾値、推奨設定)",
+            action: MutationAction::SetAdvisorThreshold(0.4),
+        },
+        ParamMutation {
+            detail: "advisor.dynamic_skip_threshold: 0.5 (高閾値、保守的)",
+            action: MutationAction::SetAdvisorThreshold(0.5),
+        },
     ]
 }
 
@@ -157,7 +172,72 @@ impl HypothesisGenerator {
     }
 
     /// 次の変異候補を生成（適応型: 試行済みをスキップ）
+    ///
+    /// env `BONSAI_LAB_PHASE5_FOCUS` 設定時は focus filter 経由で variant 絞り込み。
+    /// 値 `"advisor_threshold"` で SetAdvisorThreshold variant のみ返す (項目 211 Phase 5)。
     pub fn next_mutation(&mut self, experiment_count: usize) -> Mutation {
+        let focus = std::env::var("BONSAI_LAB_PHASE5_FOCUS").ok();
+        self.next_mutation_with_focus(experiment_count, focus.as_deref())
+    }
+
+    /// focus filter 付き次変異候補生成 (Phase 5 effectiveness 検証用、項目 211)。
+    ///
+    /// `focus = Some("advisor_threshold")` で `MutationAction::SetAdvisorThreshold` 系のみ返す。
+    /// focus が None or 該当 variant 不在なら既存 rotation 動作にフォールバック。
+    /// テストは env を介さず focus を引数で直接渡せる (test 隔離性確保)。
+    pub fn next_mutation_with_focus(
+        &mut self,
+        experiment_count: usize,
+        focus: Option<&str>,
+    ) -> Mutation {
+        if let Some(f) = focus
+            && let Some(m) = self.try_focused_mutation(f, experiment_count)
+        {
+            return m;
+        }
+        self.next_mutation_unfocused(experiment_count)
+    }
+
+    /// focus filter で対応 variant のみ rotate 選択 (Phase 5 用、項目 211)。
+    /// すべて tried 済みでも focus 維持のため再選択 (rotation cycle 続行)。
+    fn try_focused_mutation(&mut self, focus: &str, experiment_count: usize) -> Option<Mutation> {
+        let params = param_mutations();
+        let filtered: Vec<&ParamMutation> = params
+            .iter()
+            .filter(|p| match focus {
+                "advisor_threshold" => matches!(p.action, MutationAction::SetAdvisorThreshold(_)),
+                _ => false,
+            })
+            .collect();
+        if filtered.is_empty() {
+            return None;
+        }
+        // tried 済みスキップで rotate (focus 内 dedup)
+        for offset in 0..filtered.len() {
+            let idx = (experiment_count + offset) % filtered.len();
+            let p = filtered[idx];
+            if !self.tried.contains(p.detail) {
+                self.tried.insert(p.detail.into());
+                return Some(Mutation {
+                    mutation_type: MutationType::AgentParam,
+                    detail: p.detail.into(),
+                    apply: p.action.clone(),
+                    theme: MutationTheme::from_cycle(0),
+                });
+            }
+        }
+        // すべて tried 済みでも focus 維持で再選択
+        let p = filtered[experiment_count % filtered.len()];
+        Some(Mutation {
+            mutation_type: MutationType::AgentParam,
+            detail: p.detail.into(),
+            apply: p.action.clone(),
+            theme: MutationTheme::from_cycle(0),
+        })
+    }
+
+    /// focus 未指定時の既存 rotation ロジック (rules → params 全体 rotate)。
+    fn next_mutation_unfocused(&mut self, experiment_count: usize) -> Mutation {
         let params = param_mutations();
         let total_slots = self.rules.len() + params.len();
         // ルール→パラメータの順でローテーション
@@ -369,6 +449,9 @@ pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentCo
         }
         MutationAction::SetMaxToolOutputChars(n) => {
             config.max_tool_output_chars = *n;
+        }
+        MutationAction::SetAdvisorThreshold(t) => {
+            config.advisor.dynamic_skip_threshold = *t;
         }
     }
 
@@ -1906,7 +1989,12 @@ mod tests {
     #[test]
     fn test_param_mutations_count() {
         let params = param_mutations();
-        assert_eq!(params.len(), 16, "パラメータ変異候補は16件");
+        // 16 既存 + 3 (項目 211 SetAdvisorThreshold 0.3/0.4/0.5) = 19
+        assert_eq!(
+            params.len(),
+            19,
+            "パラメータ変異候補は19件 (16 既存 + 3 advisor_threshold)"
+        );
     }
 
     // --- Phase 3: Oracle Feedback テスト（NAT extract_worst_reasoning知見） ---
