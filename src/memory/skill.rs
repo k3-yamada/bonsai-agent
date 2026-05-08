@@ -250,8 +250,21 @@ impl<'a> SkillStore<'a> {
         advice: &str,
         source_session_id: &str,
     ) -> Result<Option<i64>> {
-        let _ = (&self.conn, tool_chain, advice, source_session_id);
-        todo!("Phase 2 Green: SkillStore::promote_from_erl_advice (項目 213)")
+        if tool_chain.is_empty() {
+            return Ok(None);
+        }
+        // ERL advice は実 trajectory 由来でないため duration_ms=0、
+        // tool_success_rate=1.0 (reflection が helpful chain と推奨した想定)。
+        // task_description には advice 先頭 30 chars を入れて prefix 由来を識別容易に。
+        let candidate = crate::agent::event_store::TrajectoryCandidate {
+            session_id: source_session_id.to_string(),
+            task_description: advice.chars().take(30).collect::<String>(),
+            tool_sequence: tool_chain.to_vec(),
+            tool_success_rate: 1.0,
+            total_steps: tool_chain.len(),
+            duration_ms: 0,
+        };
+        self.promote_with_prefix(&candidate, "erl_")
     }
 
     /// 経験からスキルへの昇格チェック（3シグナル重み付きスコアリング）

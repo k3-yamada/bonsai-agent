@@ -8,6 +8,7 @@ use crate::agent::conversation::{Message, Session};
 use crate::knowledge::vault::Vault;
 use crate::memory::experience::{ExperienceStore, ExperienceType};
 use crate::memory::graph::KnowledgeGraph;
+use crate::memory::heuristics::HeuristicStore;
 use crate::memory::search::HybridSearch;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
@@ -195,6 +196,37 @@ pub(crate) fn inject_memory_blocks(
             block.value.trim()
         )));
     }
+}
+
+/// ERL heuristics をセッションに注入 (項目 213、plan F3)。
+///
+/// `task_context` の trigger_patterns マッチで top-K 取得、`<context type="heuristics">`
+/// タグで system message 追加。注入されなかった (= 0 件 hit) 場合はメッセージを追加しない。
+/// 戻り値: 注入された heuristic IDs (将来的に task 完了 hook で `record_outcome` 呼出用)。
+pub(crate) fn inject_heuristics(
+    session: &mut Session,
+    task_context: &str,
+    store: Option<&MemoryStore>,
+) -> Vec<i64> {
+    let Some(s) = store else {
+        return Vec::new();
+    };
+    let h_store = HeuristicStore::new(s.conn());
+    let top_k = h_store
+        .find_top_k_for_task(task_context, 5)
+        .unwrap_or_default();
+    if top_k.is_empty() {
+        return Vec::new();
+    }
+    let body = top_k
+        .iter()
+        .map(|h| format!("- {}", h.advice))
+        .collect::<Vec<_>>()
+        .join("\n");
+    session.add_message(Message::system(format!(
+        "<context type=\"heuristics\">\n{body}\n</context>"
+    )));
+    top_k.iter().map(|h| h.id).collect()
 }
 
 /// コンテキストメモリ・経験・スキルをセッションに注入

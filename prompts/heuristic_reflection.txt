@@ -1,0 +1,20 @@
+You are a reflection engine. Read this trajectory and output up to 3 short
+natural-language heuristics for future tasks. Output ONLY a JSON array, no
+prose, no markdown.
+
+Schema:
+[{"advice": str (<=200 chars),
+  "trigger_patterns": [str (>=4 chars), 2-5 items],
+  "category": "failure_recovery"|"efficiency"|"verification"}]
+
+Constraints:
+- advice MUST NOT name 2 or more known tools in order (those go to SkillStore)
+- trigger_patterns MUST be specific phrases, not generic words
+- If no heuristic applies, output []
+
+Trajectory:
+<task: {task_description}>
+<final_outcome: {outcome}>
+<events:
+{event_summary}
+>

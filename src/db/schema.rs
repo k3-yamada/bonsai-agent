@@ -1,7 +1,10 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
+///
+/// V10 = ERL heuristics table (項目 213)。AgentFloor
+/// (`.claude/plan/agentfloor-tier-eval-impl.md`) は次の V11 を予約 (Plan F1 audit)。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -47,6 +50,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 9,
         description: "Beyond pass@1 信頼性メトリクス: rdc/vaf/gds/stability_delta カラム追加 (項目 200)",
         sql: SCHEMA_V9,
+    },
+    Migration {
+        version: 10,
+        description: "ERL heuristics pool: 自然言語助言の第 4 メモリ層 (項目 213)",
+        sql: SCHEMA_V10,
     },
 ];
 
@@ -234,6 +242,27 @@ ALTER TABLE experiments ADD COLUMN graceful_degradation REAL;
 ALTER TABLE experiments ADD COLUMN stability_delta REAL;
 "#;
 
+/// 項目 213 (ERL Heuristics Pool): SkillStore (tool_chain) / ExperienceStore /
+/// Vault (rules) と並ぶ第 4 メモリ層。`fingerprint` UNIQUE で deterministic dedup
+/// (項目 206 同方針、advice 先頭 80 chars + trigger_hash)。
+const SCHEMA_V10: &str = r#"
+CREATE TABLE IF NOT EXISTS heuristics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    advice TEXT NOT NULL,
+    trigger_patterns TEXT NOT NULL DEFAULT '[]',
+    source_session_id TEXT,
+    source_task TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'efficiency',
+    score REAL NOT NULL DEFAULT 0.5,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    success_after_use INTEGER NOT NULL DEFAULT 0,
+    fingerprint TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_heuristics_category ON heuristics(category);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +411,15 @@ mod tests {
             SCHEMA_V8.contains("experiments(accepted, mutation_detail)"),
             "V8はexperimentsテーブルの複合インデックス"
         );
+    }
+
+    #[test]
+    fn test_schema_v10_contains_heuristics_table() {
+        assert!(
+            SCHEMA_V10.contains("CREATE TABLE IF NOT EXISTS heuristics"),
+            "V10にheuristicsテーブルが必要 (項目 213)"
+        );
+        assert!(SCHEMA_V10.contains("fingerprint TEXT NOT NULL UNIQUE"));
+        assert!(SCHEMA_V10.contains("idx_heuristics_category"));
     }
 }

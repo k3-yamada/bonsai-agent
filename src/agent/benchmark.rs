@@ -43,11 +43,11 @@ pub enum TaskTier {
 pub enum CapabilityTier {
     #[default]
     InstructionFollowing, // T1
-    SingleToolUse,           // T2
-    ToolSelection,           // T3
-    MultiStepToolChain,      // T4
-    ErrorRecovery,           // T5
-    LongHorizonPlanning,     // T6
+    SingleToolUse,       // T2
+    ToolSelection,       // T3
+    MultiStepToolChain,  // T4
+    ErrorRecovery,       // T5
+    LongHorizonPlanning, // T6
 }
 
 impl CapabilityTier {
@@ -495,6 +495,7 @@ fn compute_tier_avg(
 ///
 /// **Phase 2 Green stub**: 現状 None を返すのみ (test FAIL = Red 維持)。
 /// 完全実装は AgentFloor 専用 plan で行う (本 ERL plan v2 着手のための最小 stub)。
+#[allow(dead_code)]
 pub(crate) fn compute_capability_tier_avg(
     _task_scores: &[MultiRunTaskScore],
     _task_descs: &std::collections::HashMap<String, BenchmarkTask>,
@@ -2751,7 +2752,11 @@ mod tests {
     #[test]
     fn test_agentfloor_tasks_30_count() {
         let suite = BenchmarkSuite::agentfloor_tasks();
-        assert_eq!(suite.tasks.len(), 30, "AgentFloor は 30 task (5/tier × 6 tier)");
+        assert_eq!(
+            suite.tasks.len(),
+            30,
+            "AgentFloor は 30 task (5/tier × 6 tier)"
+        );
         // 各 tier 正確に 5 件
         for tier in CapabilityTier::all() {
             let count = suite
@@ -2804,22 +2809,20 @@ mod tests {
                 },
             ),
         ]);
-        let avg = compute_capability_tier_avg(
-            &task_scores,
-            &descs,
-            CapabilityTier::InstructionFollowing,
-        );
+        let avg =
+            compute_capability_tier_avg(&task_scores, &descs, CapabilityTier::InstructionFollowing);
         // T1 平均 = (0.8 + 0.6) / 2 = 0.7 (composite_score)
         assert!(avg.is_some(), "T1 平均は計算可能");
         let v = avg.unwrap();
         assert!((v - 0.7).abs() < 1e-6, "T1 平均 0.7 期待、実際 {:.4}", v);
         // 空 tier (T6) は None
-        let t6_avg = compute_capability_tier_avg(
-            &task_scores,
-            &descs,
-            CapabilityTier::LongHorizonPlanning,
+        let t6_avg =
+            compute_capability_tier_avg(&task_scores, &descs, CapabilityTier::LongHorizonPlanning);
+        assert!(
+            t6_avg.is_none(),
+            "T6 task ゼロで None 期待、実際 {:?}",
+            t6_avg
         );
-        assert!(t6_avg.is_none(), "T6 task ゼロで None 期待、実際 {:?}", t6_avg);
     }
 
     #[allow(dead_code)]

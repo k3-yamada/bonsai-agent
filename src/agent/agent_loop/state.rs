@@ -61,6 +61,10 @@ pub struct LoopState<'a> {
     pub trial_summary: TrialSummary,
     /// 複数ファイル交互編集検出（Step 11、macOS26/Agent知見）
     pub cycle_detector: MultiFileEditCycleDetector,
+    /// task 開始時に inject_heuristics で注入された heuristic IDs (項目 213)。
+    /// task 完了時 (handle_outcome の FinalAnswer / Aborted) に
+    /// `record_heuristic_outcomes` で utility update する。
+    pub injected_heuristic_ids: Vec<i64>,
 }
 
 impl<'a> LoopState<'a> {
@@ -78,6 +82,7 @@ impl<'a> LoopState<'a> {
             tool_cache: ToolResultCache::new(),
             trial_summary: TrialSummary::default(),
             cycle_detector: MultiFileEditCycleDetector::default(),
+            injected_heuristic_ids: Vec::new(),
         }
     }
 }

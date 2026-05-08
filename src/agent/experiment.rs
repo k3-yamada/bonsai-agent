@@ -12,6 +12,7 @@ use crate::agent::judge::{HttpAdvisorJudge, LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, SubgoalJudgeMethod, extract_hindsight_relabels};
+use crate::memory::heuristics::{HeuristicStore, HeuristicSummary, extract_reflection_full};
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
 use crate::runtime::inference::LlmBackend;
@@ -1310,6 +1311,24 @@ pub fn run_experiment_loop(
         ),
     }
 
+    // ERL post-Lab pass (項目 213、plan §4/§5): 自然言語助言を heuristics layer に保管。
+    // 順序は AgentHER の後 (F4 audit)、両者同 lab_start_event_id で scoping、non-fatal。
+    match run_heuristics_pass(store, lab_start_event_id, backend) {
+        Ok(s) => log_event(
+            LogLevel::Info,
+            "lab.heuristics",
+            &format!(
+                "ERL post-Lab: extracted={} saved={} skipped_to_skill={} pruned={} parse_failures={}",
+                s.extracted, s.saved, s.skipped_to_skill, s.pruned, s.parse_failures,
+            ),
+        ),
+        Err(e) => log_event(
+            LogLevel::Warn,
+            "lab.heuristics",
+            &format!("ERL post-Lab pass failed (non-fatal): {e}"),
+        ),
+    }
+
     Ok(experiments)
 }
 
@@ -1367,6 +1386,53 @@ fn run_hindsight_pass(store: &MemoryStore, since_event_id: i64) -> Result<Hindsi
         }
     }
 
+    Ok(summary)
+}
+
+/// ERL post-Lab pass (項目 213): events から reflection で自然言語助言を抽出し、
+/// HeuristicStore に保存。tool_chain 表現可能 advice は SkillStore に routing する。
+///
+/// non-fatal: 任意のエラーは呼出側で `Warn` log で握り潰す (Lab 結果を破壊しない)。
+/// `since_event_id` は `run_hindsight_pass` と共有 = 同じ Lab cycle 開始時 snapshot。
+fn run_heuristics_pass(
+    store: &MemoryStore,
+    since_event_id: i64,
+    backend: &dyn LlmBackend,
+) -> Result<HeuristicSummary> {
+    let conn = store.conn();
+    let event_store = EventStore::new(conn);
+    let h_store = HeuristicStore::new(conn);
+    let skill_store = SkillStore::new(conn);
+
+    let result = extract_reflection_full(&event_store, since_event_id, backend)?;
+
+    let mut summary = HeuristicSummary {
+        extracted: result.candidates.len() + result.tool_chain_advice.len(),
+        parse_failures: result.parse_failures,
+        ..Default::default()
+    };
+
+    for c in &result.candidates {
+        h_store.save(
+            &c.advice,
+            &c.trigger_patterns,
+            Some(c.source_session_id.as_str()),
+            &c.source_task,
+            &c.category,
+        )?;
+        summary.saved += 1;
+    }
+
+    for (chain, advice, sid) in &result.tool_chain_advice {
+        if skill_store
+            .promote_from_erl_advice(chain, advice, sid)?
+            .is_some()
+        {
+            summary.skipped_to_skill += 1;
+        }
+    }
+
+    summary.pruned = h_store.prune().unwrap_or(0);
     Ok(summary)
 }
 

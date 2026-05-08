@@ -6,7 +6,9 @@
 use anyhow::Result;
 
 use crate::agent::checkpoint::CheckpointManager;
-use crate::agent::context_inject::{inject_contextual_memories, inject_memory_blocks};
+use crate::agent::context_inject::{
+    inject_contextual_memories, inject_heuristics, inject_memory_blocks,
+};
 use crate::agent::conversation::{Message, Role, Session};
 use crate::agent::event_store::{EventStore, EventType};
 use crate::agent::validate::PathGuard;
@@ -131,6 +133,10 @@ pub fn run_agent_loop_with_session(
     // 項目 179: Letta candidate 3 完成形 — SOUL.md persona + [[memory.blocks]] extras を
     // system prompt 直後に <context type="block:{label}"> タグで注入。
     inject_memory_blocks(session, &config.soul_path, &config.memory_blocks);
+    // 項目 213: ERL heuristics pool — Reflexion 由来の自然言語助言を memory_blocks 直後 /
+    // contextual memories 直前に注入 (plan §4.5 F3)。注入 IDs は handle_outcome の
+    // FinalAnswer/Aborted パスで record_heuristic_outcomes に渡し utility update。
+    let injected_heuristic_ids = inject_heuristics(session, &task_context, store);
     inject_contextual_memories(session, &task_context, store);
     inject_planning_step(session, &task_context);
 
@@ -145,6 +151,7 @@ pub fn run_agent_loop_with_session(
     }
 
     let mut state = LoopState::new(config.advisor.clone());
+    state.injected_heuristic_ids = injected_heuristic_ids;
     // ミドルウェアチェーン構築（DeerFlow知見: 4段パイプライン、項目 193 で F3 削除）
     state.middleware_chain =
         crate::agent::middleware::build_default_chain(&session.id, store, config.n_ctx_budget);

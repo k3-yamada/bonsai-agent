@@ -5,6 +5,7 @@
 
 use crate::agent::conversation::{ParsedOutput, Role, Session};
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
+use crate::memory::heuristics::HeuristicStore;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
 
@@ -83,6 +84,27 @@ pub(super) fn record_success(
     let evo = crate::memory::evolution::EvolutionEngine::new(s);
     let _ = evo.auto_collect();
     let _ = evo.apply_improvements();
+}
+
+/// 注入された ERL heuristic IDs に対し task 完了結果を反映 (項目 213、plan §4.5/§4.6)。
+///
+/// `inject_heuristics` の戻り値を `LoopState::injected_heuristic_ids` 経由で受取、
+/// `HeuristicStore::record_outcome` で `used_count++` + `success_after_use += task_succeeded as i64`
+/// + `last_used_at` 更新。store 未設定 / id 空ならば no-op。任意の per-id エラーは
+/// 握り潰し (Lab cycle / 通常 task の終了パスを破壊しない)。
+pub(super) fn record_heuristic_outcomes(
+    store: Option<&MemoryStore>,
+    heuristic_ids: &[i64],
+    task_succeeded: bool,
+) {
+    let Some(s) = store else { return };
+    if heuristic_ids.is_empty() {
+        return;
+    }
+    let heuristics = HeuristicStore::new(s.conn());
+    for id in heuristic_ids {
+        let _ = heuristics.record_outcome(*id, task_succeeded);
+    }
 }
 
 /// 中断時のセッション保存・経験記録

@@ -10,7 +10,9 @@ use crate::observability::logger::{LogLevel, log_event};
 
 use super::advisor_inject::{inject_replan_on_stall, inject_verification_step};
 use super::state::{AgentLoopResult, LoopState, OutcomeAction, StepOutcome};
-use super::support::{check_invariants, compute_output_hash, record_abort, record_success};
+use super::support::{
+    check_invariants, compute_output_hash, record_abort, record_heuristic_outcomes, record_success,
+};
 
 /// Outcome ディスパッチ
 ///
@@ -59,6 +61,8 @@ pub(super) fn handle_outcome(
                 log_event(LogLevel::Warn, "invariant", v);
             }
             record_success(store, session, task_context, &answer);
+            // 項目 213: ERL — 注入 heuristic に成功 outcome を記録 (utility update)
+            record_heuristic_outcomes(store, &state.injected_heuristic_ids, true);
             OutcomeAction::Return(AgentLoopResult {
                 answer,
                 iterations_used: final_iteration,
@@ -78,6 +82,8 @@ pub(super) fn handle_outcome(
             };
             state.middleware_chain.run_after_step(session, &mw_result);
             record_abort(store, session, task_context, &reason);
+            // 項目 213: ERL — 注入 heuristic に失敗 outcome を記録 (utility 引き下げ)
+            record_heuristic_outcomes(store, &state.injected_heuristic_ids, false);
             OutcomeAction::Return(AgentLoopResult {
                 answer: format!("[中断] {reason}"),
                 iterations_used: final_iteration,

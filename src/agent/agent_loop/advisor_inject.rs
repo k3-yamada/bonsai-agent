@@ -349,9 +349,10 @@ mod verify_skip_tests {
     // === inject_verification_step end-to-end ===
 
     fn make_advisor_with_threshold(t: f64) -> AdvisorConfig {
-        let mut a = AdvisorConfig::default();
-        a.dynamic_skip_threshold = t;
-        a
+        AdvisorConfig {
+            dynamic_skip_threshold: t,
+            ..AdvisorConfig::default()
+        }
     }
 
     /// 検証履歴を seed (code_edit task_type、`n_success` 件成功 / `n_fail` 件失敗)。
