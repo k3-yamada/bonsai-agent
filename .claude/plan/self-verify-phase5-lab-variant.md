@@ -220,7 +220,7 @@ BONSAI_LAB_CONFIG_VARIANTS=1 BONSAI_LAB_SMOKE=1 ./target/release/bonsai --lab --
 ```bash
 # 完全 Lab v16 cycle (core 22 × k=3 × 4 hypotheses [baseline + 3 threshold] ≈ 75 min)
 BONSAI_LAB_CONFIG_VARIANTS=1 BONSAI_BENCH_TIER=core ./target/release/bonsai \
-  --lab --lab-experiments 3 --lab-k 3 2>&1 | tee /tmp/sv5_lab_v16.log
+  --lab --lab-experiments 3 2>&1 | tee /tmp/sv5_lab_v16.log
 ```
 
 判定 (3 variant のいずれか 1 件以上 ACCEPT で Phase 5 SUCCESS):
@@ -333,7 +333,7 @@ BONSAI_LAB_CONFIG_VARIANTS=1 BONSAI_LAB_SMOKE=1 ./target/release/bonsai --lab --
 
 # 5. Phase 5 実機 Lab v16
 BONSAI_LAB_CONFIG_VARIANTS=1 BONSAI_BENCH_TIER=core ./target/release/bonsai \
-  --lab --lab-experiments 3 --lab-k 3 2>&1 | tee /tmp/sv5_lab_v16.log
+  --lab --lab-experiments 3 2>&1 | tee /tmp/sv5_lab_v16.log
 
 # 6. Commit + handoff + CLAUDE.md 項目 211
 ```
