@@ -182,7 +182,9 @@ impl MultiRunBenchmarkResult {
 - env 未設定 (default) は既存 `default_tasks()` (40 task) 維持 (後方互換)
 
 ### 4.7 SQLite + TSV 永続化
-**SQLite V9 → V10**:
+> ★ V10 確保元: ERL plan v2 (`erl-heuristics-pool-impl-v2.md`) が heuristics テーブルで V10 を使用するため、本 plan は ERL merge 後に V11 で上乗せする (依存順序: ERL → AgentFloor)。
+
+**SQLite V10 → V11**:
 ```sql
 ALTER TABLE experiments ADD COLUMN tier_t1 REAL;
 ALTER TABLE experiments ADD COLUMN tier_t2 REAL;
@@ -244,7 +246,7 @@ BONSAI_BENCH_LADDER=1 ./target/release/bonsai --lab --lab-experiments 1
 1. `test(agentfloor): Phase 1 Red — CapabilityTier + 30 task suite test`
 2. `feat(agentfloor): Phase 2 Green — CapabilityTier + agentfloor_tasks + tier_avg`
 3. `refactor(agentfloor): Phase 3 — weakest_tier helper + LADDER env`
-4. `feat(experiment): Phase 4 — Lab summary tier map + V9→V10 + TSV 21 列`
+4. `feat(experiment): Phase 4 — Lab summary tier map + V10→V11 + TSV 21 列`
 5. `docs(claude.md): 項目 209 — AgentFloor 6-tier 統合完遂 + smoke G-4 PASS`
 
 ## 6. API 影響
@@ -256,7 +258,7 @@ BONSAI_BENCH_LADDER=1 ./target/release/bonsai --lab --lab-experiments 1
 | `MultiRunBenchmarkResult` | 3 field 追加 | ✅ serde default + skip_if_none |
 | `weakest_tier()` / `paper_delta_map()` | 新規 method | — |
 | `Experiment` (experiment_log) | tier_t1..t6 6 Option<f64> | ✅ default + skip |
-| SQLite | V10 (6 列追加 ALTER TABLE) | ✅ additive |
+| SQLite | V11 (6 列追加 ALTER TABLE)、★ ERL plan v2 (`erl-heuristics-pool-impl-v2.md`) で V10 を確保。本 plan は ERL merge 後に V11 で乗る | ✅ additive |
 | TSV | 15 → 21 列 (末尾追加) | ⚠️ header 駆動 reader OK |
 | env | `BONSAI_BENCH_LADDER=1` 新規 | ✅ default 未設定で既存挙動 |
 
@@ -269,7 +271,7 @@ BONSAI_BENCH_LADDER=1 ./target/release/bonsai --lab --lab-experiments 1
 | R2 | 項目 172 (Core/Extended) との概念重複で混乱 | maintainer onboarding 困難 | docstring + CLAUDE.md 項目 209 で「直交軸」明記、`memory/agentfloor_tier_design.md` に用語表 |
 | R3 | T6 5 task の定義主観性 (「long-horizon とは何 step か」論文未明示) | bonsai 内部基準のみ比較可 | (i) max_iterations ≥ 8 を T6 必須条件と明文化 (ii) AgentFloor 論文 fetch 後 (Phase 4 までに) 定義校正 |
 | R4 | 1bit variance で tier 区別困難 (T4 と T5 overlap) | tier map noisy | k=3 → k=5 増 + 項目 200 RDC/VAF と 2D で見る |
-| R5 | SQLite V9 → V10 本番 DB 互換性 | 既存 .bonsai/db で ALTER TABLE 失敗 | migrate.rs 既存パターン (V8→V9) と同形、`PRAGMA user_version` チェック必須、Phase 2 migration test 必須 |
+| R5 | SQLite V10 → V11 本番 DB 互換性 | 既存 .bonsai/db で ALTER TABLE 失敗 | migrate.rs 既存パターン (V8→V9) と同形、`PRAGMA user_version` チェック必須、Phase 2 migration test 必須 |
 | R6 | TSV 21 列化で外部解析スクリプト破損 | grafana/jupyter notebook | 末尾追加で前 15 列 semantic 不変、column header で robust、CLAUDE.md 明記 |
 | R7 | 25 件再利用 task の `capability_tier` 判定誤り | tier 別計測信頼性低下 | Phase 1 test 3 で全 40 task 全 tag assert、PR レビューで 1 名 (code-reviewer agent) 再判定 |
 
@@ -281,7 +283,7 @@ BONSAI_BENCH_LADDER=1 ./target/release/bonsai --lab --lab-experiments 1
   - G-4a: 既存経路 1058 pass 維持
   - G-4b: 30 task smoke で全 tier ≥ 1 valid score
   - G-4c: 30 task k=3 baseline で T1 ≥ 0.50 かつ T6 ≥ 0.10
-- **G-5 Final**: AgentFloor tier map が Lab log 出力 + V10 + TSV 21 列 + handoff 起票 + CLAUDE.md 項目 209
+- **G-5 Final**: AgentFloor tier map が Lab log 出力 + V11 + TSV 21 列 + handoff 起票 + CLAUDE.md 項目 209
 
 ## 9. 完了条件
 1. ✅ `CapabilityTier` enum + `agentfloor_tasks()` 追加
@@ -289,7 +291,7 @@ BONSAI_BENCH_LADDER=1 ./target/release/bonsai --lab --lab-experiments 1
 3. ✅ T6 新規 5 task (合計 30 task)
 4. ✅ `tier_avg_scores` 集計実装
 5. ✅ `BONSAI_BENCH_LADDER=1` env で Lab 起動可
-6. ✅ SQLite V10 + TSV 21 列
+6. ✅ SQLite V11 + TSV 21 列 (★ ERL plan v2 が V10 を確保するため V11 に変更)
 7. ✅ Lab summary に tier map (4.5 形式)
 8. ✅ smoke G-4a/b/c 全 PASS
 9. ✅ 1063+ passed 維持
@@ -319,7 +321,7 @@ rtk cargo test --lib capability_tier  # compile error or fail
 
 # 2. Phase 2 Green
 $EDITOR src/agent/benchmark.rs   # CapabilityTier + tag + agentfloor_tasks + tier_avg_scores
-$EDITOR src/db/migrate.rs        # V9 → V10
+$EDITOR src/db/migrate.rs        # V10 → V11
 $EDITOR src/agent/experiment_log.rs
 rtk cargo test --lib  # 1063 passed
 
