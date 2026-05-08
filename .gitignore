@@ -12,3 +12,6 @@ logs/
 fizzbuzz/
 /main.rs
 FizzBuzz.rs
+# Python キャッシュ (scripts/lab_v17_*.py 等)
+__pycache__/
+*.pyc
