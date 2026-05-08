@@ -2542,6 +2542,135 @@ mod tests {
     // Phase 2 で signature を `&MemoryStore` に変更したら build green。
     // ========================================================================
 
+    // ========================================================================
+    // Phase 1 Red: AgentFloor 6-tier capability ladder tests (項目 213 候補)
+    //
+    // 由来: arxiv 2605.00334 AgentFloor — small open-weight 専用 6-tier benchmark
+    // (T1 InstructionFollowing → T6 LongHorizonPlanning)。本テストは plan
+    // `agentfloor-tier-eval-impl.md` の Phase 1 Red、CapabilityTier enum + tag +
+    // agentfloor_tasks + compute_capability_tier_avg 未実装で全 fail (compile error)。
+    // ========================================================================
+
+    #[test]
+    fn test_capability_tier_all_returns_six() {
+        // T1〜T6 の 6 tier を返す
+        let all = CapabilityTier::all();
+        assert_eq!(all.len(), 6, "AgentFloor 6-tier 必須");
+    }
+
+    #[test]
+    fn test_capability_tier_label_short_code_unique() {
+        let all = CapabilityTier::all();
+        let labels: std::collections::HashSet<&str> = all.iter().map(|t| t.label()).collect();
+        let codes: std::collections::HashSet<&str> = all.iter().map(|t| t.short_code()).collect();
+        assert_eq!(labels.len(), 6, "label 重複あり: {:?}", labels);
+        assert_eq!(codes.len(), 6, "short_code 重複あり: {:?}", codes);
+    }
+
+    #[test]
+    fn test_default_tasks_capability_tier_coverage() {
+        let suite = BenchmarkSuite::default_tasks();
+        // 全 task に capability_tier tag 付与
+        for task in &suite.tasks {
+            // capability_tier field の存在チェック (compile-time + 値チェック)
+            let _t: CapabilityTier = task.capability_tier;
+        }
+        // T1-T5 各 ≥ 1 件、T6 ≥ 2 件 (plan `agentfloor-tier-eval-impl.md` 4.2 移行戦略)
+        for tier in CapabilityTier::all() {
+            let count = suite
+                .tasks
+                .iter()
+                .filter(|t| t.capability_tier == tier)
+                .count();
+            let min_required = if tier == CapabilityTier::LongHorizonPlanning {
+                2
+            } else {
+                1
+            };
+            assert!(
+                count >= min_required,
+                "{:?} には最低 {} 件必要、実際 {} 件",
+                tier,
+                min_required,
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn test_agentfloor_tasks_30_count() {
+        let suite = BenchmarkSuite::agentfloor_tasks();
+        assert_eq!(suite.tasks.len(), 30, "AgentFloor は 30 task (5/tier × 6 tier)");
+        // 各 tier 正確に 5 件
+        for tier in CapabilityTier::all() {
+            let count = suite
+                .tasks
+                .iter()
+                .filter(|t| t.capability_tier == tier)
+                .count();
+            assert_eq!(
+                count, 5,
+                "AgentFloor 各 tier 5 task 規格、{:?} は {} 件",
+                tier, count
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_capability_tier_avg_basic() {
+        // 既存 compute_tier_avg パターン参照
+        let task_scores: Vec<MultiRunTaskScore> = vec![
+            MultiRunTaskScore::from_scores("t1_a".into(), vec![0.8, 0.9, 0.7], 0.5),
+            MultiRunTaskScore::from_scores("t1_b".into(), vec![0.6, 0.7, 0.5], 0.5),
+        ];
+        let descs = std::collections::HashMap::from([
+            (
+                "t1_a".to_string(),
+                BenchmarkTask {
+                    id: "t1_a".into(),
+                    name: "test t1_a".into(),
+                    input: "x".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec![],
+                    max_iterations: 5,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+            ),
+            (
+                "t1_b".to_string(),
+                BenchmarkTask {
+                    id: "t1_b".into(),
+                    name: "test t1_b".into(),
+                    input: "y".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec![],
+                    max_iterations: 5,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+            ),
+        ]);
+        let avg = compute_capability_tier_avg(
+            &task_scores,
+            &descs,
+            CapabilityTier::InstructionFollowing,
+        );
+        // T1 平均 = (0.8 + 0.6) / 2 = 0.7 (composite_score)
+        assert!(avg.is_some(), "T1 平均は計算可能");
+        let v = avg.unwrap();
+        assert!((v - 0.7).abs() < 1e-6, "T1 平均 0.7 期待、実際 {:.4}", v);
+        // 空 tier (T6) は None
+        let t6_avg = compute_capability_tier_avg(
+            &task_scores,
+            &descs,
+            CapabilityTier::LongHorizonPlanning,
+        );
+        assert!(t6_avg.is_none(), "T6 task ゼロで None 期待、実際 {:?}", t6_avg);
+    }
+
     #[allow(dead_code)]
     fn _phase1_red_run_k_signature_typecheck(
         suite: &BenchmarkSuite,
