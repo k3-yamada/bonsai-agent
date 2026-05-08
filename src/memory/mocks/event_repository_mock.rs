@@ -11,6 +11,7 @@ use anyhow::Result;
 
 use crate::agent::event_store::{
     Event, EventRepository, EventType, TrajectoryCandidate, build_trajectory_from_events,
+    classify_session_for_verification,
 };
 
 /// `Vec<Event>` 内蔵の test 用 mock。`Send + Sync` 互換のため `Mutex` でラップ。
@@ -162,10 +163,36 @@ impl EventRepository for MockEventRepository {
 
     fn verification_success_rate(
         &self,
-        _task_type: &str,
-        _min_samples: usize,
+        task_type: &str,
+        min_samples: usize,
     ) -> Result<Option<f64>> {
-        todo!("Phase 2 Green で in-memory events 走査 + task_type 分類 + 成功率計算")
+        // SessionStart event を持つ session_id 一覧 (id 昇順 distinct、SQL parity)
+        let session_ids = {
+            let events = self.events.lock().unwrap();
+            let mut seen = HashSet::new();
+            let mut result = Vec::new();
+            for e in events.iter() {
+                if e.event_type == "session_start" && seen.insert(e.session_id.clone()) {
+                    result.push(e.session_id.clone());
+                }
+            }
+            result
+        };
+        let mut samples = 0usize;
+        let mut successes = 0usize;
+        for sid in &session_ids {
+            let events = self.replay(sid)?;
+            if let Some(is_success) = classify_session_for_verification(&events, task_type) {
+                samples += 1;
+                if is_success {
+                    successes += 1;
+                }
+            }
+        }
+        if samples < min_samples {
+            return Ok(None);
+        }
+        Ok(Some(successes as f64 / samples as f64))
     }
 }
 

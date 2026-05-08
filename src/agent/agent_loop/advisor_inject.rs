@@ -5,6 +5,7 @@
 
 use crate::agent::conversation::{Message, Session};
 use crate::agent::error_recovery::{StructuredFeedback, TrialSummary};
+use crate::agent::event_store::{EventStore, classify_task_type};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
@@ -233,16 +234,6 @@ pub(super) fn inject_verification_step(
     true
 }
 
-/// task_context から task_type を deterministic 分類 (項目 210)。
-///
-/// 4 カテゴリ: `code_edit` / `code_read` / `shell_exec` / `other`。
-/// `verification_success_rate(task_type, ...)` の集計バケット決定に使用。
-///
-/// Phase 1 Red: `todo!()` stub。Phase 2 Green で regex / keyword で実装。
-fn classify_task_type(_task_context: &str) -> &'static str {
-    todo!("Phase 2 Green で regex / keyword 4 カテゴリ分類")
-}
-
 /// 経験ベース skip 判定 (項目 210 Self-Verification Dilemma)。
 ///
 /// Returns:
@@ -250,8 +241,6 @@ fn classify_task_type(_task_context: &str) -> &'static str {
 /// - `None` if no skip (threshold=0.0 default OR sample 不足 OR rate >= threshold)
 ///
 /// Default threshold=0.0 (OFF) で短絡 → 既存 1064 test の後方互換維持。
-/// Phase 1 Red: threshold > 0 ならば `todo!()` で fail (Red 確証)、
-/// Phase 2 Green で `EventRepository::verification_success_rate` 経由で実装。
 fn should_skip_verification(
     advisor: &AdvisorConfig,
     store: Option<&MemoryStore>,
@@ -260,8 +249,18 @@ fn should_skip_verification(
     if advisor.dynamic_skip_threshold <= 0.0 {
         return None;
     }
-    let _ = (store, task_context);
-    todo!("Phase 2 Green で EventRepository::verification_success_rate 経由 skip 判定")
+    let store = store?;
+    let task_type = classify_task_type(task_context);
+    let es = EventStore::new(store.conn());
+    let rate = es
+        .verification_success_rate(task_type, advisor.min_samples_for_skip)
+        .ok()
+        .flatten()?;
+    if rate < advisor.dynamic_skip_threshold {
+        Some((rate, advisor.dynamic_skip_threshold))
+    } else {
+        None
+    }
 }
 
 /// 複雑タスクに計画プレステップを注入
@@ -355,18 +354,56 @@ mod verify_skip_tests {
         a
     }
 
+    /// 検証履歴を seed (code_edit task_type、`n_success` 件成功 / `n_fail` 件失敗)。
+    /// 成功 = AssistantMessage[last] に `[検証済]` + ToolCallEnd success:true。
+    fn seed_verification_history(store: &MemoryStore, n_success: usize, n_fail: usize) {
+        let es = EventStore::new(store.conn());
+        for i in 0..(n_success + n_fail) {
+            let sid = format!("hist{i}");
+            let success = i < n_success;
+            es.append(&sid, &EventType::SessionStart, "{}", None)
+                .unwrap();
+            es.append(
+                &sid,
+                &EventType::UserMessage,
+                r#"{"content":"実装してください"}"#,
+                None,
+            )
+            .unwrap();
+            es.append(
+                &sid,
+                &EventType::ToolCallStart,
+                r#"{"tool":"file_write"}"#,
+                Some(0),
+            )
+            .unwrap();
+            let payload = format!(r#"{{"tool":"file_write","success":{success}}}"#);
+            es.append(&sid, &EventType::ToolCallEnd, &payload, Some(0))
+                .unwrap();
+            let answer = if success {
+                "完了 [検証済]"
+            } else {
+                "失敗"
+            };
+            let asst = format!(r#"{{"content":"{answer}"}}"#);
+            es.append(&sid, &EventType::AssistantMessage, &asst, None)
+                .unwrap();
+            es.append(&sid, &EventType::SessionEnd, "{}", None).unwrap();
+        }
+    }
+
     #[test]
     fn test_inject_verification_step_skip_with_low_rate() {
-        // threshold=0.4 + 過去 5 件全失敗 verification → skip 発火 (return false)
-        // Phase 1 Red: should_skip_verification の todo!() で panic
+        // threshold=0.4 + 過去 5 件全失敗 verification → rate=0.0 < 0.4 → skip 発火
         let store = MemoryStore::in_memory().unwrap();
+        seed_verification_history(&store, 0, 5); // 0 success / 5 fail
         let mut session = Session::new();
         let mut advisor = make_advisor_with_threshold(0.4);
         let trial = TrialSummary::default();
         let result = inject_verification_step(
             &mut session,
             &mut advisor,
-            "実装してください", // detect_task_complexity=true
+            "ファイルを修正してテストを書いてください", // 2 signals + code_edit
             "wip answer (no marker)",
             1,
             10,
@@ -378,16 +415,16 @@ mod verify_skip_tests {
 
     #[test]
     fn test_inject_verification_step_no_skip_with_insufficient_samples() {
-        // sample 不足 (3 件、min=5) → None → 既存挙動 (検証 step 注入)
-        // Phase 1 Red: should_skip_verification の todo!() で panic
+        // sample 不足 (3 件、min_samples=5) → None → 既存挙動 (検証 step 注入)
         let store = MemoryStore::in_memory().unwrap();
+        seed_verification_history(&store, 0, 3); // 3 fail のみ
         let mut session = Session::new();
         let mut advisor = make_advisor_with_threshold(0.4);
         let trial = TrialSummary::default();
         let result = inject_verification_step(
             &mut session,
             &mut advisor,
-            "実装してください",
+            "ファイルを修正してテストを書いてください",
             "wip answer",
             1,
             10,
@@ -400,22 +437,21 @@ mod verify_skip_tests {
     #[test]
     fn test_inject_verification_step_emits_audit_log_on_skip() {
         // skip 発火時 AuditAction::AdvisorSkip が audit_log に書き込まれる
-        // Phase 1 Red: should_skip_verification の todo!() で panic
         let store = MemoryStore::in_memory().unwrap();
+        seed_verification_history(&store, 0, 5);
         let mut session = Session::new();
         let mut advisor = make_advisor_with_threshold(0.4);
         let trial = TrialSummary::default();
         let _ = inject_verification_step(
             &mut session,
             &mut advisor,
-            "実装してください",
+            "ファイルを修正してテストを書いてください",
             "wip",
             1,
             10,
             Some(&store),
             &trial,
         );
-        // Phase 2 Green で skip 発火後 audit_log に "advisor_skip" row を確認
         let audit = AuditLog::new(store.conn());
         let recent = audit.recent(10).unwrap();
         assert!(
@@ -462,7 +498,11 @@ mod verify_skip_tests {
             let payload = format!(r#"{{"tool":"file_write","success":{success}}}"#);
             mock.append(&sid, &EventType::ToolCallEnd, &payload, Some(0))
                 .unwrap();
-            let answer = if success { "完了 [検証済]" } else { "失敗" };
+            let answer = if success {
+                "完了 [検証済]"
+            } else {
+                "失敗"
+            };
             let asst = format!(r#"{{"content":"{answer}"}}"#);
             mock.append(&sid, &EventType::AssistantMessage, &asst, None)
                 .unwrap();
@@ -473,10 +513,7 @@ mod verify_skip_tests {
             .verification_success_rate("code_edit", 5)
             .unwrap()
             .expect("5 sample 揃えば Some");
-        assert!(
-            (rate - 0.6).abs() < 0.01,
-            "expected 3/5=0.6, got {rate}"
-        );
+        assert!((rate - 0.6).abs() < 0.01, "expected 3/5=0.6, got {rate}");
     }
 
     // === SQLite + Mock parity ===
@@ -515,7 +552,11 @@ mod verify_skip_tests {
                 backend
                     .append(&sid, &EventType::ToolCallEnd, &payload, Some(0))
                     .unwrap();
-                let answer = if success { "完了 [検証済]" } else { "失敗" };
+                let answer = if success {
+                    "完了 [検証済]"
+                } else {
+                    "失敗"
+                };
                 let asst = format!(r#"{{"content":"{answer}"}}"#);
                 backend
                     .append(&sid, &EventType::AssistantMessage, &asst, None)

@@ -181,14 +181,29 @@ impl<'a> EventStore<'a> {
 
     /// 検証 step 経験的成功率 (項目 210、Self-Verification Dilemma)。
     ///
-    /// Phase 1 Red: `todo!()` stub。Phase 2 Green で events から task_type 分類 +
-    /// FinalAnswer に `[検証済]` 含有 + ToolCallEnd error_count = 0 で「成功」判定。
+    /// 過去全 SessionEnd 済 session のうち、`task_type` に分類されるものを集計し、
+    /// 「成功」 = AssistantMessage[last] に `[検証済]` 含有 AND 全 ToolCallEnd 成功
+    /// と定義した比率を返す。sample 数が `min_samples` 未満なら `None` (cold-start)。
     pub fn verification_success_rate(
         &self,
-        _task_type: &str,
-        _min_samples: usize,
+        task_type: &str,
+        min_samples: usize,
     ) -> Result<Option<f64>> {
-        todo!("Phase 2 Green で events 走査 + task_type 分類 + 成功率計算")
+        let session_ids: Vec<String> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT session_id FROM events
+                 WHERE event_type = 'session_start'
+                 ORDER BY id",
+            )?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let (samples, successes) =
+            aggregate_verification_outcomes(&session_ids, task_type, |sid| self.replay(sid))?;
+        if samples < min_samples {
+            return Ok(None);
+        }
+        Ok(Some(successes as f64 / samples as f64))
     }
 
     /// 現時点での `events` テーブルの `MAX(id)` を返す (events 空なら 0)。
@@ -334,6 +349,95 @@ pub(crate) fn build_trajectory_from_events(
     })
 }
 
+/// task_context から task_type を deterministic 分類 (項目 210)。
+///
+/// 4 カテゴリ: `code_edit` / `code_read` / `shell_exec` / `other`。優先順位は
+/// **shell_exec → code_edit → code_read → other** (「実行」が最強指標、「実装」も
+/// code_edit 扱い、「確認/読」は code_read fallback)。
+pub(crate) fn classify_task_type(task_context: &str) -> &'static str {
+    if task_context.contains("実行") || task_context.contains("コマンド") {
+        return "shell_exec";
+    }
+    if task_context.contains("編集")
+        || task_context.contains("修正")
+        || task_context.contains("変更")
+        || task_context.contains("リファクタ")
+        || task_context.contains("実装")
+    {
+        return "code_edit";
+    }
+    if task_context.contains("読") || task_context.contains("確認") || task_context.contains("見て")
+    {
+        return "code_read";
+    }
+    "other"
+}
+
+/// 1 session の events から検証成功 (Verification Dilemma 文脈) 判定 (項目 210)。
+///
+/// Returns:
+/// - `Some(true)`  — task_type 一致 + SessionEnd 済 + AssistantMessage[last] に
+///   `[検証済]` 含有 + 全 ToolCallEnd success → 成功 sample
+/// - `Some(false)` — task_type 一致 + SessionEnd 済 だが上記成功条件不満足 → 失敗 sample
+/// - `None` — task_type 不一致 / SessionEnd 不在 → sample 対象外
+pub(crate) fn classify_session_for_verification(
+    events: &[Event],
+    target_task_type: &str,
+) -> Option<bool> {
+    if !events.iter().any(|e| e.event_type == "session_end") {
+        return None;
+    }
+    let task_ctx = events
+        .iter()
+        .find(|e| e.event_type == "user_message")
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.event_data).ok())
+        .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_default();
+    if classify_task_type(&task_ctx) != target_task_type {
+        return None;
+    }
+    let last_assistant_marker = events
+        .iter()
+        .rfind(|e| e.event_type == "assistant_message")
+        .and_then(|e| serde_json::from_str::<serde_json::Value>(&e.event_data).ok())
+        .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+        .map(|s| s.contains("[検証済]"))
+        .unwrap_or(false);
+    let all_tools_ok = events
+        .iter()
+        .filter(|e| e.event_type == "tool_call_end")
+        .all(|e| {
+            serde_json::from_str::<serde_json::Value>(&e.event_data)
+                .ok()
+                .and_then(|v| v.get("success").and_then(|s| s.as_bool()))
+                .unwrap_or(false)
+        });
+    Some(last_assistant_marker && all_tools_ok)
+}
+
+/// session_ids を順に走査して `(samples, successes)` を集計 (項目 210)。
+///
+/// `replay_fn` で session ごとの events を取得 (SQLite/Mock 両対応)。
+/// `classify_session_for_verification` の結果を集計、None は対象外。
+fn aggregate_verification_outcomes(
+    session_ids: &[String],
+    task_type: &str,
+    mut replay_fn: impl FnMut(&str) -> Result<Vec<Event>>,
+) -> Result<(usize, usize)> {
+    let mut samples = 0usize;
+    let mut successes = 0usize;
+    for sid in session_ids {
+        let events = replay_fn(sid)?;
+        if let Some(is_success) = classify_session_for_verification(&events, task_type) {
+            samples += 1;
+            if is_success {
+                successes += 1;
+            }
+        }
+    }
+    Ok((samples, successes))
+}
+
 /// 成功軌跡候補（スキル昇格元）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TrajectoryCandidate {
@@ -442,11 +546,8 @@ pub trait EventRepository {
     ///
     /// 用途: `AdvisorConfig::dynamic_skip_threshold` と比較して
     /// `inject_verification_step` の skip 判断に使用。
-    fn verification_success_rate(
-        &self,
-        task_type: &str,
-        min_samples: usize,
-    ) -> Result<Option<f64>>;
+    fn verification_success_rate(&self, task_type: &str, min_samples: usize)
+    -> Result<Option<f64>>;
 }
 
 impl<'a> EventRepository for EventStore<'a> {
