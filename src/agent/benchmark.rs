@@ -34,6 +34,68 @@ pub enum TaskTier {
     Extended,
 }
 
+/// AgentFloor 6-tier capability ladder (項目 213 候補、arxiv 2605.00334)。
+///
+/// 直交軸: `TaskTier` (Core/Extended、項目 172) は「実装年代」、本 enum は「能力梯子」。
+/// Phase 2 Green は最小 stub: enum + 4 method のみ。`agentfloor_tasks()` /
+/// `compute_capability_tier_avg` は別 plan で実装される (現状: empty / None stub)。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
+pub enum CapabilityTier {
+    #[default]
+    InstructionFollowing, // T1
+    SingleToolUse,           // T2
+    ToolSelection,           // T3
+    MultiStepToolChain,      // T4
+    ErrorRecovery,           // T5
+    LongHorizonPlanning,     // T6
+}
+
+impl CapabilityTier {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::InstructionFollowing => "T1-Instruct",
+            Self::SingleToolUse => "T2-SingleTool",
+            Self::ToolSelection => "T3-ToolSelect",
+            Self::MultiStepToolChain => "T4-MultiStep",
+            Self::ErrorRecovery => "T5-ErrorRecov",
+            Self::LongHorizonPlanning => "T6-LongHorizon",
+        }
+    }
+
+    pub fn short_code(self) -> &'static str {
+        match self {
+            Self::InstructionFollowing => "t1i",
+            Self::SingleToolUse => "t2s",
+            Self::ToolSelection => "t3x",
+            Self::MultiStepToolChain => "t4m",
+            Self::ErrorRecovery => "t5e",
+            Self::LongHorizonPlanning => "t6l",
+        }
+    }
+
+    pub fn all() -> [CapabilityTier; 6] {
+        [
+            Self::InstructionFollowing,
+            Self::SingleToolUse,
+            Self::ToolSelection,
+            Self::MultiStepToolChain,
+            Self::ErrorRecovery,
+            Self::LongHorizonPlanning,
+        ]
+    }
+
+    pub fn paper_baseline(self) -> f64 {
+        match self {
+            Self::InstructionFollowing => 0.85,
+            Self::SingleToolUse => 0.75,
+            Self::ToolSelection => 0.65,
+            Self::MultiStepToolChain => 0.50,
+            Self::ErrorRecovery => 0.45,
+            Self::LongHorizonPlanning => 0.30,
+        }
+    }
+}
+
 /// 単一のベンチマークタスク定義
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkTask {
@@ -47,6 +109,10 @@ pub struct BenchmarkTask {
     /// tier (項目 172 P1: ベンチマーク階層分離)。旧データとの serde 互換のため default を持つ。
     #[serde(default)]
     pub tier: TaskTier,
+    /// AgentFloor capability tier (項目 213 候補、Phase 2 Green stub)。
+    /// serde default で旧データ互換、未指定時は T1 (InstructionFollowing)。
+    #[serde(default)]
+    pub capability_tier: CapabilityTier,
 }
 
 /// タスク実行結果のスコア
@@ -421,6 +487,22 @@ fn compute_tier_avg(
     }
 }
 
+/// CapabilityTier 別平均 mean_score を算出 (項目 213 候補、AgentFloor Phase 2 Green stub)。
+///
+/// `task_scores` の各 score について、`task_descs` から `capability_tier` を引いて
+/// 指定 tier に一致する task の mean_score 平均を返す。該当 tier の task が 1 件も
+/// ないなら None を返す。
+///
+/// **Phase 2 Green stub**: 現状 None を返すのみ (test FAIL = Red 維持)。
+/// 完全実装は AgentFloor 専用 plan で行う (本 ERL plan v2 着手のための最小 stub)。
+pub(crate) fn compute_capability_tier_avg(
+    _task_scores: &[MultiRunTaskScore],
+    _task_descs: &std::collections::HashMap<String, BenchmarkTask>,
+    _tier: CapabilityTier,
+) -> Option<f64> {
+    None
+}
+
 impl MultiRunBenchmarkResult {
     /// 全タスクの平均pass_at_k
     pub fn composite_pass_at_k(&self) -> f64 {
@@ -559,6 +641,14 @@ impl BenchmarkSuite {
         }
     }
 
+    /// AgentFloor 専用 30 task suite (項目 213 候補、Phase 2 Green stub)。
+    ///
+    /// **Phase 2 Green stub**: 現状 empty Self を返すのみ (test FAIL = Red 維持)。
+    /// 完全実装は AgentFloor 専用 plan で行う (本 ERL plan v2 着手のための最小 stub)。
+    pub fn agentfloor_tasks() -> Self {
+        Self { tasks: vec![] }
+    }
+
     /// デフォルトのベンチマークタスクセット（40タスク）
     pub fn default_tasks() -> Self {
         Self {
@@ -572,6 +662,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "shell_ls".into(),
@@ -582,6 +673,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "git_status".into(),
@@ -592,6 +684,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "multi_step_write_read".into(),
@@ -602,6 +695,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "reasoning_calc".into(),
@@ -612,6 +706,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "error_recovery".into(),
@@ -622,6 +717,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "tool_selection_git".into(),
@@ -632,6 +728,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ToolSelection,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "direct_answer".into(),
@@ -642,6 +739,7 @@ impl BenchmarkSuite {
                     max_iterations: 2,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "code_gen_fizzbuzz".into(),
@@ -652,6 +750,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::CodeGeneration,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "multi_step_field_count".into(),
@@ -662,6 +761,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "error_handling_nonexistent".into(),
@@ -672,6 +772,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // handoff 05-07g Phase 5 Phase 4: AgentHER failed パス検証用 smoke task
                 // 2 つの非存在ファイルを **両方とも** 読ませ、tool_success_rate=0 < 0.8 と
@@ -695,6 +796,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // handoff 05-07h 後継: AgentHER HSL relabel 実機実証用 mixed-success task。
                 // existing file (Cargo.toml) と nonexistent file を **両方** 読ませることで:
@@ -719,6 +821,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "summarize_agent_loop".into(),
@@ -729,6 +832,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::Summarization,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "repo_structure".into(),
@@ -739,6 +843,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "multi_file_compare".into(),
@@ -749,6 +854,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "conditional_file_op".into(),
@@ -759,6 +865,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "code_review".into(),
@@ -769,6 +876,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::Summarization,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- 追加タスク（変異評価の多様性向上） ---
                 BenchmarkTask {
@@ -780,6 +888,7 @@ impl BenchmarkSuite {
                     max_iterations: 6,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "git_diff_analysis".into(),
@@ -790,6 +899,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "error_recovery_permission".into(),
@@ -800,6 +910,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "reasoning_json_parse".into(),
@@ -810,6 +921,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "code_gen_sort".into(),
@@ -820,6 +932,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::CodeGeneration,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "multi_file_search".into(),
@@ -830,6 +943,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // ============================================================
                 // Phase C 追加タスク（22→40, .claude/plan/phase-c-and-refactor-draft.md Part 1）
@@ -846,6 +960,7 @@ impl BenchmarkSuite {
                     max_iterations: 8,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "sig_change_4files".into(),
@@ -856,6 +971,7 @@ impl BenchmarkSuite {
                     max_iterations: 8,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- LongRun (×2) -------------------------------------------
                 BenchmarkTask {
@@ -867,6 +983,7 @@ impl BenchmarkSuite {
                     max_iterations: 10,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "implement_50steps".into(),
@@ -877,6 +994,7 @@ impl BenchmarkSuite {
                     max_iterations: 6,
                     category: TaskCategory::CodeGeneration,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- ToolChain (×2) -----------------------------------------
                 BenchmarkTask {
@@ -888,6 +1006,7 @@ impl BenchmarkSuite {
                     max_iterations: 8,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "grep_multiedit".into(),
@@ -898,6 +1017,7 @@ impl BenchmarkSuite {
                     max_iterations: 6,
                     category: TaskCategory::MultiStep,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- ErrorRecovery (×2) -------------------------------------
                 BenchmarkTask {
@@ -909,6 +1029,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "corrupt_file_repair".into(),
@@ -919,6 +1040,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ErrorRecovery,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- McpInteg (×2) — MCP 未接続時はツール不在で keyword 評価のみ ---
                 BenchmarkTask {
@@ -930,6 +1052,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "mcp_search_replace".into(),
@@ -940,6 +1063,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- Semantic (×2) — 曖昧な指示への構造化応答 ---------------
                 BenchmarkTask {
@@ -951,6 +1075,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "refactor_intent".into(),
@@ -961,6 +1086,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- Reasoning (×2) -----------------------------------------
                 BenchmarkTask {
@@ -972,6 +1098,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "ambiguous_calc".into(),
@@ -982,6 +1109,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- Summarization (×2) -------------------------------------
                 BenchmarkTask {
@@ -993,6 +1121,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::Summarization,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "git_log_summary".into(),
@@ -1003,6 +1132,7 @@ impl BenchmarkSuite {
                     max_iterations: 5,
                     category: TaskCategory::Summarization,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 // --- Verification (×2) — 自己検証 / 事実確認 ----------------
                 BenchmarkTask {
@@ -1014,6 +1144,7 @@ impl BenchmarkSuite {
                     max_iterations: 3,
                     category: TaskCategory::Reasoning,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
                 BenchmarkTask {
                     id: "tool_fact_check".into(),
@@ -1024,6 +1155,7 @@ impl BenchmarkSuite {
                     max_iterations: 4,
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Extended,
+                    capability_tier: CapabilityTier::InstructionFollowing,
                 },
             ],
         }
@@ -1490,6 +1622,7 @@ mod tests {
             max_iterations: 1,
             category: TaskCategory::ToolUse,
             tier,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let tasks = vec![
             make_task("c1", TaskTier::Core),
@@ -1569,6 +1702,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::Reasoning,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result("hello there", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1587,6 +1721,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::Reasoning,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result("2の10乗は1024です", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1604,6 +1739,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::ToolUse,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result("READMEの内容は...", vec!["file_read"], 2);
         let score = evaluate_task_response(&task, &result);
@@ -1622,6 +1758,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::ToolUse,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result("エラーが発生しました", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -1639,6 +1776,7 @@ mod tests {
             max_iterations: 5,
             category: TaskCategory::Reasoning,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let fast = mock_result("ok", vec![], 1);
         let slow = mock_result("ok", vec![], 4);
@@ -1661,6 +1799,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::MultiStep,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let partial = mock_result("ok", vec!["shell"], 1);
         let full = mock_result("ok", vec!["shell", "file_read"], 1);
@@ -1968,6 +2107,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::CodeGeneration,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // FizzBuzz出力を含む回答 → 全キーワードヒット
         let result = mock_result(
@@ -1993,6 +2133,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::CodeGeneration,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // fizzのみ含む回答 → 部分ヒット
         let result = mock_result("fizz only", vec![], 1);
@@ -2014,6 +2155,7 @@ mod tests {
             max_iterations: 5,
             category: TaskCategory::MultiStep,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // 数値を含む回答 → 成功
         let result = mock_result(
@@ -2039,6 +2181,7 @@ mod tests {
             max_iterations: 5,
             category: TaskCategory::MultiStep,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // 数値なし回答 → 失敗
         let result = mock_result("フィールドがいくつかあります", vec!["file_read"], 2);
@@ -2060,6 +2203,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::ErrorRecovery,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // エラー報告を含む回答 → 成功
         let result = mock_result(
@@ -2085,6 +2229,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::ErrorRecovery,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // エラー報告なし → 失敗
         let result = mock_result("ファイルの内容は以下の通りです", vec!["file_read"], 1);
@@ -2106,6 +2251,7 @@ mod tests {
             max_iterations: 4,
             category: TaskCategory::Summarization,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // 50文字以上の回答 → 成功
         let long_answer = "このファイルはエージェントループの主要な実装を含んでおり、Reflexionパターンを使用して自律的な推論と行動のサイクルを管理しています。";
@@ -2128,6 +2274,7 @@ mod tests {
             max_iterations: 4,
             category: TaskCategory::Summarization,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         // 短すぎる回答 → 部分スコア
         let result = mock_result("ループ処理です", vec!["file_read"], 1);
@@ -2165,6 +2312,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::CodeGeneration,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result("FizzBuzz: Fizz, Buzz, FizzBuzz", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -2263,6 +2411,7 @@ mod tests {
             max_iterations: 4,
             category: TaskCategory::ErrorRecovery,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result(
             "permission deniedエラーが発生しました。書き込みできません",
@@ -2288,6 +2437,7 @@ mod tests {
             max_iterations: 3,
             category: TaskCategory::Reasoning,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result("nameフィールドの値は\"bonsai\"です", vec![], 1);
         let score = evaluate_task_response(&task, &result);
@@ -2309,6 +2459,7 @@ mod tests {
             max_iterations: 5,
             category: TaskCategory::CodeGeneration,
             tier: TaskTier::Core,
+            capability_tier: CapabilityTier::InstructionFollowing,
         };
         let result = mock_result(
             "fn bubble_sort(mut vec: Vec<i32>) -> Vec<i32> { /* sort logic */ }",
