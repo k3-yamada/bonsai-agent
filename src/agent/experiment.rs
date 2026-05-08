@@ -2378,4 +2378,96 @@ mod tests {
             summary.skills_promoted
         );
     }
+
+    // ===== Phase 5: Self-Verification Dilemma — AdvisorThreshold variant tests (TDD Red) =====
+    //
+    // 項目 211 候補: 項目 210 で実装した AdvisorConfig::dynamic_skip_threshold を Lab variant pool
+    // に投入するための MutationAction::SetAdvisorThreshold 拡張。SetTemperature(f64) と同型。
+
+    #[test]
+    fn t_phase5_apply_mutation_set_advisor_threshold() {
+        let config = make_config();
+        // baseline では default (0.0、項目 210 の default OFF)
+        assert_eq!(config.advisor.dynamic_skip_threshold, 0.0);
+
+        let mutation = Mutation {
+            mutation_type: MutationType::AgentParam,
+            detail: "advisor.dynamic_skip_threshold: 0.4".into(),
+            apply: MutationAction::SetAdvisorThreshold(0.4),
+            theme: MutationTheme::Precision,
+        };
+        let modified = apply_mutation(&config, &mutation);
+        assert!((modified.advisor.dynamic_skip_threshold - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_phase5_apply_mutation_set_advisor_threshold_preserves_others() {
+        let config = make_config();
+        let baseline_min_samples = config.advisor.min_samples_for_skip;
+        let baseline_max_iter = config.max_iterations;
+
+        let mutation = Mutation {
+            mutation_type: MutationType::AgentParam,
+            detail: "advisor.dynamic_skip_threshold: 0.5".into(),
+            apply: MutationAction::SetAdvisorThreshold(0.5),
+            theme: MutationTheme::Precision,
+        };
+        let modified = apply_mutation(&config, &mutation);
+        // threshold のみ変動、他の AdvisorConfig フィールド + AgentConfig フィールドは保持
+        assert!((modified.advisor.dynamic_skip_threshold - 0.5).abs() < 1e-9);
+        assert_eq!(modified.advisor.min_samples_for_skip, baseline_min_samples);
+        assert_eq!(modified.max_iterations, baseline_max_iter);
+        assert_eq!(modified.system_prompt, config.system_prompt);
+    }
+
+    #[test]
+    fn t_phase5_param_mutations_includes_advisor_threshold_variants() {
+        let params = param_mutations();
+        let threshold_values: Vec<f64> = params
+            .iter()
+            .filter_map(|p| match p.action {
+                MutationAction::SetAdvisorThreshold(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            threshold_values.len(),
+            3,
+            "param_mutations() に SetAdvisorThreshold 3 件 (0.3/0.4/0.5) が必要、実際: {:?}",
+            threshold_values
+        );
+        assert!(threshold_values.iter().any(|t| (*t - 0.3).abs() < 1e-9));
+        assert!(threshold_values.iter().any(|t| (*t - 0.4).abs() < 1e-9));
+        assert!(threshold_values.iter().any(|t| (*t - 0.5).abs() < 1e-9));
+    }
+
+    #[test]
+    fn t_phase5_next_mutation_with_focus_advisor_threshold() {
+        let mut hyp_gen = HypothesisGenerator::default();
+        // focus="advisor_threshold" で 3 連続呼出すべて SetAdvisorThreshold variant
+        let m0 = hyp_gen.next_mutation_with_focus(0, Some("advisor_threshold"));
+        let m1 = hyp_gen.next_mutation_with_focus(1, Some("advisor_threshold"));
+        let m2 = hyp_gen.next_mutation_with_focus(2, Some("advisor_threshold"));
+        for (i, m) in [&m0, &m1, &m2].iter().enumerate() {
+            assert!(
+                matches!(m.apply, MutationAction::SetAdvisorThreshold(_)),
+                "focus filter で {} 回目に SetAdvisorThreshold 以外: {:?}",
+                i,
+                m.apply
+            );
+        }
+        // 3 件で 0.3/0.4/0.5 すべて網羅 (順不同 dedup 確認)
+        let mut seen: Vec<f64> = [&m0, &m1, &m2]
+            .iter()
+            .filter_map(|m| match m.apply {
+                MutationAction::SetAdvisorThreshold(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        seen.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(seen.len(), 3);
+        assert!((seen[0] - 0.3).abs() < 1e-9);
+        assert!((seen[1] - 0.4).abs() < 1e-9);
+        assert!((seen[2] - 0.5).abs() < 1e-9);
+    }
 }
