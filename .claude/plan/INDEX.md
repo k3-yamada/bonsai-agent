@@ -70,8 +70,9 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 |---|---|---|---|
 | `cerememory-decay-port-impl.md` | `co-r-e/cerememory` ADR-005 (commit b08d201、MIT) | 0.5 day | Lab v18 paired t-test (decay ON/OFF) で Δscore ≥ +0.015 |
 | `cerememory-review-state-v12-impl.md` | `co-r-e/cerememory` ADR-011 (Strength/Freshness 分離) | 1.5 day | Lab v19 paired t-test (freshness gate ON/OFF) で Δscore ≥ +0.015 |
+| `cerememory-extension-roadmap-d-g.md` | Cerememory 5-store + 周辺機構の bonsai 取込み master roadmap (Phase D Emotional / E MCP / F Audit hashchain / G Working memory cap) | planning-only (1.5h、各 Phase 個別 plan は採否ゲート後展開) | Lab v17/v18/v19 結果に応じ Phase D-G 優先順動的決定 |
 
-両 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)、Lab v17 完了後着手必須。
+3 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)、Lab v17 完了後着手必須。
 
 ## メンテナンス方針
 
