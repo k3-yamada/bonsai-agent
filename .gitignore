@@ -12,6 +12,12 @@ logs/
 fizzbuzz/
 /main.rs
 FizzBuzz.rs
+bubble_sort.rs
 # Python キャッシュ (scripts/lab_v17_*.py 等)
 __pycache__/
 *.pyc
+# Lab cycle 一時ログ (paired t-test / Phase 4 G-4.2 等の測定出力)
+lab-v17-logs/
+lab-v18-logs/
+lab-v19-logs/
+lab-v20-logs/

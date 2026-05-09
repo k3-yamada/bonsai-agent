@@ -108,6 +108,24 @@ cargo run -- --evolve                  # arxiv収集+自己改善
 cargo run -- --server-url <URL>        # カスタムサーバーURL
 ```
 
+## ビルド feature flags
+
+`Cargo.toml` の `default = ["cli", "tree-sitter", "embeddings"]` で **3 機能すべてデフォルト ON**。`cargo build` / `cargo run` では追加 flag 不要で本格構成 (sqlite-vec vec0 KNN + fastembed + tree-sitter) が有効。
+
+| feature | 内容 | デフォルト |
+|---|---|---|
+| `cli` | clap CLI flags | ✅ ON |
+| `tree-sitter` | RepoMap (Rust/Python/TS/JS/Go) | ✅ ON |
+| `embeddings` | fastembed (AllMiniLML6V2) + sqlite-vec vec0 ANN 検索 | ✅ ON |
+
+**hash-only / 軽量 build** (CI、test、組込み等) は明示的に opt-out:
+
+```bash
+cargo build --release --no-default-features --features cli,tree-sitter
+```
+
+この場合 `HybridSearch::vector_search` は線形 scan path に切替 (compile-time exclusive、ランタイム分岐なし)。embedding は SimpleEmbedder (ハッシュベース) のため semantic search は機能しないが、ビルド/テストは完走する。
+
 ## ツール
 
 | ツール | 権限 | 機能 |
