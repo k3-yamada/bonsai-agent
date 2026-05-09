@@ -12,8 +12,10 @@
 //! - `HeuristicStore::prune` で decay-adjusted score 経路を opt-in 提供
 //! - `BONSAI_DECAY_ENABLED=1` で有効化、unset で legacy 経路 (default OFF)
 //!
-//! ## Phase 1 Red 段階
-//! `compute_*` 4 関数は `todo!()` stub。Phase 2 Green で逐語 port する。
+//! ## License
+//! 本ファイルは MIT License で配布される Cerememory プロジェクトの
+//! `cerememory-decay/src/math.rs` から逐語 port。MIT 全文は
+//! `docs/THIRD_PARTY_LICENSES.md` を参照。
 
 /// `BONSAI_DECAY_ENABLED=1` (or "true"、case-insensitive) で decay 経路 opt-in。
 ///
