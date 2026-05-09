@@ -28,15 +28,20 @@ use crate::runtime::inference::LlmBackend;
 /// Reflection prompt template (`prompts/heuristic_reflection.txt`、compile-time embed)。
 const REFLECTION_PROMPT_TEMPLATE: &str = include_str!("../../prompts/heuristic_reflection.txt");
 
-/// `BONSAI_ERL_DISABLED=1` (or "true"、case-insensitive) で ERL 機構全体を short-circuit。
+/// `BONSAI_ERL_ENABLED=1` (or "true"、case-insensitive) で ERL 機構全体を opt-in。
 ///
-/// - production default = env unset = false 返却 = 通常動作 (項目 213 ON)
-/// - Lab v17 OFF variant: `BONSAI_ERL_DISABLED=1` で `inject_heuristics` +
-///   `run_heuristics_pass` を一括 skip し、effectiveness paired t-test の
-///   コントロール cycle として機能する (plan v17 §4.1)
-/// - 値が "0" / "false" / 空文字列など `1`/`true` 以外なら disabled 扱いせず false
-pub(crate) fn is_erl_disabled() -> bool {
-    std::env::var("BONSAI_ERL_DISABLED")
+/// - production default = env unset = false 返却 = OFF (項目 216、Lab v17 REJECT 反映)
+/// - opt-in 復活: `BONSAI_ERL_ENABLED=1` で `inject_heuristics` +
+///   `run_heuristics_pass` を有効化、項目 213 (Phase 2 Green) 動作の再現用
+/// - 値が "0" / "false" / 空文字列など `1`/`true` 以外なら enabled 扱いせず false
+///
+/// 切替経緯: Lab v17 effectiveness 検証 (項目 215) で paired t-test
+/// Δmean=−0.0014 / p=0.5072 → ACCEPT 基準 (Δ≥+0.015 AND p<0.1) 両条件未達で
+/// REJECT 確定。H_ERL 仮説棄却を受け production default を ON → OFF に切替。
+/// 副次 finding (stability 軸 ON 優位) は Plan B (ReviewState V12) で別軸対応。
+/// dead-code 化は将来別 plan、env=1 で復活可能性を残す。
+pub(crate) fn is_erl_enabled() -> bool {
+    std::env::var("BONSAI_ERL_ENABLED")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -863,7 +868,10 @@ mod tests {
     // ===========================================================================
 
     // ===========================================================================
-    // is_erl_disabled toggle (Lab v17 Phase 1 Red、env BONSAI_ERL_DISABLED)
+    // is_erl_enabled toggle (項目 216 defaults OFF 切替、env BONSAI_ERL_ENABLED)
+    //
+    // Lab v17 REJECT (項目 215) を受け production default を OFF に切替。
+    // env=1 で opt-in 復活 (項目 213 動作の再現可能性を維持)。
     //
     // env mutation race を避けるため module-local Mutex で serialize する
     // (smoke_correction tests と同パターン、serial_test crate を増やさない方針)。
@@ -873,53 +881,56 @@ mod tests {
 
     fn reset_erl_env() {
         unsafe {
-            std::env::remove_var("BONSAI_ERL_DISABLED");
+            std::env::remove_var("BONSAI_ERL_ENABLED");
         }
     }
 
     #[test]
-    fn t_is_erl_disabled_default_unset() {
+    fn t_is_erl_enabled_default_unset() {
         let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_erl_env();
         assert!(
-            !is_erl_disabled(),
-            "env unset で false (production default = enabled)"
+            !is_erl_enabled(),
+            "env unset で false (production default = OFF、項目 216)"
         );
     }
 
     #[test]
-    fn t_is_erl_disabled_explicit_1() {
+    fn t_is_erl_enabled_explicit_1() {
         let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_erl_env();
         unsafe {
-            std::env::set_var("BONSAI_ERL_DISABLED", "1");
+            std::env::set_var("BONSAI_ERL_ENABLED", "1");
         }
-        assert!(is_erl_disabled(), "env=1 で true (Lab v17 OFF variant)");
+        assert!(
+            is_erl_enabled(),
+            "env=1 で true (opt-in 復活 = 項目 213 動作)"
+        );
         reset_erl_env();
     }
 
     #[test]
-    fn t_is_erl_disabled_case_insensitive_true() {
+    fn t_is_erl_enabled_case_insensitive_true() {
         let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_erl_env();
         for value in ["true", "TRUE", "True"] {
             unsafe {
-                std::env::set_var("BONSAI_ERL_DISABLED", value);
+                std::env::set_var("BONSAI_ERL_ENABLED", value);
             }
-            assert!(is_erl_disabled(), "env={value} (case-insensitive) で true");
+            assert!(is_erl_enabled(), "env={value} (case-insensitive) で true");
         }
         reset_erl_env();
     }
 
     #[test]
-    fn t_is_erl_disabled_other_values_treated_as_false() {
+    fn t_is_erl_enabled_other_values_treated_as_false() {
         let _g = ERL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_erl_env();
         for value in ["0", "false", "no", ""] {
             unsafe {
-                std::env::set_var("BONSAI_ERL_DISABLED", value);
+                std::env::set_var("BONSAI_ERL_ENABLED", value);
             }
-            assert!(!is_erl_disabled(), "env={value} は disabled 扱いせず false");
+            assert!(!is_erl_enabled(), "env={value} は enabled 扱いせず false");
         }
         reset_erl_env();
     }
