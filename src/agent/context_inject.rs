@@ -9,6 +9,7 @@ use crate::knowledge::vault::Vault;
 use crate::memory::experience::{ExperienceStore, ExperienceType};
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::heuristics::{HeuristicStore, is_erl_enabled};
+use crate::memory::review::should_skip_for_freshness;
 use crate::memory::search::HybridSearch;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
@@ -203,6 +204,10 @@ pub(crate) fn inject_memory_blocks(
 /// `task_context` の trigger_patterns マッチで top-K 取得、`<context type="heuristics">`
 /// タグで system message 追加。注入されなかった (= 0 件 hit) 場合はメッセージを追加しない。
 /// 戻り値: 注入された heuristic IDs (将来的に task 完了 hook で `record_outcome` 呼出用)。
+///
+/// 項目 218 候補 (Cerememory ADR-011 ReviewState port): freshness gate。
+/// `BONSAI_REVIEW_ENABLED=1` で freshness < 0.35 の row を skip
+/// (env unset で legacy 動作 = freshness gate 無効化、観測動作完全互換)。
 pub(crate) fn inject_heuristics(
     session: &mut Session,
     task_context: &str,
@@ -218,9 +223,18 @@ pub(crate) fn inject_heuristics(
         return Vec::new();
     };
     let h_store = HeuristicStore::new(s.conn());
-    let top_k = h_store
+    let candidates = h_store
         .find_top_k_for_task(task_context, 5)
         .unwrap_or_default();
+
+    // 項目 218 候補: freshness gate。env=enabled で freshness < threshold の row を skip
+    // (env unset で should_skip_for_freshness は常に false 返却 = legacy 完全互換)。
+    const FRESHNESS_THRESHOLD: f64 = 0.35;
+    let top_k: Vec<_> = candidates
+        .into_iter()
+        .filter(|h| !should_skip_for_freshness(&h.review_state, FRESHNESS_THRESHOLD))
+        .collect();
+
     if top_k.is_empty() {
         return Vec::new();
     }

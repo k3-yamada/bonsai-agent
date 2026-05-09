@@ -1,10 +1,11 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 ///
-/// V10 = ERL heuristics table (項目 213)。AgentFloor
-/// (`.claude/plan/agentfloor-tier-eval-impl.md`) は次の V11 を予約 (Plan F1 audit)。
+/// V10 = ERL heuristics table (項目 213)。
+/// V11 = decay stability column (項目 217、Cerememory ADR-005 port)。
+/// V12 = ReviewState 9 columns (項目 218 候補、Cerememory ADR-011 port)。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -60,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 11,
         description: "Cerememory decay port: heuristics に stability 列追加 (項目 217)",
         sql: SCHEMA_V11,
+    },
+    Migration {
+        version: 12,
+        description: "Cerememory ADR-011 ReviewState port: heuristics に Freshness 軸 9 列追加 (項目 218 候補)",
+        sql: SCHEMA_V12,
     },
 ];
 
@@ -277,6 +283,30 @@ const SCHEMA_V11: &str = r#"
 ALTER TABLE heuristics ADD COLUMN stability REAL NOT NULL DEFAULT 1.0;
 "#;
 
+/// 項目 218 候補 (Cerememory ADR-011 ReviewState port、MIT、Copyright 2026 CORe Inc.):
+/// `heuristics` テーブルに **Freshness 軸**を構成する 9 列を追加 (Strength と分離)。
+/// `crate::memory::review::ReviewState` 構造体に対応:
+/// - `review_status` TEXT: ReviewStatus enum SQLite 表現 (default 'unknown')
+/// - `importance` / `volatility` / `freshness` REAL [0.0..=1.0]
+/// - `source_confidence` REAL NULL
+/// - `last_reviewed_at` / `next_review_at` TEXT NULL (RFC3339)
+/// - `review_count` / `stale_count` INTEGER (default 0)
+/// - `idx_heuristics_next_review` index で `review_tick` SELECT を最適化
+///
+/// production default OFF (`BONSAI_REVIEW_ENABLED` env unset) で既存挙動 100% 維持。
+const SCHEMA_V12: &str = r#"
+ALTER TABLE heuristics ADD COLUMN review_status TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE heuristics ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;
+ALTER TABLE heuristics ADD COLUMN volatility REAL NOT NULL DEFAULT 0.5;
+ALTER TABLE heuristics ADD COLUMN freshness REAL NOT NULL DEFAULT 1.0;
+ALTER TABLE heuristics ADD COLUMN source_confidence REAL;
+ALTER TABLE heuristics ADD COLUMN last_reviewed_at TEXT;
+ALTER TABLE heuristics ADD COLUMN next_review_at TEXT;
+ALTER TABLE heuristics ADD COLUMN review_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE heuristics ADD COLUMN stale_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_heuristics_next_review ON heuristics(next_review_at);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +465,30 @@ mod tests {
         );
         assert!(SCHEMA_V10.contains("fingerprint TEXT NOT NULL UNIQUE"));
         assert!(SCHEMA_V10.contains("idx_heuristics_category"));
+    }
+
+    #[test]
+    fn test_schema_v12_contains_review_state_columns() {
+        // 項目 218 候補: Cerememory ADR-011 ReviewState port
+        for col in [
+            "review_status",
+            "importance",
+            "volatility",
+            "freshness",
+            "source_confidence",
+            "last_reviewed_at",
+            "next_review_at",
+            "review_count",
+            "stale_count",
+        ] {
+            assert!(
+                SCHEMA_V12.contains(col),
+                "V12 に {col} 列追加が必要 (Plan B §4.2)"
+            );
+        }
+        assert!(
+            SCHEMA_V12.contains("idx_heuristics_next_review"),
+            "V12 に next_review_at index 必要 (review_tick SELECT 最適化)"
+        );
     }
 }

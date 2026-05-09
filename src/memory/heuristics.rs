@@ -24,6 +24,10 @@ use crate::agent::conversation::Message;
 use crate::agent::event_store::{Event, EventRepository};
 use crate::cancel::CancellationToken;
 use crate::memory::decay;
+use crate::memory::review::{
+    self, ReviewOutcome, ReviewState, ReviewStatus, compute_next_review_at,
+    estimate_volatility_from_category,
+};
 use crate::runtime::inference::LlmBackend;
 
 /// Reflection prompt template (`prompts/heuristic_reflection.txt`、compile-time embed)。
@@ -62,6 +66,10 @@ pub const KNOWN_TOOLS: &[&str] = &[
 ];
 
 /// 自然言語助言 1 件 (≤200 chars 推奨)。
+///
+/// `review_state` は項目 218 候補 (Cerememory ADR-011 ReviewState port)。
+/// V12 migration 適用済 DB から `find_top_k_for_task` で復元される。
+/// V12 未適用環境 (壊れた migration) では `Default` 値が入る (defensive)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Heuristic {
     pub id: i64,
@@ -75,6 +83,8 @@ pub struct Heuristic {
     pub success_after_use: i64,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub review_state: ReviewState,
 }
 
 /// `extract_heuristics_from_events` から返る pre-persistence 候補。
@@ -107,6 +117,22 @@ pub struct ReflectionResult {
     pub tool_chain_advice: Vec<(Vec<String>, String, String)>,
     pub parse_failures: usize,
 }
+
+/// `record_review` の SELECT 9 列 tuple 型 (clippy `type_complexity` 抑制用 alias)。
+///
+/// 順序: review_status / importance / volatility / freshness / source_confidence /
+/// last_reviewed_at / next_review_at / review_count / stale_count。
+type ReviewRowTuple = (
+    String,
+    f64,
+    f64,
+    f64,
+    Option<f64>,
+    Option<String>,
+    Option<String>,
+    u32,
+    u32,
+);
 
 /// SQLite-backed heuristic 永続化ストア。
 pub struct HeuristicStore<'a> {
@@ -144,13 +170,20 @@ impl<'a> HeuristicStore<'a> {
 
         let triggers_json = serde_json::to_string(triggers).unwrap_or_else(|_| "[]".to_string());
         let truncated_task: String = source_task.chars().take(80).collect();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now_dt = chrono::Utc::now();
+        let now = now_dt.to_rfc3339();
+
+        // 項目 218 候補 (Cerememory ADR-011): volatility は category から推定、
+        // next_review_at は base=30 day を volatility でスケール。
+        let volatility = estimate_volatility_from_category(category);
+        let next_review = compute_next_review_at(now_dt, volatility, 2_592_000).to_rfc3339();
 
         self.conn.execute(
             "INSERT INTO heuristics
              (advice, trigger_patterns, source_session_id, source_task, category,
-              score, used_count, success_after_use, fingerprint, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0.5, 0, 0, ?6, ?7)",
+              score, used_count, success_after_use, fingerprint, created_at,
+              volatility, next_review_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0.5, 0, 0, ?6, ?7, ?8, ?9)",
             params![
                 advice,
                 &triggers_json,
@@ -159,6 +192,8 @@ impl<'a> HeuristicStore<'a> {
                 category,
                 &fp,
                 &now,
+                volatility,
+                &next_review,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -167,14 +202,39 @@ impl<'a> HeuristicStore<'a> {
     /// `task_context` の trigger_patterns マッチ + score 順 top-K。
     ///
     /// マッチ判定: 各 trigger 文字列が `task_context` の case-sensitive 部分文字列なら hit。
+    /// 項目 218 候補: V12 列を SELECT して `review_state` を populate (Cerememory ADR-011 port)。
     pub fn find_top_k_for_task(&self, task_context: &str, k: usize) -> Result<Vec<Heuristic>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, advice, trigger_patterns, source_session_id, source_task, category,
-                    score, used_count, success_after_use, created_at, last_used_at
+                    score, used_count, success_after_use, created_at, last_used_at,
+                    review_status, importance, volatility, freshness, source_confidence,
+                    last_reviewed_at, next_review_at, review_count, stale_count
              FROM heuristics
              ORDER BY score DESC, id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
+            let status_str: String = row.get(11)?;
+            let last_reviewed: Option<String> = row.get(16)?;
+            let next_review: Option<String> = row.get(17)?;
+            let review_state = ReviewState {
+                status: ReviewStatus::from_db_str(&status_str),
+                importance: row.get(12)?,
+                volatility: row.get(13)?,
+                freshness: row.get(14)?,
+                source_confidence: row.get(15)?,
+                last_reviewed_at: last_reviewed.and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                }),
+                next_review_at: next_review.and_then(|s| {
+                    chrono::DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                }),
+                review_count: row.get(18)?,
+                stale_count: row.get(19)?,
+            };
             Ok(Heuristic {
                 id: row.get(0)?,
                 advice: row.get(1)?,
@@ -187,6 +247,7 @@ impl<'a> HeuristicStore<'a> {
                 success_after_use: row.get(8)?,
                 created_at: row.get(9)?,
                 last_used_at: row.get(10)?,
+                review_state,
             })
         })?;
 
@@ -334,22 +395,111 @@ impl<'a> HeuristicStore<'a> {
         Ok(())
     }
 
-    /// 項目 218 候補 (Cerememory ADR-011 ReviewState port、Phase 1 Red): scheduler API。
-    /// `next_review_at <= now` の row IDs を昇順で返す。
+    /// 項目 218 候補 (Cerememory ADR-011 ReviewState port): scheduler API。
+    /// `next_review_at <= now` の row IDs を `next_review_at ASC` で返す (上限 50)。
     /// `BONSAI_REVIEW_ENABLED` env unset で空 Vec 返却 (legacy 互換)。
-    pub fn review_tick(&self, _now: chrono::DateTime<chrono::Utc>) -> Result<Vec<i64>> {
-        todo!("Phase 2 Green で実装 (Plan B §4.4)")
+    pub fn review_tick(&self, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<i64>> {
+        if !review::is_review_enabled() {
+            return Ok(Vec::new());
+        }
+        let now_str = now.to_rfc3339();
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM heuristics
+             WHERE next_review_at IS NOT NULL AND next_review_at <= ?1
+             ORDER BY next_review_at ASC LIMIT 50",
+        )?;
+        let ids = stmt
+            .query_map(params![&now_str], |row| row.get::<_, i64>(0))?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(ids)
     }
 
-    /// 項目 218 候補 (Cerememory ADR-011 ReviewState port、Phase 1 Red): record API。
+    /// 項目 218 候補 (Cerememory ADR-011 ReviewState port): record API。
     /// outcome を反映 (freshness 更新 + review_count++ + next_review_at 計算)。
+    /// 既存 row の volatility を保持しつつ next_review_at を再計算 (base=30 day)。
     pub fn record_review(
         &self,
-        _id: i64,
-        _outcome: crate::memory::review::ReviewOutcome,
-        _now: chrono::DateTime<chrono::Utc>,
+        id: i64,
+        outcome: ReviewOutcome,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        todo!("Phase 2 Green で実装 (Plan B §4.5)")
+        // 現状の review_state を load (type は closure 内 row.get の型推論で確定)
+        let row: ReviewRowTuple = self.conn.query_row(
+            "SELECT review_status, importance, volatility, freshness, source_confidence,
+                    last_reviewed_at, next_review_at, review_count, stale_count
+             FROM heuristics WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, Option<f64>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, u32>(7)?,
+                    r.get::<_, u32>(8)?,
+                ))
+            },
+        )?;
+        let (
+            status_str,
+            importance,
+            volatility,
+            freshness,
+            source_confidence,
+            last_reviewed_str,
+            next_review_str,
+            review_count,
+            stale_count,
+        ) = row;
+
+        let mut state = ReviewState {
+            status: ReviewStatus::from_db_str(&status_str),
+            importance,
+            volatility,
+            freshness,
+            source_confidence,
+            last_reviewed_at: last_reviewed_str.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&chrono::Utc))
+            }),
+            next_review_at: next_review_str.and_then(|s| {
+                chrono::DateTime::parse_from_rfc3339(&s)
+                    .ok()
+                    .map(|d| d.with_timezone(&chrono::Utc))
+            }),
+            review_count,
+            stale_count,
+        };
+
+        outcome.apply_to(&mut state);
+        state.last_reviewed_at = Some(now);
+        state.next_review_at = Some(compute_next_review_at(now, state.volatility, 2_592_000));
+        state.review_count = state.review_count.saturating_add(1);
+
+        let last_str = state.last_reviewed_at.map(|d| d.to_rfc3339());
+        let next_str = state.next_review_at.map(|d| d.to_rfc3339());
+
+        self.conn.execute(
+            "UPDATE heuristics SET
+               review_status = ?1, freshness = ?2, last_reviewed_at = ?3,
+               next_review_at = ?4, review_count = ?5, stale_count = ?6
+             WHERE id = ?7",
+            params![
+                state.status.as_db_str(),
+                state.freshness,
+                last_str,
+                next_str,
+                state.review_count,
+                state.stale_count,
+                id,
+            ],
+        )?;
+        Ok(())
     }
 }
 
@@ -1322,7 +1472,9 @@ mod tests {
         let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
 
         // Phase 1 Red: review_tick は todo!() panic
-        let due = h.review_tick(now).expect("review_tick が成功して due IDs を返す");
+        let due = h
+            .review_tick(now)
+            .expect("review_tick が成功して due IDs を返す");
 
         // Phase 2 Green 期待: 空 DB なら 0 件
         assert_eq!(due.len(), 0, "空 DB は due 0 件");
@@ -1402,11 +1554,9 @@ mod tests {
             // SELECT が成功すれば列が存在
             let result: Result<i64> = store
                 .conn()
-                .query_row(
-                    &format!("SELECT COUNT({col}) FROM heuristics"),
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row(&format!("SELECT COUNT({col}) FROM heuristics"), [], |row| {
+                    row.get(0)
+                })
                 .map_err(|e| e.into());
             assert!(
                 result.is_ok(),

@@ -52,14 +52,31 @@ pub enum ReviewStatus {
 impl ReviewStatus {
     /// SQLite TEXT 表現に変換。
     pub fn as_db_str(&self) -> &'static str {
-        todo!("Phase 2 Green で実装 (Plan B §4.1)")
+        match self {
+            ReviewStatus::Unknown => "unknown",
+            ReviewStatus::Current => "current",
+            ReviewStatus::Due => "due",
+            ReviewStatus::Stale => "stale",
+            ReviewStatus::Superseded => "superseded",
+            ReviewStatus::NeedsEvidence => "needs_evidence",
+            ReviewStatus::Pinned => "pinned",
+        }
     }
 
     /// SQLite TEXT から復元。
     /// ADR-011 §"Data Model" 「Defaults must be backward-compatible」要件で
     /// 未知文字列は Unknown に復元 (typo / V10 legacy 互換)。
-    pub fn from_db_str(_s: &str) -> Self {
-        todo!("Phase 2 Green で実装 (Plan B §4.1)")
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "unknown" => ReviewStatus::Unknown,
+            "current" => ReviewStatus::Current,
+            "due" => ReviewStatus::Due,
+            "stale" => ReviewStatus::Stale,
+            "superseded" => ReviewStatus::Superseded,
+            "needs_evidence" => ReviewStatus::NeedsEvidence,
+            "pinned" => ReviewStatus::Pinned,
+            _ => ReviewStatus::Unknown,
+        }
     }
 }
 
@@ -101,8 +118,13 @@ impl Default for ReviewState {
 ///
 /// failure_recovery=0.7 (環境依存助言が陳腐化しやすい) /
 /// verification=0.5 (中庸) / efficiency=0.3 (普遍助言が多い)。
-pub(crate) fn estimate_volatility_from_category(_category: &str) -> f64 {
-    todo!("Phase 2 Green で実装 (Plan B §4.1)")
+pub(crate) fn estimate_volatility_from_category(category: &str) -> f64 {
+    match category {
+        "failure_recovery" => 0.7,
+        "verification" => 0.5,
+        "efficiency" => 0.3,
+        _ => 0.5,
+    }
 }
 
 /// 次回 review 日時 (volatility 高ほど短間隔)。
@@ -116,19 +138,20 @@ pub(crate) fn estimate_volatility_from_category(_category: &str) -> f64 {
 /// volatility=0.5 → base/3 (例: 30 day base → 10 day 後)
 /// volatility=0.0 → base/1 (例: 30 day base → 30 day 後)
 pub(crate) fn compute_next_review_at(
-    _now: DateTime<Utc>,
-    _volatility: f64,
-    _base_secs: i64,
+    now: DateTime<Utc>,
+    volatility: f64,
+    base_secs: i64,
 ) -> DateTime<Utc> {
-    let _ = Duration::seconds(0); // unused import 警告抑制
-    todo!("Phase 2 Green で実装 (Plan B §4.1)")
+    let scale = (volatility * 4.0 + 1.0).max(1.0);
+    let interval = (base_secs as f64 / scale) as i64;
+    now + Duration::seconds(interval)
 }
 
 /// freshness gate: env=enabled かつ freshness < threshold で skip。
 ///
 /// env=disabled で常に false 返却 = legacy inject 完全互換。
-pub(crate) fn should_skip_for_freshness(_state: &ReviewState, _threshold: f64) -> bool {
-    todo!("Phase 2 Green で実装 (Plan B §4.1)")
+pub(crate) fn should_skip_for_freshness(state: &ReviewState, threshold: f64) -> bool {
+    is_review_enabled() && state.freshness < threshold
 }
 
 /// review 後の outcome 種別 (Cerememory `lifecycle.record_review` 引数)。
@@ -148,8 +171,31 @@ pub enum ReviewOutcome {
 
 impl ReviewOutcome {
     /// outcome を ReviewState に適用 (in-place mutation)。
-    pub(crate) fn apply_to(&self, _s: &mut ReviewState) {
-        todo!("Phase 2 Green で実装 (Plan B §4.1)")
+    /// freshness は [0.0, 1.0] にクランプ、stale_count は saturating_add で overflow 安全。
+    pub(crate) fn apply_to(&self, s: &mut ReviewState) {
+        match self {
+            ReviewOutcome::Confirmed => {
+                s.freshness = 1.0;
+                s.status = ReviewStatus::Current;
+                s.stale_count = 0;
+            }
+            ReviewOutcome::StillCurrent => {
+                s.freshness = (s.freshness + 0.2).min(1.0);
+                s.status = ReviewStatus::Current;
+            }
+            ReviewOutcome::Stale => {
+                s.freshness = (s.freshness - 0.3).max(0.0);
+                s.status = ReviewStatus::Stale;
+                s.stale_count = s.stale_count.saturating_add(1);
+            }
+            ReviewOutcome::Superseded => {
+                s.freshness = 0.0;
+                s.status = ReviewStatus::Superseded;
+            }
+            ReviewOutcome::NeedsEvidence => {
+                s.status = ReviewStatus::NeedsEvidence;
+            }
+        }
     }
 }
 
@@ -264,7 +310,10 @@ mod tests {
             ..Default::default()
         };
         ReviewOutcome::Confirmed.apply_to(&mut s);
-        assert!((s.freshness - 1.0).abs() < 1e-9, "Confirmed で freshness=1.0");
+        assert!(
+            (s.freshness - 1.0).abs() < 1e-9,
+            "Confirmed で freshness=1.0"
+        );
         assert_eq!(s.status, ReviewStatus::Current);
         assert_eq!(s.stale_count, 0, "Confirmed で stale_count reset");
     }
