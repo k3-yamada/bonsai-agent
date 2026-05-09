@@ -1564,4 +1564,143 @@ mod tests {
             );
         }
     }
+
+    // ===========================================================================
+    // 項目 218 候補 Phase 4 Smoke: env-gate fixed-clock fixture (Plan B §5)
+    //
+    // env mutation race を避けるため module-local Mutex で serialize する。
+    // ===========================================================================
+
+    static REVIEW_PHASE4_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_review_env_phase4() {
+        unsafe {
+            std::env::remove_var("BONSAI_REVIEW_ENABLED");
+        }
+    }
+
+    #[test]
+    fn t_review_tick_with_env_enabled_returns_due_rows_only() {
+        let _g = REVIEW_PHASE4_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_review_env_phase4();
+
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+
+        // 2 row 投入: id=1 (next_review_at = 過去 = due)、id=2 (next_review_at = 未来 = not due)
+        let now_secs: i64 = 1_700_000_000;
+        let now = chrono::DateTime::from_timestamp(now_secs, 0).unwrap();
+        let past = chrono::DateTime::from_timestamp(now_secs - 86400, 0)
+            .unwrap()
+            .to_rfc3339();
+        let future = chrono::DateTime::from_timestamp(now_secs + 86400, 0)
+            .unwrap()
+            .to_rfc3339();
+
+        for (i, when) in [&past, &future].iter().enumerate() {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO heuristics (advice, trigger_patterns, source_task, category,
+                     score, fingerprint, created_at, next_review_at)
+                     VALUES (?1, '[]', '', 'test', 0.5, ?2, ?3, ?4)",
+                    params![format!("advice_{i}"), format!("fp4_{i}"), when, when,],
+                )
+                .unwrap();
+        }
+
+        // env unset → 空 Vec
+        let due_off = h.review_tick(now).unwrap();
+        assert!(due_off.is_empty(), "env unset で空 Vec (legacy 互換)");
+
+        // env=1 → past の id のみ返却
+        unsafe {
+            std::env::set_var("BONSAI_REVIEW_ENABLED", "1");
+        }
+        let due_on = h.review_tick(now).unwrap();
+        reset_review_env_phase4();
+
+        assert_eq!(due_on.len(), 1, "past 1 件のみ due、got {due_on:?}");
+        // id=1 が past (insertion 順)、id=2 が future
+        let returned_id = due_on[0];
+        let returned_when: String = store
+            .conn()
+            .query_row(
+                "SELECT next_review_at FROM heuristics WHERE id = ?1",
+                params![returned_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            returned_when, past,
+            "返却された row の next_review_at は past"
+        );
+    }
+
+    #[test]
+    fn t_record_review_stale_decreases_freshness_and_increments_stale_count() {
+        use crate::memory::review::ReviewOutcome;
+
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let id = h
+            .save(
+                "stale outcome integration test",
+                &["stale_int_test".to_string()],
+                None,
+                "test",
+                "verification",
+            )
+            .unwrap();
+
+        // 初期 freshness=1.0、stale_count=0 (V12 default + save) を確認
+        let (f0, sc0): (f64, u32) = store
+            .conn()
+            .query_row(
+                "SELECT freshness, stale_count FROM heuristics WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            (f0 - 1.0).abs() < 1e-9,
+            "save 直後 freshness=1.0 (V12 default)、got {f0}"
+        );
+        assert_eq!(sc0, 0, "save 直後 stale_count=0、got {sc0}");
+
+        // record_review(Stale) → freshness -0.3 = 0.7、stale_count = 1
+        let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        h.record_review(id, ReviewOutcome::Stale, now).unwrap();
+
+        let (f1, sc1, status1): (f64, u32, String) = store
+            .conn()
+            .query_row(
+                "SELECT freshness, stale_count, review_status FROM heuristics WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            (f1 - 0.7).abs() < 1e-9,
+            "Stale で freshness 1.0 - 0.3 = 0.7、got {f1}"
+        );
+        assert_eq!(sc1, 1, "stale_count++、got {sc1}");
+        assert_eq!(status1, "stale", "review_status='stale'、got {status1}");
+
+        // 2 回目の Stale で freshness=0.4、stale_count=2
+        h.record_review(id, ReviewOutcome::Stale, now).unwrap();
+        let (f2, sc2): (f64, u32) = store
+            .conn()
+            .query_row(
+                "SELECT freshness, stale_count FROM heuristics WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            (f2 - 0.4).abs() < 1e-9,
+            "2 回目 Stale で freshness=0.4、got {f2}"
+        );
+        assert_eq!(sc2, 2, "2 回目で stale_count=2、got {sc2}");
+    }
 }
