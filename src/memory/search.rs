@@ -1,7 +1,10 @@
 use anyhow::Result;
 
 use crate::memory::store::{MemoryRecord, MemoryStore};
-use crate::runtime::embedder::{Embedder, cosine_similarity};
+use crate::runtime::embedder::Embedder;
+
+#[cfg(not(feature = "embeddings"))]
+use crate::runtime::embedder::cosine_similarity;
 
 /// ハイブリッド検索結果
 #[derive(Debug, Clone)]
@@ -56,15 +59,49 @@ impl<'a> HybridSearch<'a> {
         Ok(merged)
     }
 
-    /// ベクトル類似度で全メモリをスキャン（sqlite-vec未使用時のフォールバック）
+    /// ベクトル類似度検索 — **vec0 KNN path** (production、Plan D-2 採用)。
+    /// 流れ:
+    /// 1. store.vec_knn で memory_id + distance を取得 (vec0 ANN)
+    /// 2. get_memories_by_ids で memories を IN clause 1 クエリ batch fetch (N+1 回避)
+    /// 3. id 順序保持で MemoryRecord を distance ペアに復元
+    /// 4. similarity = 1.0 - distance (cosine 距離 → 類似度) で RRF 上流に渡す
+    #[cfg(feature = "embeddings")]
     fn vector_search(
         &self,
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(MemoryRecord, f32)>> {
-        // 全メモリを取得してコサイン類似度を計算（小規模データ向け）
-        let all_memories = self.store.all_memories()?;
+        let knn = self.store.vec_knn(query_embedding, limit)?;
+        if knn.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<i64> = knn.iter().map(|(id, _)| *id).collect();
+        let memories = self.store.get_memories_by_ids(&ids)?;
+        use std::collections::HashMap;
+        let by_id: HashMap<i64, MemoryRecord> = memories.into_iter().map(|m| (m.id, m)).collect();
+        let results: Vec<(MemoryRecord, f32)> = knn
+            .into_iter()
+            .filter_map(|(id, dist)| {
+                by_id.get(&id).cloned().map(|m| {
+                    let sim = 1.0_f32 - dist;
+                    (m, sim)
+                })
+            })
+            .collect();
+        Ok(results)
+    }
 
+    /// ベクトル類似度検索 — **linear scan path** (CI hash-only build 専用、Plan D-2)。
+    /// `--no-default-features` 経路 (sqlite-vec 不要 / ハッシュ embedder のみ) で
+    /// vec0 が compile されないとき選択される。production deploy では default feature
+    /// `embeddings` が ON のため本 path は compile されない (compile-time exclusive)。
+    #[cfg(not(feature = "embeddings"))]
+    fn vector_search(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(MemoryRecord, f32)>> {
+        let all_memories = self.store.all_memories()?;
         let mut scored: Vec<(MemoryRecord, f32)> = all_memories
             .into_iter()
             .map(|m| {
@@ -81,6 +118,20 @@ impl<'a> HybridSearch<'a> {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
         Ok(scored)
+    }
+
+    /// memory 保存後に呼出して vec_memories へ embedding を投入する hook
+    /// (Plan G-2.5、insert path 統合)。caller は `save_memory` 戻り値の memory_id と
+    /// content 原文を渡す。embedding は内部で `embedder.embed()` 経由生成。
+    /// caller-side 配線 (HybridSearch::index_memory を save_memory 直後に呼ぶ箇所) は
+    /// Phase 4 smoke で必要性が確認されてから実装 (現時点では未配線で hook のみ提供)。
+    #[cfg(feature = "embeddings")]
+    pub fn index_memory(&self, memory_id: i64, content: &str) -> Result<()> {
+        let emb = self.embedder.embed(&[content])?;
+        if let Some(first) = emb.first() {
+            self.store.insert_memory_embedding(memory_id, first)?;
+        }
+        Ok(())
     }
 
     /// Reciprocal Rank Fusion
@@ -145,6 +196,7 @@ mod tests {
 
     fn setup() -> (MemoryStore, SimpleEmbedder) {
         let store = MemoryStore::in_memory().unwrap();
+        let embedder = SimpleEmbedder::default();
         store
             .save_memory(
                 "Rust is a fast programming language",
@@ -162,7 +214,13 @@ mod tests {
         store
             .save_memory("JavaScript runs in browsers", "fact", &["js".into()])
             .unwrap();
-        (store, SimpleEmbedder::default())
+        // vec0 path 用に既存 memories を backfill (linear path では no-op、Plan G-2.4 補足)。
+        // 旧 linear path は vector_search 呼出ごとに on-the-fly で各 memory を embed
+        // していたため backfill 不要だったが、vec0 path は事前 INSERT が前提のため
+        // テスト setup で明示的に backfill する。
+        #[cfg(feature = "embeddings")]
+        store.ensure_vec_table(&embedder).unwrap();
+        (store, embedder)
     }
 
     #[test]

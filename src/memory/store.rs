@@ -4,7 +4,36 @@ use rusqlite::{Connection, params};
 use crate::db::migrate;
 
 #[cfg(feature = "embeddings")]
-use crate::runtime::embedder::Embedder;
+use crate::runtime::embedder::{DEFAULT_EMBEDDING_DIM, Embedder};
+#[cfg(feature = "embeddings")]
+use anyhow::bail;
+
+/// vec0 SQL extension を process global に 1 度だけ自動ロード。
+/// rusqlite の Connection::open は新規接続のため、auto_extension を
+/// 事前登録しておくことで、以後すべての Connection で vec0 が使える。
+#[cfg(feature = "embeddings")]
+fn init_vec_extension() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // SAFETY: sqlite3_auto_extension は SQLite global registry への登録で
+        // 副作用は他 Connection のロードのみ。sqlite3_vec_init はライブラリ
+        // 提供の C 関数で、SQLite extension entrypoint signature 準拠。
+        // transmute target は libsqlite3-sys (rusqlite ffi) が要求する型に合わせる。
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut rusqlite::ffi::sqlite3,
+                    *mut *mut std::os::raw::c_char,
+                    *const rusqlite::ffi::sqlite3_api_routines,
+                ) -> std::os::raw::c_int,
+            >(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        }
+    });
+}
 
 /// SQLite統合ストア。A-MEMメモリ、セッション、経験、プロファイルを一元管理。
 pub struct MemoryStore {
@@ -18,6 +47,9 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// ファイルベースのDBを開く
     pub fn open(path: &str) -> Result<Self> {
+        // vec0 auto_extension は Connection::open より前に登録 (process 1 回限り)。
+        #[cfg(feature = "embeddings")]
+        init_vec_extension();
         let conn = Connection::open(path)?;
         let mut store = Self {
             conn,
@@ -29,6 +61,8 @@ impl MemoryStore {
 
     /// インメモリDB（テスト用）
     pub fn in_memory() -> Result<Self> {
+        #[cfg(feature = "embeddings")]
+        init_vec_extension();
         let conn = Connection::open_in_memory()?;
         let mut store = Self { conn, path: None };
         store.initialize()?;
@@ -402,29 +436,107 @@ impl MemoryStore {
         Ok(count as usize)
     }
 
-    // --- sqlite-vec vec0 virtual table (plan T-1.1〜T-1.7、Phase 1 Red 段階の todo!() stub) ---
-    // Why: Phase 1 Red 専用の未実装 stub。Phase 2 Green で V13 migration 適用 +
-    // 既存 memories の eager backfill + vec0 KNN 実装に置換予定。
-    // すべて #[cfg(feature = "embeddings")] 配下、default build (= production) で
-    // も embeddings feature が default on のため可視。
+    // --- sqlite-vec vec0 virtual table (plan T-1.1〜T-1.7、Phase 2 Green 実装) ---
+    // V13 migration は initialize() 内で適用済 (open/in_memory 経由)。
+    // すべて #[cfg(feature = "embeddings")] 配下、default build (= production)
+    // では embeddings feature が default on のため可視。
 
-    /// vec_memories virtual table (vec0、float[256]) を作成し、既存 memories
-    /// を一括 embed して投入する (eager backfill)。
+    /// vec_memories の eager backfill。既に backfill 済 (count > 0) ならスキップ。
+    /// 既存 memories 全件を embedder で 256d ベクトル化し vec_memories に投入。
     #[cfg(feature = "embeddings")]
-    pub fn ensure_vec_table(&self, _embedder: &dyn Embedder) -> Result<()> {
-        todo!("Phase 2 Green で V13 migration 適用 + eager backfill 実装")
+    pub fn ensure_vec_table(&self, embedder: &dyn Embedder) -> Result<()> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))?;
+        if count > 0 {
+            return Ok(());
+        }
+        let memories = self.all_memories()?;
+        if memories.is_empty() {
+            return Ok(());
+        }
+        let texts: Vec<&str> = memories.iter().map(|m| m.content.as_str()).collect();
+        let embeddings = embedder.embed(&texts)?;
+        let total = memories.len();
+        for (i, (mem, emb)) in memories.iter().zip(embeddings.iter()).enumerate() {
+            self.insert_memory_embedding(mem.id, emb)?;
+            if (i + 1) % 100 == 0 {
+                eprintln!("[ensure_vec_table] backfilled {}/{} memories", i + 1, total);
+            }
+        }
+        Ok(())
     }
 
-    /// 256d embedding を vec_memories に保存。次元不一致は Err。
+    /// 256d embedding を vec_memories に保存。次元不一致は Err (256d 厳格)。
+    /// embedding は f32 little-endian で BLOB 化して vec0 に渡す。
     #[cfg(feature = "embeddings")]
-    pub fn insert_memory_embedding(&self, _memory_id: i64, _embedding: &[f32]) -> Result<()> {
-        todo!("Phase 2 Green で 256d 検証 + vec0 INSERT 実装")
+    pub fn insert_memory_embedding(&self, memory_id: i64, embedding: &[f32]) -> Result<()> {
+        if embedding.len() != DEFAULT_EMBEDDING_DIM {
+            bail!(
+                "embedding 次元不一致: expected {}, got {}",
+                DEFAULT_EMBEDDING_DIM,
+                embedding.len()
+            );
+        }
+        let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+        self.conn.execute(
+            "INSERT INTO vec_memories(memory_id, embedding) VALUES (?1, ?2)",
+            params![memory_id, bytes],
+        )?;
+        Ok(())
     }
 
     /// vec0 KNN クエリ。距離昇順で最大 limit 件 (memory_id, distance) を返却。
+    /// query は 256d 必須、それ以外は Err。
     #[cfg(feature = "embeddings")]
-    pub fn vec_knn(&self, _query: &[f32], _limit: usize) -> Result<Vec<(i64, f32)>> {
-        todo!("Phase 2 Green で MATCH ?1 ORDER BY distance LIMIT ?2 経由実装")
+    pub fn vec_knn(&self, query: &[f32], limit: usize) -> Result<Vec<(i64, f32)>> {
+        if query.len() != DEFAULT_EMBEDDING_DIM {
+            bail!(
+                "query 次元不一致: expected {}, got {}",
+                DEFAULT_EMBEDDING_DIM,
+                query.len()
+            );
+        }
+        let bytes: Vec<u8> = query.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT memory_id, distance FROM vec_memories WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![bytes, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?))
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// IDs 指定の batch fetch (vector_search の N+1 回避用、plan G-2.4)。
+    /// 空配列なら空 Vec、それ以外は IN clause で 1 クエリ取得。
+    pub fn get_memories_by_ids(&self, ids: &[i64]) -> Result<Vec<MemoryRecord>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT id, content, category, tags, access_count, created_at FROM memories WHERE id IN ({placeholders})"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            Ok(MemoryRecord {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                category: row.get(2)?,
+                tags: row.get(3)?,
+                access_count: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
     }
 }
 

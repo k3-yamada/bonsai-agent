@@ -1,11 +1,14 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 ///
 /// V10 = ERL heuristics table (項目 213)。
 /// V11 = decay stability column (項目 217、Cerememory ADR-005 port)。
 /// V12 = ReviewState 9 columns (項目 218 候補、Cerememory ADR-011 port)。
+/// V13 = sqlite-vec vec0 virtual table (plan T-1.4)。embeddings feature ON で
+///       `vec_memories(memory_id, embedding float[256])` を作成、OFF では空 SQL
+///       (no-op、version のみ記録) で MIGRATIONS.len() invariant 維持。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -66,6 +69,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 12,
         description: "Cerememory ADR-011 ReviewState port: heuristics に Freshness 軸 9 列追加 (項目 218 候補)",
         sql: SCHEMA_V12,
+    },
+    Migration {
+        version: 13,
+        description: "sqlite-vec vec0 virtual table: vec_memories(memory_id, embedding float[256]) (plan T-1.4)",
+        sql: SCHEMA_V13,
     },
 ];
 
@@ -307,6 +315,21 @@ ALTER TABLE heuristics ADD COLUMN stale_count INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_heuristics_next_review ON heuristics(next_review_at);
 "#;
 
+/// V13: sqlite-vec vec0 virtual table (plan T-1.4)。
+/// embeddings feature ON で vec_memories(memory_id, embedding float[256]) を
+/// 作成。OFF では空 SQL (no-op) で MIGRATIONS.len()==SCHEMA_VERSION invariant
+/// を維持しつつ vec0 module 未ロード環境での migration 失敗を回避。
+#[cfg(feature = "embeddings")]
+const SCHEMA_V13: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
+    memory_id INTEGER PRIMARY KEY,
+    embedding float[256]
+);
+"#;
+
+#[cfg(not(feature = "embeddings"))]
+const SCHEMA_V13: &str = "";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +512,30 @@ mod tests {
         assert!(
             SCHEMA_V12.contains("idx_heuristics_next_review"),
             "V12 に next_review_at index 必要 (review_tick SELECT 最適化)"
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn test_schema_v13_contains_vec_memories() {
+        // plan T-1.4: sqlite-vec vec0 virtual table
+        assert!(
+            SCHEMA_V13.contains("vec_memories"),
+            "V13 に vec_memories 仮想テーブル定義必要"
+        );
+        assert!(SCHEMA_V13.contains("USING vec0"), "vec0 module 利用が必要");
+        assert!(
+            SCHEMA_V13.contains("float[256]"),
+            "256d 固定 (DEFAULT_EMBEDDING_DIM 整合)"
+        );
+    }
+
+    #[cfg(not(feature = "embeddings"))]
+    #[test]
+    fn test_schema_v13_is_empty_when_no_embeddings() {
+        assert!(
+            SCHEMA_V13.is_empty(),
+            "embeddings OFF では V13 SQL 空 (no-op で migration 失敗回避)"
         );
     }
 }
