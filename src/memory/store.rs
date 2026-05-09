@@ -3,6 +3,9 @@ use rusqlite::{Connection, params};
 
 use crate::db::migrate;
 
+#[cfg(feature = "embeddings")]
+use crate::runtime::embedder::Embedder;
+
 /// SQLite統合ストア。A-MEMメモリ、セッション、経験、プロファイルを一元管理。
 pub struct MemoryStore {
     conn: Connection,
@@ -398,6 +401,31 @@ impl MemoryStore {
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    // --- sqlite-vec vec0 virtual table (plan T-1.1〜T-1.7、Phase 1 Red 段階の todo!() stub) ---
+    // Why: Phase 1 Red 専用の未実装 stub。Phase 2 Green で V13 migration 適用 +
+    // 既存 memories の eager backfill + vec0 KNN 実装に置換予定。
+    // すべて #[cfg(feature = "embeddings")] 配下、default build (= production) で
+    // も embeddings feature が default on のため可視。
+
+    /// vec_memories virtual table (vec0、float[256]) を作成し、既存 memories
+    /// を一括 embed して投入する (eager backfill)。
+    #[cfg(feature = "embeddings")]
+    pub fn ensure_vec_table(&self, _embedder: &dyn Embedder) -> Result<()> {
+        todo!("Phase 2 Green で V13 migration 適用 + eager backfill 実装")
+    }
+
+    /// 256d embedding を vec_memories に保存。次元不一致は Err。
+    #[cfg(feature = "embeddings")]
+    pub fn insert_memory_embedding(&self, _memory_id: i64, _embedding: &[f32]) -> Result<()> {
+        todo!("Phase 2 Green で 256d 検証 + vec0 INSERT 実装")
+    }
+
+    /// vec0 KNN クエリ。距離昇順で最大 limit 件 (memory_id, distance) を返却。
+    #[cfg(feature = "embeddings")]
+    pub fn vec_knn(&self, _query: &[f32], _limit: usize) -> Result<Vec<(i64, f32)>> {
+        todo!("Phase 2 Green で MATCH ?1 ORDER BY distance LIMIT ?2 経由実装")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -639,5 +667,127 @@ mod tests {
             .save_memory("after reset", "fact", &["test".to_string()])
             .unwrap();
         assert_eq!(store.memory_count().unwrap(), 1);
+    }
+
+    // --- Phase 1 Red: sqlite-vec vec0 (plan T-1.1〜T-1.7) ---
+    // すべて #[cfg(feature = "embeddings")] 配下 (T-1.4 は SCHEMA_VERSION 比較で非 gate)。
+    // Phase 1 Red 段階では todo!() panic または assert fail で Red 確証。
+    // Phase 2 Green で全 PASS 化、T-1.6 (既存 6 search test) は signature 不変で
+    // pass 維持を gate (本 module 外、search.rs:168-219 で検証)。
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_1_1_vec_memories_virtual_table_exists_after_ensure() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let store = test_store();
+        let embedder = SimpleEmbedder::default();
+        store.ensure_vec_table(&embedder).unwrap();
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='vec_memories'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "vec_memories virtual table が ensure 後に存在すべき"
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_1_2_insert_memory_embedding_persists_256d() {
+        use crate::runtime::embedder::{DEFAULT_EMBEDDING_DIM, SimpleEmbedder};
+        let store = test_store();
+        let embedder = SimpleEmbedder::default();
+        store.ensure_vec_table(&embedder).unwrap();
+        let mem_id = store.save_memory("test", "fact", &[]).unwrap();
+        let emb = vec![0.1f32; DEFAULT_EMBEDDING_DIM];
+        store.insert_memory_embedding(mem_id, &emb).unwrap();
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM vec_memories WHERE memory_id = ?1",
+                params![mem_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "256d embedding が vec_memories に保存されるべき");
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_1_3_vec_knn_returns_top_k_distance_order() {
+        use crate::runtime::embedder::{DEFAULT_EMBEDDING_DIM, SimpleEmbedder};
+        let store = test_store();
+        let embedder = SimpleEmbedder::default();
+        store.ensure_vec_table(&embedder).unwrap();
+        // 5 件 insert: i=0 が query にもっとも近接 (first dim のみ変化)。
+        for i in 0..5 {
+            let mem_id = store.save_memory(&format!("doc {i}"), "fact", &[]).unwrap();
+            let mut emb = vec![0.0f32; DEFAULT_EMBEDDING_DIM];
+            emb[0] = (i as f32) * 0.1;
+            store.insert_memory_embedding(mem_id, &emb).unwrap();
+        }
+        let query = vec![0.0f32; DEFAULT_EMBEDDING_DIM];
+        let results = store.vec_knn(&query, 3).unwrap();
+        assert_eq!(results.len(), 3, "top-3 件返却すべき");
+        // distance は昇順 (単調非減少)。
+        for w in results.windows(2) {
+            assert!(
+                w[0].1 <= w[1].1,
+                "distance 昇順違反: {} > {}",
+                w[0].1,
+                w[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn t_1_4_schema_version_is_v13_for_vec_memories() {
+        use crate::db::schema::SCHEMA_VERSION;
+        assert_eq!(
+            SCHEMA_VERSION, 13,
+            "V13 migration が vec_memories virtual table を追加するため SCHEMA_VERSION=13 になるべき (Phase 2 Green で適用)"
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_1_5_ensure_vec_table_eager_backfill_existing_memories() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let store = test_store();
+        // ensure 前に 3 件 memories を投入。
+        for i in 0..3 {
+            store.save_memory(&format!("mem {i}"), "fact", &[]).unwrap();
+        }
+        let embedder = SimpleEmbedder::default();
+        store.ensure_vec_table(&embedder).unwrap();
+        let count: i64 = store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "eager backfill が既存 memories 全件を vec_memories に投入すべき"
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_1_7_insert_memory_embedding_rejects_non_256d() {
+        use crate::runtime::embedder::SimpleEmbedder;
+        let store = test_store();
+        let embedder = SimpleEmbedder::default();
+        store.ensure_vec_table(&embedder).unwrap();
+        let mem_id = store.save_memory("test", "fact", &[]).unwrap();
+        let bad_emb = vec![0.0f32; 128];
+        let result = store.insert_memory_embedding(mem_id, &bad_emb);
+        assert!(
+            result.is_err(),
+            "256d 以外の embedding は insert 拒否すべき (128d 入力)"
+        );
     }
 }
