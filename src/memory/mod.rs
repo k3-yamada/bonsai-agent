@@ -1,3 +1,4 @@
+pub mod decay;
 pub mod dreams;
 pub mod evolution;
 pub mod experience;
