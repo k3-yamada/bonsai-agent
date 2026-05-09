@@ -12,6 +12,7 @@ use crate::agent::context_inject::{
 use crate::agent::conversation::{Message, Role, Session};
 use crate::agent::event_store::{EventStore, EventType};
 use crate::agent::validate::PathGuard;
+use crate::agent::working_memory::{cap_session_messages, working_cap_from_env};
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
@@ -198,6 +199,12 @@ pub fn run_agent_loop_with_session(
         }
         state.iteration = iteration;
         final_iteration = iteration + 1;
+
+        // 項目 219 候補 (Phase G、Cerememory `cerememory-store-working` 派生):
+        // env=BONSAI_WORKING_CAP_ENABLED=1 で session.messages を 7±2 hard cap、
+        // 項目 82 ContextOverflowGuard (token-burst-based) の上流で構造的に予防。
+        // env unset (production default) で no-op (legacy 完全互換)。
+        let _evicted = cap_session_messages(session, working_cap_from_env());
 
         // before_stepフック: LLM呼出前にミドルウェア介入（NAT知見、項目142）
         if let Some(abort_reason) = state.middleware_chain.run_before_step(session, iteration) {

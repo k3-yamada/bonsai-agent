@@ -18,3 +18,4 @@ pub mod context_inject;
 pub mod subagent;
 pub mod tool_exec;
 pub mod tool_selection_bench;
+pub mod working_memory;
