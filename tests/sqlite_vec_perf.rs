@@ -202,3 +202,77 @@ fn vec_perf_synthetic_g44_backfill_10k() {
         eprintln!("[G-4.4] WARN backfill > 5 min, R-A2 mitigation 別 plan 検討");
     }
 }
+
+#[test]
+#[ignore = "G-4.5 (Step B 第 1 軸): recall@10 of vec0 vs linear (exact KNN parity)"]
+fn vec_perf_synthetic_g45_recall_at_10() {
+    // sqlite-vec vec0 は brute-force exact KNN (HNSW ではない) のため、recall@10
+    // は理論上 linear scan と完全一致する。本 test は plan §8 Step B 判定の
+    // 第 1 軸 (recall@10 axis) を実機で検証する。
+    //
+    // PASS 条件 (Step B 不要):  recall@10 ≥ 95% (tie-break ばらつき許容)
+    // FAIL 条件 (Step B 検討):  recall@10 < 95% → ANN 採用検討
+    const N_MEMORIES: usize = 1000;
+    const N_QUERIES: usize = 50;
+    const TOP_K: usize = 10;
+
+    let store = MemoryStore::in_memory().expect("create in-memory store");
+
+    let mut embeddings: Vec<(i64, Vec<f32>)> = Vec::with_capacity(N_MEMORIES);
+    for i in 0..N_MEMORIES {
+        let id = store
+            .save_memory(&format!("recall memory {i}"), "perf", &[])
+            .expect("save_memory");
+        let v = pseudo_random_vec(i as u64 + 1, DIM);
+        store
+            .insert_memory_embedding(id, &v)
+            .expect("insert_memory_embedding");
+        embeddings.push((id, v));
+    }
+
+    let queries: Vec<Vec<f32>> = (0..N_QUERIES)
+        .map(|q| pseudo_random_vec(0xBEEF_0000 + q as u64, DIM))
+        .collect();
+
+    let mut total_intersect = 0usize;
+    let mut zero_recall_queries = 0usize;
+    for q in &queries {
+        // linear ground truth (cosine similarity 上位 TOP_K)
+        let mut linear_scored: Vec<(i64, f32)> = embeddings
+            .iter()
+            .map(|(id, v)| (*id, cosine_similarity(q, v)))
+            .collect();
+        linear_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let linear_top: std::collections::HashSet<i64> = linear_scored
+            .iter()
+            .take(TOP_K)
+            .map(|(id, _)| *id)
+            .collect();
+
+        // vec0 candidate (distance 昇順 = similarity 降順)
+        let vec_scored = store.vec_knn(q, TOP_K).expect("vec_knn");
+        let vec_top: std::collections::HashSet<i64> =
+            vec_scored.iter().map(|(id, _)| *id).collect();
+
+        let intersect = linear_top.intersection(&vec_top).count();
+        total_intersect += intersect;
+        if intersect == 0 {
+            zero_recall_queries += 1;
+        }
+    }
+
+    let avg_recall = total_intersect as f64 / (N_QUERIES * TOP_K) as f64;
+    eprintln!(
+        "[G-4.5] avg recall@10 = {avg_recall:.4} (over {N_QUERIES} queries, {N_MEMORIES} memories)"
+    );
+    eprintln!("[G-4.5] zero-recall queries: {zero_recall_queries}/{N_QUERIES}");
+
+    // gate: vec0 と linear が exact KNN であれば recall ≥ 95% (tie-break 余地)
+    if avg_recall >= 0.95 {
+        eprintln!("[G-4.5] PASS Step B axis-1: vec0 recall@10 ≥ 95%, ANN 不要");
+    } else {
+        eprintln!(
+            "[G-4.5] WARN Step B axis-1 fail: vec0 recall@10 ({avg_recall:.4}) < 95% → Milvus Lite 検討"
+        );
+    }
+}
