@@ -36,12 +36,13 @@ tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-javascript = { version = "0.25", optional = true }
 tree-sitter-go = { version = "0.25", optional = true }
 schemars = "0.8"
+sqlite-vec = { version = "0.1.9", optional = true }
 
 [features]
 default = ["cli", "tree-sitter", "embeddings"]
 cli = []
 full = ["cli", "embeddings", "tree-sitter"]
-embeddings = ["dep:fastembed"]
+embeddings = ["dep:fastembed", "dep:sqlite-vec"]
 tree-sitter = [
     "dep:tree-sitter",
     "dep:tree-sitter-rust",
@@ -61,7 +62,5 @@ optional = true
 # 将来追加予定
 # hf-hub = "0.5"           # モデル自動DL
 # sysinfo = "0.33"         # RAM検出
-# fastembed = "5"           # EmbeddingGemma
-# sqlite-vec = "0.1"       # ベクトル検索
 # tracing = "0.1"          # 構造化ログ
 # tokio = { version = "1", features = ["full"] }  # デーモンモード
