@@ -619,4 +619,120 @@ mod tests {
             "session メッセージ追加なし (heuristics タグ不在)"
         );
     }
+
+    // === 項目 218 候補: Cerememory ADR-011 freshness gate (Plan B §5 Phase 1 Red) ===
+
+    static REVIEW_INJECT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn t_inject_skips_low_freshness_when_enabled() {
+        // env mutation race を避けるため module-local Mutex で serialize
+        let _g = REVIEW_INJECT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let store = MemoryStore::in_memory().unwrap();
+        let h_store = crate::memory::heuristics::HeuristicStore::new(store.conn());
+        let id = h_store
+            .save(
+                "陳腐化助言: -c 12288 推奨",
+                &[
+                    "review_freshness_test".to_string(),
+                    "stale_advice".to_string(),
+                ],
+                None,
+                "test task",
+                "failure_recovery",
+            )
+            .unwrap();
+
+        // freshness を 0.20 (< threshold 0.35) に下げる
+        // V12 freshness 列が必要 (Phase 2 Green で追加)
+        store
+            .conn()
+            .execute(
+                "UPDATE heuristics SET freshness = 0.20 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .expect("V12 freshness 列が必要 (Phase 2 Green)");
+
+        // env=enabled で freshness gate 発火: ERL も REVIEW も両方 enable
+        unsafe {
+            std::env::set_var("BONSAI_ERL_ENABLED", "1");
+            std::env::set_var("BONSAI_REVIEW_ENABLED", "1");
+        }
+        let mut session = Session::new();
+        let before = session.messages.len();
+        let ids = inject_heuristics(
+            &mut session,
+            "review_freshness_test stale_advice",
+            Some(&store),
+        );
+        unsafe {
+            std::env::remove_var("BONSAI_ERL_ENABLED");
+            std::env::remove_var("BONSAI_REVIEW_ENABLED");
+        }
+
+        assert!(
+            !ids.contains(&id),
+            "freshness=0.20 < threshold 0.35 で skip、ids={ids:?}"
+        );
+        assert_eq!(
+            session.messages.len(),
+            before,
+            "全 heuristic skip → session メッセージ追加なし"
+        );
+    }
+
+    #[test]
+    fn t_inject_legacy_observable_unchanged_when_disabled() {
+        // env=disabled (BONSAI_REVIEW_ENABLED unset) で legacy 互換、
+        // 低 freshness でも freshness gate は発火しない (skip しない)
+        let _g = REVIEW_INJECT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let store = MemoryStore::in_memory().unwrap();
+        let h_store = crate::memory::heuristics::HeuristicStore::new(store.conn());
+        let id = h_store
+            .save(
+                "legacy compat advice",
+                &[
+                    "legacy_compat_test".to_string(),
+                    "low_fresh_inject".to_string(),
+                ],
+                None,
+                "test",
+                "efficiency",
+            )
+            .unwrap();
+
+        // V12 列があれば freshness を低く設定 (Phase 2 Green で V12 適用後に有効)
+        // Phase 1 Red 段階では V12 列不在で UPDATE は SQL error → expect で fail
+        store
+            .conn()
+            .execute(
+                "UPDATE heuristics SET freshness = 0.20 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .expect("V12 freshness 列が必要 (Phase 2 Green)");
+
+        // ERL は ON (heuristic 注入経路を有効化)、REVIEW は OFF (legacy 動作)
+        unsafe {
+            std::env::set_var("BONSAI_ERL_ENABLED", "1");
+            std::env::remove_var("BONSAI_REVIEW_ENABLED");
+        }
+        let mut session = Session::new();
+        let ids = inject_heuristics(
+            &mut session,
+            "legacy_compat_test low_fresh_inject",
+            Some(&store),
+        );
+        unsafe {
+            std::env::remove_var("BONSAI_ERL_ENABLED");
+        }
+
+        assert!(
+            ids.contains(&id),
+            "REVIEW disabled で legacy 互換: 低 freshness でも inject される、ids={ids:?}"
+        );
+    }
 }

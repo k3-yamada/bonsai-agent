@@ -333,6 +333,24 @@ impl<'a> HeuristicStore<'a> {
         self.conn.execute("DELETE FROM heuristics", [])?;
         Ok(())
     }
+
+    /// 項目 218 候補 (Cerememory ADR-011 ReviewState port、Phase 1 Red): scheduler API。
+    /// `next_review_at <= now` の row IDs を昇順で返す。
+    /// `BONSAI_REVIEW_ENABLED` env unset で空 Vec 返却 (legacy 互換)。
+    pub fn review_tick(&self, _now: chrono::DateTime<chrono::Utc>) -> Result<Vec<i64>> {
+        todo!("Phase 2 Green で実装 (Plan B §4.4)")
+    }
+
+    /// 項目 218 候補 (Cerememory ADR-011 ReviewState port、Phase 1 Red): record API。
+    /// outcome を反映 (freshness 更新 + review_count++ + next_review_at 計算)。
+    pub fn record_review(
+        &self,
+        _id: i64,
+        _outcome: crate::memory::review::ReviewOutcome,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
+        todo!("Phase 2 Green で実装 (Plan B §4.5)")
+    }
 }
 
 /// fingerprint = advice 先頭 80 chars (UTF-8 char unit) + trigger ハッシュ。
@@ -1247,5 +1265,153 @@ mod tests {
             (stability - 1.0).abs() < 1e-9,
             "V11 migration で stability column が DEFAULT 1.0 で挿入: {stability}"
         );
+    }
+
+    // ===========================================================================
+    // 項目 218 候補: Cerememory ADR-011 ReviewState port 統合 test (Plan B §5)
+    //
+    // Phase 1 Red 段階では V12 migration 未追加 + review_tick/record_review todo!()
+    // panic で失敗を確証。Phase 2 Green で 1118 passed 達成。
+    // ===========================================================================
+
+    #[test]
+    fn t_save_initializes_review_state_with_volatility_from_category() {
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let id = h
+            .save(
+                "review state init test",
+                &["init_trigger".to_string()],
+                None,
+                "test_task",
+                "failure_recovery", // volatility=0.7 期待
+            )
+            .unwrap();
+
+        // V12 migration で volatility 列追加、save 内で
+        // estimate_volatility_from_category("failure_recovery") = 0.7 投入
+        let volatility: f64 = store
+            .conn()
+            .query_row(
+                "SELECT volatility FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("V12 で volatility 列が追加されるべき (Phase 2 Green)");
+        assert!(
+            (volatility - 0.7).abs() < 1e-9,
+            "failure_recovery → volatility=0.7 投入、got {volatility}"
+        );
+
+        // next_review_at も投入されるべき
+        let next: Option<String> = store
+            .conn()
+            .query_row(
+                "SELECT next_review_at FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .expect("V12 で next_review_at 列が追加されるべき");
+        assert!(next.is_some(), "save 内で next_review_at が計算投入される");
+    }
+
+    #[test]
+    fn t_review_tick_returns_due_ids_only() {
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+
+        // Phase 1 Red: review_tick は todo!() panic
+        let due = h.review_tick(now).expect("review_tick が成功して due IDs を返す");
+
+        // Phase 2 Green 期待: 空 DB なら 0 件
+        assert_eq!(due.len(), 0, "空 DB は due 0 件");
+    }
+
+    #[test]
+    fn t_record_review_confirmed_updates_freshness_and_next_review_at() {
+        use crate::memory::review::ReviewOutcome;
+
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let id = h
+            .save(
+                "record review test",
+                &["rec_trigger".to_string()],
+                None,
+                "test",
+                "efficiency",
+            )
+            .unwrap();
+
+        // freshness を 0.3 に下げてから Confirmed で 1.0 に reset 期待
+        store
+            .conn()
+            .execute(
+                "UPDATE heuristics SET freshness = 0.3 WHERE id = ?1",
+                params![id],
+            )
+            .expect("V12 freshness 列 update");
+
+        let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        h.record_review(id, ReviewOutcome::Confirmed, now)
+            .expect("record_review が成功");
+
+        let freshness: f64 = store
+            .conn()
+            .query_row(
+                "SELECT freshness FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (freshness - 1.0).abs() < 1e-9,
+            "Confirmed で freshness=1.0、got {freshness}"
+        );
+
+        // last_reviewed_at と next_review_at が更新される
+        let (last, next): (Option<String>, Option<String>) = store
+            .conn()
+            .query_row(
+                "SELECT last_reviewed_at, next_review_at FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(last.is_some(), "last_reviewed_at が記録される");
+        assert!(next.is_some(), "next_review_at が再計算される");
+    }
+
+    #[test]
+    fn t_schema_v12_migration_adds_9_columns() {
+        // V12 migration で 9 列が ALTER TABLE で追加されることを確認
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+
+        for col in [
+            "review_status",
+            "importance",
+            "volatility",
+            "freshness",
+            "source_confidence",
+            "last_reviewed_at",
+            "next_review_at",
+            "review_count",
+            "stale_count",
+        ] {
+            // SELECT が成功すれば列が存在
+            let result: Result<i64> = store
+                .conn()
+                .query_row(
+                    &format!("SELECT COUNT({col}) FROM heuristics"),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.into());
+            assert!(
+                result.is_ok(),
+                "V12 で列 '{col}' が追加されるべき (Phase 2 Green)、err={result:?}"
+            );
+        }
     }
 }

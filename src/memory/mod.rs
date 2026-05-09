@@ -6,6 +6,7 @@ pub mod feedback;
 pub mod graph;
 pub mod heuristics;
 pub mod mocks;
+pub mod review;
 pub mod search;
 pub mod skill;
 pub mod store;
