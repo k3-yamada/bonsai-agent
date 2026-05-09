@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::conversation::Message;
 use crate::agent::event_store::{Event, EventRepository};
 use crate::cancel::CancellationToken;
+use crate::memory::decay;
 use crate::runtime::inference::LlmBackend;
 
 /// Reflection prompt template (`prompts/heuristic_reflection.txt`、compile-time embed)。
@@ -203,6 +204,10 @@ impl<'a> HeuristicStore<'a> {
     }
 
     /// 注入済 heuristic に対する task 完了結果を反映 (utility update)。
+    ///
+    /// `BONSAI_DECAY_ENABLED=1` で opt-in: `compute_stability_boost(s_old, 1.5)` で
+    /// stability column を retrieval 反応により増加 (項目 217、Cerememory ADR-005)。
+    /// `s_old.max(0.001)` clamp で R2 (s_old=0 で powf(-0.2)=inf) を軽減。
     pub fn record_outcome(&self, id: i64, task_succeeded: bool) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let success_inc: i64 = if task_succeeded { 1 } else { 0 };
@@ -214,10 +219,32 @@ impl<'a> HeuristicStore<'a> {
              WHERE id = ?3",
             params![success_inc, &now, id],
         )?;
+
+        // 項目 217 (Cerememory decay port): opt-in stability boost
+        if decay::is_decay_enabled() {
+            let s_old: f64 = self
+                .conn
+                .query_row(
+                    "SELECT stability FROM heuristics WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(1.0);
+            let s_new = decay::compute_stability_boost(s_old.max(0.001), 1.5);
+            self.conn.execute(
+                "UPDATE heuristics SET stability = ?1 WHERE id = ?2",
+                params![s_new, id],
+            )?;
+        }
+
         Ok(())
     }
 
     /// 月次 prune (score < 0.2 + used_count 条件 / 上限 200 超過は score 昇順削除)。
+    ///
+    /// `BONSAI_DECAY_ENABLED=1` で opt-in: ステップ 3 (200 超過削除) のみ
+    /// fidelity 昇順 (decay-adjusted) で削除順序を決定 (項目 217)。
+    /// ステップ 1/2 は time-based filter として legacy 維持 (env と無関係)。
     pub fn prune(&self) -> Result<usize> {
         let mut total: usize = 0;
         // 1. 低スコア + 試行回数が enough にも関わらず utility が伸びない
@@ -232,20 +259,72 @@ impl<'a> HeuristicStore<'a> {
                AND created_at < datetime('now', '-30 day')",
             [],
         )?;
-        // 3. 総数 200 超過 → score 昇順で超過分削除
+        // 3. 総数 200 超過 → score 昇順 (legacy) or fidelity 昇順 (decay opt-in)
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM heuristics", [], |row| row.get(0))?;
         if count > 200 {
             let excess = count - 200;
-            total += self.conn.execute(
-                "DELETE FROM heuristics WHERE id IN (
-                     SELECT id FROM heuristics ORDER BY score ASC, id ASC LIMIT ?1
-                 )",
-                params![excess],
-            )?;
+            if decay::is_decay_enabled() {
+                total += self
+                    .prune_decay_adjusted_excess(excess, chrono::Utc::now().timestamp() as f64)?;
+            } else {
+                total += self.conn.execute(
+                    "DELETE FROM heuristics WHERE id IN (
+                         SELECT id FROM heuristics ORDER BY score ASC, id ASC LIMIT ?1
+                     )",
+                    params![excess],
+                )?;
+            }
         }
         Ok(total)
+    }
+
+    /// 項目 217 (Cerememory decay port): fidelity 昇順で超過分削除。
+    /// `now_secs` は fn 引数化で test の決定論性を保つ (R3 軽減、plan §4.4)。
+    /// `last_used_at` 未設定の row は now_secs と等価とみなし elapsed=0 で扱う
+    /// (= score 単体で順序、legacy と同等)。
+    fn prune_decay_adjusted_excess(&self, excess: i64, now_secs: f64) -> Result<usize> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, score, stability, last_used_at FROM heuristics")?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let score: f64 = row.get(1)?;
+            let stability: f64 = row.get(2)?;
+            let last_used: Option<String> = row.get(3)?;
+            Ok((id, score, stability, last_used))
+        })?;
+
+        let mut entries: Vec<(i64, f64)> = Vec::new();
+        for row in rows {
+            let (id, score, stability, last_used) = row?;
+            let last_used_secs = last_used
+                .as_ref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.timestamp() as f64)
+                .unwrap_or(now_secs);
+            let elapsed = (now_secs - last_used_secs).max(0.0);
+            let fidelity = decay::compute_fidelity(score, elapsed, stability.max(0.001), 0.3, 1.0);
+            entries.push((id, fidelity));
+        }
+        drop(stmt);
+
+        // fidelity 昇順 sort、bottom `excess` 件削除
+        entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let to_delete: Vec<i64> = entries
+            .iter()
+            .take(excess as usize)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut deleted = 0usize;
+        for id in to_delete {
+            deleted += self
+                .conn
+                .execute("DELETE FROM heuristics WHERE id = ?1", params![id])?;
+        }
+        Ok(deleted)
     }
 
     /// Lab cycle 跨ぎの汚染リセット (項目 206 reset_session_data_for_lab と協調)。
@@ -989,5 +1068,184 @@ mod tests {
         let c = &candidates[0];
         assert_eq!(c.category, "failure_recovery");
         assert_eq!(c.source_session_id, "s_mock");
+    }
+
+    // ===========================================================================
+    // 項目 217: Cerememory power-law decay port 統合 test
+    //
+    // env mutation race を避けるため module-local Mutex で serialize する
+    // (decay.rs DECAY_TEST_LOCK と独立、こちらは heuristics 統合専用)。
+    // ===========================================================================
+
+    static DECAY_INTEGRATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_decay_env() {
+        unsafe {
+            std::env::remove_var("BONSAI_DECAY_ENABLED");
+        }
+    }
+
+    #[test]
+    fn t_record_outcome_boosts_stability_when_decay_enabled() {
+        let _g = DECAY_INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_decay_env();
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let id = h
+            .save(
+                "テスト advice for decay",
+                &["decay_test".to_string()],
+                None,
+                "test",
+                "efficiency",
+            )
+            .unwrap();
+
+        let s_before: f64 = store
+            .conn()
+            .query_row(
+                "SELECT stability FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (s_before - 1.0).abs() < 1e-9,
+            "V11 migration で default stability = 1.0、got {s_before}"
+        );
+
+        unsafe {
+            std::env::set_var("BONSAI_DECAY_ENABLED", "1");
+        }
+        h.record_outcome(id, true).unwrap();
+
+        let s_after: f64 = store
+            .conn()
+            .query_row(
+                "SELECT stability FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            s_after > s_before,
+            "decay enabled で stability boost: s_after={s_after} > s_before={s_before}"
+        );
+        reset_decay_env();
+    }
+
+    #[test]
+    fn t_record_outcome_does_not_change_stability_when_decay_disabled() {
+        let _g = DECAY_INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_decay_env();
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let id = h
+            .save(
+                "legacy advice",
+                &["legacy_test".to_string()],
+                None,
+                "test",
+                "efficiency",
+            )
+            .unwrap();
+
+        h.record_outcome(id, true).unwrap();
+
+        let s_after: f64 = store
+            .conn()
+            .query_row(
+                "SELECT stability FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (s_after - 1.0).abs() < 1e-9,
+            "env unset で stability=1.0 維持 (legacy 互換)、got {s_after}"
+        );
+    }
+
+    #[test]
+    fn t_prune_decay_adjusted_excess_with_fixed_now() {
+        let _g = DECAY_INTEGRATION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_decay_env();
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+
+        // 3 row insert: id=1 (古い、低 score)、id=2 (新しい、低 score)、id=3 (新しい、高 score)
+        let now_secs: f64 = 1_700_000_000.0;
+        let day_ago = chrono::DateTime::from_timestamp((now_secs - 86400.0) as i64, 0)
+            .unwrap()
+            .to_rfc3339();
+        let sec_ago = chrono::DateTime::from_timestamp((now_secs - 1.0) as i64, 0)
+            .unwrap()
+            .to_rfc3339();
+
+        for (i, (last_used, score)) in [(&day_ago, 0.5), (&sec_ago, 0.5), (&sec_ago, 0.9)]
+            .iter()
+            .enumerate()
+        {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO heuristics (advice, trigger_patterns, source_task, category,
+                     score, fingerprint, created_at, last_used_at, stability)
+                     VALUES (?1, '[]', '', 'test', ?2, ?3, ?4, ?4, 1.0)",
+                    params![
+                        format!("advice_{}", i),
+                        score,
+                        format!("fp_{}", i),
+                        last_used,
+                    ],
+                )
+                .unwrap();
+        }
+
+        // 1 件削除 → 期待: id=1 (古い + 低 score) が最低 fidelity
+        let deleted = h.prune_decay_adjusted_excess(1, now_secs).unwrap();
+        assert_eq!(deleted, 1, "1 件削除");
+
+        let remaining: Vec<i64> = store
+            .conn()
+            .prepare("SELECT id FROM heuristics ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            !remaining.contains(&1),
+            "id=1 (古い、低 fidelity) が削除されること: remaining={remaining:?}"
+        );
+        assert_eq!(remaining.len(), 2, "残り 2 件");
+    }
+
+    #[test]
+    fn t_schema_v11_migration_adds_stability_default_1_0() {
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let h = HeuristicStore::new(store.conn());
+        let id = h
+            .save("v11 test", &["v11".to_string()], None, "test", "efficiency")
+            .unwrap();
+
+        let stability: f64 = store
+            .conn()
+            .query_row(
+                "SELECT stability FROM heuristics WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            (stability - 1.0).abs() < 1e-9,
+            "V11 migration で stability column が DEFAULT 1.0 で挿入: {stability}"
+        );
     }
 }

@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 ///
@@ -55,6 +55,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 10,
         description: "ERL heuristics pool: 自然言語助言の第 4 メモリ層 (項目 213)",
         sql: SCHEMA_V10,
+    },
+    Migration {
+        version: 11,
+        description: "Cerememory decay port: heuristics に stability 列追加 (項目 217)",
+        sql: SCHEMA_V11,
     },
 ];
 
@@ -261,6 +266,15 @@ CREATE TABLE IF NOT EXISTS heuristics (
     last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_heuristics_category ON heuristics(category);
+"#;
+
+/// 項目 217 (Cerememory power-law decay port、MIT、Copyright 2026 CORe Inc.):
+/// `heuristics` テーブルに `stability REAL NOT NULL DEFAULT 1.0` 列を追加。
+/// `crate::memory::decay::compute_stability_boost` で `record_outcome` 時に boost 適用、
+/// `compute_fidelity` で `prune` 時に decay-adjusted 削除順序を計算。
+/// production default OFF (`BONSAI_DECAY_ENABLED` env unset) で既存挙動 100% 維持。
+const SCHEMA_V11: &str = r#"
+ALTER TABLE heuristics ADD COLUMN stability REAL NOT NULL DEFAULT 1.0;
 "#;
 
 #[cfg(test)]

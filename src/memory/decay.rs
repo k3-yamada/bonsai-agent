@@ -35,15 +35,32 @@ pub(crate) fn is_decay_enabled() -> bool {
 /// ```
 ///
 /// Returns a value clamped to [0.0, 1.0].
+///
+/// # Arguments
+/// * `f0` - initial fidelity score (0.0..=1.0)
+/// * `t_secs` - elapsed time in seconds since last access
+/// * `stability` - stability constant S (increases with retrieval)
+/// * `decay_exponent` - exponent d (default: 0.3)
+/// * `emotion_mod` - emotional modulation factor E_mod (>= 1.0 for emotional memories)
 #[inline]
 pub(crate) fn compute_fidelity(
-    _f0: f64,
-    _t_secs: f64,
-    _stability: f64,
-    _decay_exponent: f64,
-    _emotion_mod: f64,
+    f0: f64,
+    t_secs: f64,
+    stability: f64,
+    decay_exponent: f64,
+    emotion_mod: f64,
 ) -> f64 {
-    todo!("Phase 2 Green: Cerememory math.rs から逐語 port")
+    debug_assert!(stability > 0.0, "stability must be positive");
+
+    if t_secs <= 0.0 {
+        // No time has passed; fidelity unchanged (but still apply emotion_mod clamping).
+        return (f0 * emotion_mod).clamp(0.0, 1.0);
+    }
+
+    // (1 + t/S)^(-d)
+    let temporal_decay = (1.0 + t_secs / stability).powf(-decay_exponent);
+
+    (f0 * temporal_decay * emotion_mod).clamp(0.0, 1.0)
 }
 
 /// Compute accumulated noise level.
@@ -51,14 +68,26 @@ pub(crate) fn compute_fidelity(
 /// ```text
 /// N(t) = N_0 + interference_rate * sqrt(t) * (1 - F(t))
 /// ```
+///
+/// Returns a value clamped to [0.0, 1.0].
+///
+/// # Arguments
+/// * `n0` - initial noise level (0.0..=1.0)
+/// * `t_secs` - elapsed time in seconds
+/// * `fidelity` - current fidelity F(t) after decay
+/// * `interference_rate` - rate constant (default: 0.1)
+///
+/// Note: bonsai では現時点で未使用、Cerememory との parity 維持のため port。
+#[allow(dead_code)]
 #[inline]
-pub(crate) fn compute_noise(
-    _n0: f64,
-    _t_secs: f64,
-    _fidelity: f64,
-    _interference_rate: f64,
-) -> f64 {
-    todo!("Phase 2 Green: Cerememory math.rs から逐語 port")
+pub(crate) fn compute_noise(n0: f64, t_secs: f64, fidelity: f64, interference_rate: f64) -> f64 {
+    if t_secs <= 0.0 {
+        return n0.clamp(0.0, 1.0);
+    }
+
+    let noise_increment = interference_rate * t_secs.sqrt() * (1.0 - fidelity);
+
+    (n0 + noise_increment).clamp(0.0, 1.0)
 }
 
 /// Compute the new stability constant after a retrieval/reinforcement event.
@@ -66,9 +95,15 @@ pub(crate) fn compute_noise(
 /// ```text
 /// S_new = S_old * (1 + retrieval_boost * S_old^(-0.2))
 /// ```
+///
+/// # Arguments
+/// * `s_old` - current stability constant
+/// * `retrieval_boost` - boost constant (default: 1.5)
 #[inline]
-pub(crate) fn compute_stability_boost(_s_old: f64, _retrieval_boost: f64) -> f64 {
-    todo!("Phase 2 Green: Cerememory math.rs から逐語 port")
+pub(crate) fn compute_stability_boost(s_old: f64, retrieval_boost: f64) -> f64 {
+    debug_assert!(s_old > 0.0, "stability must be positive");
+
+    s_old * (1.0 + retrieval_boost * s_old.powf(-0.2))
 }
 
 /// Compute the emotional modulation factor from emotion intensity.
@@ -76,9 +111,16 @@ pub(crate) fn compute_stability_boost(_s_old: f64, _retrieval_boost: f64) -> f64
 /// ```text
 /// E_mod = 1.0 + emotion_intensity * 0.5
 /// ```
+///
+/// Emotional memories decay more slowly because E_mod > 1.0 acts as a
+/// scaling factor that partially counteracts temporal decay.
+///
+/// Note: bonsai では現時点で未使用、Cerememory との parity 維持のため port。
+/// 将来 emotion-aware heuristic ranking が必要になった場合に活用。
+#[allow(dead_code)]
 #[inline]
-pub(crate) fn compute_emotion_mod(_emotion_intensity: f64) -> f64 {
-    todo!("Phase 2 Green: Cerememory math.rs から逐語 port")
+pub(crate) fn compute_emotion_mod(emotion_intensity: f64) -> f64 {
+    1.0 + emotion_intensity * 0.5
 }
 
 #[cfg(test)]
@@ -119,10 +161,7 @@ mod tests {
             unsafe {
                 std::env::set_var("BONSAI_DECAY_ENABLED", value);
             }
-            assert!(
-                is_decay_enabled(),
-                "env={value} (case-insensitive) で true"
-            );
+            assert!(is_decay_enabled(), "env={value} (case-insensitive) で true");
         }
         reset_decay_env();
     }
@@ -160,12 +199,19 @@ mod tests {
 
     #[test]
     fn t_compute_noise_increases_with_sqrt_t() {
+        // 値域は clamp [0.0, 1.0] に到達しないよう small interference + high fidelity で抑制。
+        // n_1: 0 + 0.001 * sqrt(100) * (1 - 0.99) = 0.0001
+        // n_2: 0 + 0.001 * sqrt(400) * (1 - 0.99) = 0.0002 = 2 * n_1
         let n0 = 0.0;
-        let n_1h = compute_noise(n0, 3600.0, 0.5, 0.1);
-        let n_4h = compute_noise(n0, 14400.0, 0.5, 0.1);
-        assert!(n_4h > n_1h, "Noise must accumulate as sqrt(t): {n_4h} > {n_1h}");
-        // sqrt(14400/3600) = 2、つまり n_4h ≈ 2 * n_1h
-        assert!((n_4h / n_1h - 2.0).abs() < 0.01, "sqrt(4) = 2 倍関係");
+        let n_1 = compute_noise(n0, 100.0, 0.99, 0.001);
+        let n_2 = compute_noise(n0, 400.0, 0.99, 0.001);
+        assert!(n_2 > n_1, "Noise must accumulate as sqrt(t): {n_2} > {n_1}");
+        // sqrt(400/100) = 2、つまり n_2 ≈ 2 * n_1
+        assert!(
+            (n_2 / n_1 - 2.0).abs() < 0.01,
+            "sqrt(4) = 2 倍関係: ratio={}",
+            n_2 / n_1
+        );
     }
 
     // ── compute_stability_boost ───────────────────────────────────────────
