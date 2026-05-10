@@ -179,10 +179,7 @@ impl<'a> EvolutionEngine<'a> {
                 entry.id.clone(),
             ];
 
-            let memory_id = self.store.save_memory(&content, "knowledge", &tags)?;
-            // Plan A1+A3 G-2.3: BONSAI_VEC_INDEX_ENABLED=1 で vec_memories へ動的 populate
-            // (env unset で no-op、既存挙動 100% 維持)
-            let _ = self.store.index_memory_if_enabled(memory_id, &content);
+            self.store.save_memory(&content, "knowledge", &tags)?;
             saved.push(entry.id.clone());
         }
 
@@ -250,13 +247,9 @@ impl<'a> EvolutionEngine<'a> {
                         .unwrap_or_default()
                         .is_empty()
                     {
-                        // Plan A1+A3 G-2.3: env=1 で vec_memories 動的 populate
-                        if let Ok(memory_id) =
-                            self.store
-                                .save_memory(&msg, "insight", &["auto-improve".into()])
-                        {
-                            let _ = self.store.index_memory_if_enabled(memory_id, &msg);
-                        }
+                        let _ = self
+                            .store
+                            .save_memory(&msg, "insight", &["auto-improve".into()]);
                         applied.push(msg);
                     }
                 }
@@ -268,13 +261,9 @@ impl<'a> EvolutionEngine<'a> {
             && report.success_rate > 0.0
         {
             let msg = format!("[auto-learn] 成功率{:.0}%", report.success_rate * 100.0);
-            // Plan A1+A3 G-2.3: env=1 で vec_memories 動的 populate
-            if let Ok(memory_id) = self
+            let _ = self
                 .store
-                .save_memory(&msg, "insight", &["auto-improve".into()])
-            {
-                let _ = self.store.index_memory_if_enabled(memory_id, &msg);
-            }
+                .save_memory(&msg, "insight", &["auto-improve".into()]);
             applied.push(msg);
         }
         Ok(applied)

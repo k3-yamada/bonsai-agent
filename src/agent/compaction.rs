@@ -634,12 +634,8 @@ pub fn flush_before_compaction(messages: &[Message], store: Option<&MemoryStore>
         return;
     }
     let combined = flushed.join("\n---\n");
-    // Plan A1+A3 G-2.3: env=1 で vec_memories 動的 populate (env unset で no-op)
-    match store.save_memory(&combined, "context_flush", &["compaction".to_string()]) {
-        Ok(memory_id) => {
-            let _ = store.index_memory_if_enabled(memory_id, &combined);
-        }
-        Err(e) => eprintln!("[flush] メモリ保存失敗: {e}"),
+    if let Err(e) = store.save_memory(&combined, "context_flush", &["compaction".to_string()]) {
+        eprintln!("[flush] メモリ保存失敗: {e}");
     }
 }
 #[allow(clippy::possible_missing_else)]
@@ -1327,46 +1323,5 @@ mod tests {
         let unresolved = collect_unresolved(&messages, 1);
         assert_eq!(unresolved.len(), 1, "実エラーは未解決事項として収集する");
         assert!(unresolved[0].contains("ツール実行エラー"));
-    }
-
-    // --- Plan A1+A3 (`.claude/plan/sqlite-vec-a1-a3-impl.md`) Phase 1 Red T-1.5 ---
-    // flush_before_compaction (line 622) の save_memory 直後に
-    // index_memory_if_enabled hook を配線する Phase 2 Green を駆動する Red test。
-    // Phase 1 では production code に hook 未配線のため、env=1 でも
-    // vec_memories は populate されず assertion で fail = Red 確証。
-    #[cfg(feature = "embeddings")]
-    #[test]
-    fn t_a1_5_flush_before_compaction_indexes_to_vec_memories_when_env_one() {
-        use crate::memory::store::MemoryStore;
-        use crate::memory::vec_index_toggle::VEC_INDEX_TEST_LOCK;
-        let _g = VEC_INDEX_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("BONSAI_VEC_INDEX_ENABLED", "1") };
-
-        let store = MemoryStore::in_memory().unwrap();
-
-        // boundary = messages.len().saturating_sub(6) なので、合計 8 件で
-        // boundary=2 → 先頭 2 件が flush 対象となる。
-        // 先頭の Assistant content を 150 chars (>100) にして 1 件 flush 確定させる。
-        let mut messages = vec![Message::system("s")];
-        messages.push(Message::assistant("a".repeat(150))); // > 100 chars、flush 対象
-        for i in 0..6 {
-            messages.push(Message::user(format!("q{i}")));
-        }
-
-        flush_before_compaction(&messages, Some(&store));
-
-        let count: i64 = store
-            .conn()
-            .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))
-            .unwrap();
-
-        unsafe { std::env::remove_var("BONSAI_VEC_INDEX_ENABLED") };
-
-        assert!(
-            count >= 1,
-            "env=1 で flush_before_compaction が vec_memories に投入すべき (got {count})"
-        );
     }
 }
