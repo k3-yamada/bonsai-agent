@@ -120,18 +120,22 @@ impl<'a> HybridSearch<'a> {
         Ok(scored)
     }
 
-    /// memory 保存後に呼出して vec_memories へ embedding を投入する hook
-    /// (Plan G-2.5、insert path 統合)。caller は `save_memory` 戻り値の memory_id と
-    /// content 原文を渡す。embedding は内部で `embedder.embed()` 経由生成。
-    /// caller-side 配線 (HybridSearch::index_memory を save_memory 直後に呼ぶ箇所) は
-    /// Phase 4 smoke で必要性が確認されてから実装 (現時点では未配線で hook のみ提供)。
+    /// memory 保存後に呼出して vec_memories へ embedding を投入する hook (legacy 入口)。
+    ///
+    /// **本機能は plan A1+A3 で `MemoryStore::index_memory_if_enabled` (env opt-in) に
+    /// 統合された** (R-5 解消、source-of-truth 1 つに統一)。本 method は env-gated
+    /// 統合経路への delegate ラッパーで、`BONSAI_VEC_INDEX_ENABLED=1` で有効化、
+    /// env unset で no-op。
+    ///
+    /// production の caller-side 配線 (evolution.rs / compaction.rs) は
+    /// `MemoryStore::index_memory_if_enabled` を直接呼出 (plan G-2.3)。本 method は
+    /// 外部 caller への後方互換維持のために残置 (現状 0 caller)。
+    ///
+    /// 注: 本 method 経由は `HybridSearch::new` で渡された embedder を使わず、
+    /// `MemoryStore` 内 `OnceLock<Embedder>` (process-global 1 つ) を使用する。
     #[cfg(feature = "embeddings")]
     pub fn index_memory(&self, memory_id: i64, content: &str) -> Result<()> {
-        let emb = self.embedder.embed(&[content])?;
-        if let Some(first) = emb.first() {
-            self.store.insert_memory_embedding(memory_id, first)?;
-        }
-        Ok(())
+        self.store.index_memory_if_enabled(memory_id, content)
     }
 
     /// Reciprocal Rank Fusion
