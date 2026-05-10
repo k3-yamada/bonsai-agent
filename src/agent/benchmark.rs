@@ -34,11 +34,15 @@ pub enum TaskTier {
     Extended,
 }
 
-/// AgentFloor 6-tier capability ladder (項目 213 候補、arxiv 2605.00334)。
+/// AgentFloor 6-tier capability ladder (CLAUDE.md 項目 209、arxiv 2605.00334)。
+///
+/// 由来: "How Far Up the Tool Use Ladder Can Small Open-Weight Models Go?" (2026-05)。
+/// 小型 open-weight モデル専用 benchmark の 6 段能力梯子を bonsai-agent Lab 評価軸に統合。
 ///
 /// 直交軸: `TaskTier` (Core/Extended、項目 172) は「実装年代」、本 enum は「能力梯子」。
-/// Phase 2 Green は最小 stub: enum + 4 method のみ。`agentfloor_tasks()` /
-/// `compute_capability_tier_avg` は別 plan で実装される (現状: empty / None stub)。
+/// `BenchmarkTask::capability_tier` に tag 付与し `compute_capability_tier_avg()` で集計。
+/// `agentfloor_tasks()` (30 task = 5/tier × 6 tier) で専用スイートを提供。
+/// `is_ladder_mode_enabled()` / `BONSAI_BENCH_LADDER=1` env で切替 (既存 40 task と後方互換)。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, Hash)]
 pub enum CapabilityTier {
     #[default]
@@ -463,6 +467,13 @@ pub struct MultiRunBenchmarkResult {
     /// Extended tier タスクの平均 mean_score (項目 172 P1)。該当タスクなしなら None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extended_avg_score: Option<f64>,
+    /// AgentFloor 6-tier 別平均 mean_score (Phase 3 Refactor、arxiv 2605.00334)。
+    ///
+    /// 添字は `CapabilityTier::all()` 順 (T1=0 .. T6=5)。
+    /// 該当 tier のタスクがない場合は `None`。agentfloor_tasks() 非使用時も `None`。
+    /// serde default で旧データとの互換を保つ (旧 JSON に列がなければ None)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_avg_scores: Option<[Option<f64>; 6]>,
 }
 
 /// tier 別平均 mean_score を算出（項目 172 P1）。
@@ -487,11 +498,15 @@ fn compute_tier_avg(
     }
 }
 
-/// CapabilityTier 別平均 mean_score を算出 (AgentFloor Phase 2 Green、arxiv 2605.00334)。
+/// CapabilityTier 別平均 mean_score を算出 (CLAUDE.md 項目 209、arxiv 2605.00334)。
 ///
+/// AgentFloor 6-tier capability ladder の各 tier について bonsai-8B の平均スコアを計算。
 /// `task_scores` の各 score について、`task_descs` から `capability_tier` を引いて
 /// 指定 tier に一致する task の mean_score 平均を返す。該当 tier の task が 1 件も
 /// ないなら None を返す。
+///
+/// 結果は `MultiRunBenchmarkResult::tier_avg_scores` の各スロットに格納し、
+/// `weakest_tier()` / `paper_delta_map()` で「攻めるべき tier」を特定するために使用する。
 #[allow(dead_code)]
 pub(crate) fn compute_capability_tier_avg(
     task_scores: &[MultiRunTaskScore],
@@ -586,6 +601,44 @@ impl MultiRunBenchmarkResult {
             .sum();
         sum / self.task_scores.len() as f64
     }
+
+    /// 全 6 tier の中で平均スコアが最低の tier を返す (AgentFloor Phase 3、arxiv 2605.00334)。
+    ///
+    /// `tier_avg_scores` が None / 全 None の場合は `None` を返す。
+    /// tie 時は T1→T6 順で最初の最低値を返す (plan §5 Phase 3 仕様)。
+    pub fn weakest_tier(&self) -> Option<(CapabilityTier, f64)> {
+        let scores = self.tier_avg_scores.as_ref()?;
+        let tiers = CapabilityTier::all();
+        tiers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &tier)| scores[i].map(|s| (tier, s)))
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    }
+
+    /// 各 tier について `bonsai_avg - paper_baseline` を返す (AgentFloor Phase 3、arxiv 2605.00334)。
+    ///
+    /// 添字は `CapabilityTier::all()` 順 (T1=0 .. T6=5)。
+    /// `tier_avg_scores` が None、または該当 tier が None の場合は `None`。
+    /// 負値 = bonsai が paper 未満 = 攻めるべき tier を示す。
+    pub fn paper_delta_map(&self) -> [Option<f64>; 6] {
+        let mut out = [None; 6];
+        if let Some(scores) = &self.tier_avg_scores {
+            for (i, &tier) in CapabilityTier::all().iter().enumerate() {
+                out[i] = scores[i].map(|s| s - tier.paper_baseline());
+            }
+        }
+        out
+    }
+}
+
+/// `BONSAI_BENCH_LADDER=1` が設定されているか確認する (AgentFloor Phase 3、arxiv 2605.00334)。
+///
+/// 設定されている場合は `agentfloor_tasks()` (30 task) を使用し、
+/// 未設定 (default) は既存 `default_tasks()` (40 task) を維持する (後方互換)。
+/// Cerememory 三本柱 (`BONSAI_DECAY_ENABLED` 等) と同パターン。
+pub fn is_ladder_mode_enabled() -> bool {
+    std::env::var("BONSAI_BENCH_LADDER").is_ok_and(|v| v == "1")
 }
 
 /// ベンチマークスイート
@@ -653,10 +706,16 @@ impl BenchmarkSuite {
         }
     }
 
-    /// AgentFloor 専用 30 task suite (Phase 2 Green、arxiv 2605.00334)。
+    /// AgentFloor 専用 30 task suite (CLAUDE.md 項目 209、arxiv 2605.00334)。
     ///
+    /// 由来: "How Far Up the Tool Use Ladder Can Small Open-Weight Models Go?" (2026-05)。
     /// 6 tier × 5 task = 30 task。既存 `default_tasks()` から各 tier 代表を厳選し、
-    /// T6 (LongHorizonPlanning) 5 task は新規追加。`BONSAI_BENCH_LADDER=1` で使用。
+    /// T6 (LongHorizonPlanning) 5 task は新規追加。
+    ///
+    /// `BONSAI_BENCH_LADDER=1` env (`is_ladder_mode_enabled()`) で本スイートを使用。
+    /// 未設定 (default) は既存 `default_tasks()` (40 task) 維持 (後方互換)。
+    /// tier 別集計は `compute_capability_tier_avg()` / `MultiRunBenchmarkResult::tier_avg_scores`
+    /// に格納し、`weakest_tier()` / `paper_delta_map()` で分析する。
     pub fn agentfloor_tasks() -> Self {
         Self {
             tasks: vec![
@@ -1643,6 +1702,8 @@ impl BenchmarkSuite {
             duration_secs: start.elapsed().as_secs_f64(),
             core_avg_score,
             extended_avg_score,
+            // AgentFloor tier 別集計は Phase 4 (Lab 組込) で設定。run_k 単体では None。
+            tier_avg_scores: None,
         })
     }
 
@@ -2225,6 +2286,7 @@ mod tests {
             duration_secs: 10.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         assert!((result.composite_pass_at_k() - 0.5).abs() < 0.001);
         assert!((result.composite_score() - 0.5).abs() < 0.001);
@@ -2309,6 +2371,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let experiment = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
@@ -2319,6 +2382,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         assert!(experiment.variance_amplification_vs(&baseline).is_none());
     }
@@ -2335,6 +2399,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let experiment = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
@@ -2345,6 +2410,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let vaf = experiment.variance_amplification_vs(&baseline).unwrap();
         assert!(vaf > 1.0, "expected amplification VAF > 1.0, got {vaf}");
@@ -2398,6 +2464,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         assert!(
             (result.composite_reliability_decay() - 0.75).abs() < 1e-6,
@@ -3182,6 +3249,97 @@ mod tests {
             "T6 task ゼロで None 期待、実際 {:?}",
             t6_avg
         );
+    }
+
+    // ========================================================================
+    // Phase 3 Refactor: weakest_tier / paper_delta_map / is_ladder_mode_enabled
+    //
+    // 由来: arxiv 2605.00334 AgentFloor — plan §5 Phase 3 (Refactor)。
+    // 実装前に先にテストを追加し Red を確認する (TDD strict)。
+    // ========================================================================
+
+    #[test]
+    fn test_weakest_tier_basic() {
+        // tier_avg_scores: T1=0.80, T2=0.70, T3=0.60, T4=0.50, T5=0.40, T6=0.20
+        let scores: [Option<f64>; 6] = [
+            Some(0.80),
+            Some(0.70),
+            Some(0.60),
+            Some(0.50),
+            Some(0.40),
+            Some(0.20), // T6 が最低
+        ];
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: Some(scores),
+        };
+        let weakest = result.weakest_tier();
+        assert!(weakest.is_some(), "weakest_tier は Some を返すべき");
+        let (tier, score) = weakest.unwrap();
+        assert_eq!(tier, CapabilityTier::LongHorizonPlanning, "T6 が最低スコア");
+        assert!(
+            (score - 0.20).abs() < 1e-6,
+            "score=0.20 期待、実際 {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_paper_delta_map_basic() {
+        // T1=0.80 (paper 0.85 → delta -0.05)、T4=0.55 (paper 0.50 → delta +0.05)、T6=None
+        let scores: [Option<f64>; 6] = [
+            Some(0.80), // T1
+            Some(0.70), // T2
+            Some(0.60), // T3
+            Some(0.55), // T4
+            Some(0.40), // T5
+            None,       // T6 計測なし
+        ];
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: Some(scores),
+        };
+        let deltas = result.paper_delta_map();
+        // T1: 0.80 - 0.85 = -0.05
+        let t1 = deltas[0].expect("T1 delta は Some");
+        assert!(
+            (t1 - (-0.05)).abs() < 1e-6,
+            "T1 delta=-0.05 期待、実際 {}",
+            t1
+        );
+        // T4: 0.55 - 0.50 = +0.05
+        let t4 = deltas[3].expect("T4 delta は Some");
+        assert!((t4 - 0.05).abs() < 1e-6, "T4 delta=+0.05 期待、実際 {}", t4);
+        // T6: None (計測なし)
+        assert!(deltas[5].is_none(), "T6 None (計測なし)");
+    }
+
+    #[test]
+    fn test_is_ladder_mode_enabled() {
+        // Rust 2024 edition では set_var/remove_var が unsafe (data race の可能性)
+        // シングルスレッドテストのため unsafe ブロックで包む
+        unsafe {
+            // env 未設定ならば false
+            std::env::remove_var("BONSAI_BENCH_LADDER");
+            assert!(
+                !is_ladder_mode_enabled(),
+                "BONSAI_BENCH_LADDER 未設定で false"
+            );
+            // "1" なら true
+            std::env::set_var("BONSAI_BENCH_LADDER", "1");
+            assert!(is_ladder_mode_enabled(), "BONSAI_BENCH_LADDER=1 で true");
+            // "0" なら false
+            std::env::set_var("BONSAI_BENCH_LADDER", "0");
+            assert!(!is_ladder_mode_enabled(), "BONSAI_BENCH_LADDER=0 で false");
+            // 片付け
+            std::env::remove_var("BONSAI_BENCH_LADDER");
+        }
     }
 
     #[allow(dead_code)]

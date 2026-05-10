@@ -2323,6 +2323,7 @@ mod tests {
             duration_secs: 1.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let descs = make_descs(&["t1", "t2"]);
 
@@ -2345,6 +2346,7 @@ mod tests {
             duration_secs: 1.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let descs = make_descs(&["t1", "t2"]);
 
@@ -2369,6 +2371,7 @@ mod tests {
             duration_secs: 1.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let descs = make_descs(&["t1", "t2"]);
 
@@ -2387,6 +2390,7 @@ mod tests {
             duration_secs: 1.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let descs = make_descs(&["t1"]);
 
@@ -2409,6 +2413,7 @@ mod tests {
             duration_secs: 1.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let descs = make_descs(&["t0", "t1", "t2", "t3", "t4"]);
 

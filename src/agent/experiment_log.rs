@@ -657,6 +657,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let experiment = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
@@ -667,6 +668,7 @@ mod tests {
             duration_secs: 0.0,
             core_avg_score: None,
             extended_avg_score: None,
+            tier_avg_scores: None,
         };
         let exp = Experiment::from_multi_results(
             "e1".into(),
