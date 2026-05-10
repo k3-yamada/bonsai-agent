@@ -102,6 +102,18 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 
 推奨着手順序 = AgentFloor Phase 3-5 (Phase 4 Smoke 進行中) → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。派生 plan 4 件全て起票済 (合計 2748 行)、production code 変更ゼロ。
 
+## 📊 Lab effectiveness paired t-test plan (G1-G4 実装 ACCEPT 後の Phase 5 検証)
+
+| ファイル | 対応 | ACCEPT 基準 | 工数 | 状態 |
+|---|---|---|---|---|
+| `lab-v17-erl-effectiveness.md` | ERL Heuristics (項目 213) | Δ≥+0.015 + p<0.1 | 15h 37min | ✅ 完走 / **REJECT** (項目 215、Δ=−0.0014, p=0.5072) |
+| `lab-v18-critic-effectiveness.md` | G1 Critic 別 LLM (`critic-separate-llm-impl.md`) | Δ≥+0.015 + p<0.1 (Lab v17 同形) | ~18-22h | 起票済 (539 行)、G1 実装 ACCEPT 後 |
+| (未起票) | G2 Agent-Side TDD (`agent-side-tdd-enforcement-impl.md`) | 同左 | ~18-22h | Lab v19、G2 実装 ACCEPT 後 |
+| (未起票) | G3 並列 Sub-Agent (`parallel-subagent-roles-impl.md`) | 同左 | ~18-22h | Lab v20、G3 実装 ACCEPT 後 |
+| (未起票) | G4 Task-Aware Prompt (`task-aware-system-prompt-impl.md`) | 同左 | ~12-18h | Lab v21、G4 実装 ACCEPT 後 |
+
+REJECT 時は項目 222 (sqlite-vec wiring 削除) と同 pattern で dead-code 削除経路 (各 plan §6.2 / §14 で明記)。Lab 天井 7 連続 (項目 215) 打開仮説の falsifiable hypothesis 検証経路。
+
 ## メンテナンス方針
 
 - 新規 plan 作成時、本 INDEX に行を追加
