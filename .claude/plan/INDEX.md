@@ -72,8 +72,9 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `cerememory-review-state-v12-impl.md` | `co-r-e/cerememory` ADR-011 (Strength/Freshness 分離) | 1.5 day | Lab v19 paired t-test (freshness gate ON/OFF) で Δscore ≥ +0.015 |
 | `cerememory-extension-roadmap-d-g.md` | Cerememory 5-store + 周辺機構の bonsai 取込み master roadmap (Phase D Emotional / E MCP / F Audit hashchain / G Working memory cap) | planning-only (1.5h、各 Phase 個別 plan は採否ゲート後展開) | Lab v17/v18/v19 結果に応じ Phase D-G 優先順動的決定 |
 | `ds4-insights-port-impl.md` | `antirez/ds4` (DeepSeek V4 Flash inference engine、5,036 stars、MIT) | Stage 1: 1 day / 全 Stage: ~3 day | Stage 1 paired smoke で duration −10% AND score ±0.02 |
+| `ds4-rax-skill-index-impl.md` | ds4 同梱 `rax.c` (Redis Adaptive Radix tree、antirez 単独著作、Redis 由来 2017-2018) | 1.5 day | Lab paired smoke で latency −50% 以上 + score ±0.02 (REJECT 時は項目 222 と同 dead-code 削除経路) |
 
-4 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)。ds4 plan は Stage 1 (KV cache wiring) のみ本 plan で完結、Stage 2 (rax skill index) / Stage 3 (tool_id replay map) は派生 plan で別 session 起票。Lab v17 完了後着手必須 (cerememory 3 plan)、ds4 は独立着手可。
+5 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)。ds4 plan は Stage 1 (KV cache wiring) のみ本 plan で完結、Stage 2 (rax skill index、`ds4-rax-skill-index-impl.md` 起票済) は独立着手可、Stage 3 (tool_id replay map) は Stage 1 ACCEPT 後に別 plan 起票。Lab v17 完了後着手必須 (cerememory 3 plan)、ds4 Stage 1/2 は独立着手可。
 
 ## 🔬 arxiv 2026-05 由来 plan (research_arxiv_2026_05_07.md ★★★ 高優先 10 件)
 
@@ -90,7 +91,16 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `mcp-bench-integration-impl.md` | arxiv MCP-Bench | 起票済 (540 行)、未実装 | ~12h |
 | `building-ai-coding-agents-gap-analysis.md` | arxiv survey 系 | meta-plan、4 派生候補 (G1-G4) 起票済、未着手 | ~0.5 day + 6 day |
 
-派生 plan 候補 (`building-ai-coding-agents-gap-analysis.md` 由来): G1 Critic 別 LLM ★★★ / G2 Agent-Side TDD ★★ / G3 並列 Sub-Agent ★ / G4 Task-Aware Prompt ★★。推奨着手順序 = AgentFloor Phase 3-5 → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。
+派生 plan 候補 (`building-ai-coding-agents-gap-analysis.md` 由来):
+
+| ファイル | 派生 ID | 優先度 | 工数 | 状態 |
+|---|---|---|---|---|
+| `critic-separate-llm-impl.md` | G1 Critic 別 LLM | ★★★ | ~1.25-1.5 day | 起票済 (640 行)、未実装 |
+| `task-aware-system-prompt-impl.md` | G4 Task-Aware Prompt | ★★ | ~0.7-1 day | 起票済 (519 行)、未実装 |
+| (未起票) | G2 Agent-Side TDD | ★★ | ~2 day | rate limit 後着手 |
+| (未起票) | G3 並列 Sub-Agent | ★ | ~1.5 day | 後段着手 |
+
+推奨着手順序 = AgentFloor Phase 3-5 (Phase 4 Smoke 進行中) → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。
 
 ## メンテナンス方針
 
