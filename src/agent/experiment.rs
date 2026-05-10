@@ -3,7 +3,9 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::agent::agent_loop::AgentConfig;
-use crate::agent::benchmark::{BenchmarkSuite, MultiRunBenchmarkResult, MultiRunConfig};
+use crate::agent::benchmark::{
+    BenchmarkSuite, CapabilityTier, MultiRunBenchmarkResult, MultiRunConfig,
+};
 use crate::agent::event_store::EventStore;
 use crate::agent::experiment_log::{
     AcceptedMutation, Experiment, ExperimentLog, MutationTheme, MutationType, load_accepted_archive,
@@ -852,6 +854,50 @@ pub fn extract_worst_reasoning(experiments: &[Experiment], worst_n: usize) -> Ve
     rejects
 }
 
+/// AgentFloor tier map をログ出力する (plan §4.5)。
+///
+/// `tier_avg_scores` が None (ladder mode 非使用) の場合は no-op。
+/// baseline 計測直後および各実験計測直後に呼ぶことで、
+/// 能力分布の推移を `[INFO][lab.agentfloor]` チャンネルで追跡できる。
+fn emit_tier_map_log(result: &MultiRunBenchmarkResult, cycle_label: &str) {
+    let Some(scores) = &result.tier_avg_scores else {
+        return;
+    };
+    log_event(
+        LogLevel::Info,
+        "lab.agentfloor",
+        &format!("AgentFloor capability map ({cycle_label}):"),
+    );
+    for tier in CapabilityTier::all() {
+        if let Some(score) = scores[tier as usize] {
+            let paper = tier.paper_baseline();
+            let delta = score - paper;
+            log_event(
+                LogLevel::Info,
+                "lab.agentfloor",
+                &format!(
+                    "  {:18}: {:.2}  (paper {:.2}, {:+.2})",
+                    tier.label(),
+                    score,
+                    paper,
+                    delta
+                ),
+            );
+        }
+    }
+    if let Some((weakest, weakest_score)) = result.weakest_tier() {
+        log_event(
+            LogLevel::Info,
+            "lab.agentfloor",
+            &format!(
+                "  weakest_tier      = {} ({:.2})",
+                weakest.label(),
+                weakest_score
+            ),
+        );
+    }
+}
+
 /// Lab 自己改善ループ本体
 ///
 /// # ADK Phase D 評価結果（項目166）
@@ -967,6 +1013,8 @@ pub fn run_experiment_loop(
         baseline.composite_pass_consecutive_k(),
         baseline.duration_secs
     );
+    // AgentFloor tier map ログ出力 (plan §4.5: baseline 計測直後)
+    emit_tier_map_log(&baseline, "baseline");
 
     // メタ変異生成器の初期化（過去のACCEPTアーカイブから）
     let mut meta_gen = MetaMutationGenerator::from_db(store.conn())
@@ -1083,6 +1131,12 @@ pub fn run_experiment_loop(
                     variance_amplification: None,
                     graceful_degradation: None,
                     stability_delta: None,
+                    tier_t1: None,
+                    tier_t2: None,
+                    tier_t3: None,
+                    tier_t4: None,
+                    tier_t5: None,
+                    tier_t6: None,
                 };
                 ExperimentLog::save_to_db(store.conn(), &exp)?;
                 if let Some(tsv) = &loop_config.tsv_path {
@@ -1110,6 +1164,8 @@ pub fn run_experiment_loop(
             store,
         )?;
         let snapshot = config_snapshot(&modified_config);
+        // AgentFloor tier map ログ出力 (plan §4.6: 各実験計測直後)
+        emit_tier_map_log(&result, &format!("exp_{experiment_count}"));
 
         // d. 評価（pass^k指標を含む）
         let mut exp = Experiment::from_multi_results(
@@ -2102,6 +2158,12 @@ mod tests {
                 variance_amplification: None,
                 graceful_degradation: None,
                 stability_delta: None,
+                tier_t1: None,
+                tier_t2: None,
+                tier_t3: None,
+                tier_t4: None,
+                tier_t5: None,
+                tier_t6: None,
             },
             Experiment {
                 experiment_id: "e2".into(),
@@ -2121,6 +2183,12 @@ mod tests {
                 variance_amplification: None,
                 graceful_degradation: None,
                 stability_delta: None,
+                tier_t1: None,
+                tier_t2: None,
+                tier_t3: None,
+                tier_t4: None,
+                tier_t5: None,
+                tier_t6: None,
             },
             Experiment {
                 experiment_id: "e3".into(),
@@ -2140,6 +2208,12 @@ mod tests {
                 variance_amplification: None,
                 graceful_degradation: None,
                 stability_delta: None,
+                tier_t1: None,
+                tier_t2: None,
+                tier_t3: None,
+                tier_t4: None,
+                tier_t5: None,
+                tier_t6: None,
             },
         ];
         let worst = extract_worst_reasoning(&experiments, 5);
@@ -2170,6 +2244,12 @@ mod tests {
                 variance_amplification: None,
                 graceful_degradation: None,
                 stability_delta: None,
+                tier_t1: None,
+                tier_t2: None,
+                tier_t3: None,
+                tier_t4: None,
+                tier_t5: None,
+                tier_t6: None,
             })
             .collect();
         let worst = extract_worst_reasoning(&experiments, 3);
