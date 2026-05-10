@@ -73,8 +73,9 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `cerememory-extension-roadmap-d-g.md` | Cerememory 5-store + 周辺機構の bonsai 取込み master roadmap (Phase D Emotional / E MCP / F Audit hashchain / G Working memory cap) | planning-only (1.5h、各 Phase 個別 plan は採否ゲート後展開) | Lab v17/v18/v19 結果に応じ Phase D-G 優先順動的決定 |
 | `ds4-insights-port-impl.md` | `antirez/ds4` (DeepSeek V4 Flash inference engine、5,036 stars、MIT) | Stage 1: 1 day / 全 Stage: ~3 day | Stage 1 paired smoke で duration −10% AND score ±0.02 |
 | `ds4-rax-skill-index-impl.md` | ds4 同梱 `rax.c` (Redis Adaptive Radix tree、antirez 単独著作、Redis 由来 2017-2018) | 1.5 day | Lab paired smoke で latency −50% 以上 + score ±0.02 (REJECT 時は項目 222 と同 dead-code 削除経路) |
+| `gbrain-insights-port-impl.md` | Zenn 記事 「gbrain Knowledge Graph 設計」 (Y Combinator CEO 開発、TypeScript + PostgreSQL/PGLite + MCP) | Stage 1: 0.5 day / 全 Stage: ~3 day | Stage 1 backlink boost paired smoke で score variance 範囲内 + Lab v22 で paired 5 cycle ACCEPT |
 
-5 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)。ds4 plan は Stage 1 (KV cache wiring) のみ本 plan で完結、Stage 2 (rax skill index、`ds4-rax-skill-index-impl.md` 起票済) は独立着手可、Stage 3 (tool_id replay map) は Stage 1 ACCEPT 後に別 plan 起票。Lab v17 完了後着手必須 (cerememory 3 plan)、ds4 Stage 1/2 は独立着手可。
+6 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)。ds4 plan は Stage 1 (KV cache wiring) のみ本 plan で完結、Stage 2 (rax skill index、`ds4-rax-skill-index-impl.md` 起票済) は独立着手可、Stage 3 (tool_id replay map) は Stage 1 ACCEPT 後に別 plan 起票。gbrain plan は Stage 1 (Backlink Boost) のみ本 plan で完結、Stage 2 (Edge Provenance) は派生 plan で別 session 起票、Stage 3 (記憶層分離 validation) は Cerememory 三本柱で完遂済 = port 不要。Lab v17 完了後着手必須 (cerememory 3 plan)、ds4 Stage 1/2 + gbrain Stage 1/2 は独立着手可。
 
 ## 🔬 arxiv 2026-05 由来 plan (research_arxiv_2026_05_07.md ★★★ 高優先 10 件)
 
