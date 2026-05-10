@@ -858,11 +858,11 @@ mod tests {
     }
 
     #[test]
-    fn t_1_4_schema_version_is_v13_for_vec_memories() {
+    fn t_1_4_schema_version_is_v14_for_tier_map() {
         use crate::db::schema::SCHEMA_VERSION;
         assert_eq!(
-            SCHEMA_VERSION, 13,
-            "V13 migration が vec_memories virtual table を追加するため SCHEMA_VERSION=13 になるべき (Phase 2 Green で適用)"
+            SCHEMA_VERSION, 14,
+            "V14 migration が AgentFloor tier_t1..t6 列を experiments に追加するため SCHEMA_VERSION=14 になるべき (plan §4.5/§4.6 で適用)"
         );
     }
 

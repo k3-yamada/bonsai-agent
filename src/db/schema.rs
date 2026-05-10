@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 ///
@@ -74,6 +74,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 13,
         description: "sqlite-vec vec0 virtual table: vec_memories(memory_id, embedding float[256]) (plan T-1.4)",
         sql: SCHEMA_V13,
+    },
+    Migration {
+        version: 14,
+        description: "AgentFloor tier map 永続化: experiments に tier_t1..t6 REAL 列追加 (plan §4.5/§4.6)",
+        sql: SCHEMA_V14,
     },
 ];
 
@@ -329,6 +334,19 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
 
 #[cfg(not(feature = "embeddings"))]
 const SCHEMA_V13: &str = "";
+
+/// V14: AgentFloor tier map 永続化 (plan §4.5/§4.6)。
+/// `experiments` テーブルに CapabilityTier 別平均スコア 6 列を追加。
+/// 添字は `CapabilityTier::all()` 順 (T1=tier_t1 .. T6=tier_t6)。
+/// ladder mode 非使用時は全列 NULL (no-op 互換)。
+const SCHEMA_V14: &str = r#"
+ALTER TABLE experiments ADD COLUMN tier_t1 REAL;
+ALTER TABLE experiments ADD COLUMN tier_t2 REAL;
+ALTER TABLE experiments ADD COLUMN tier_t3 REAL;
+ALTER TABLE experiments ADD COLUMN tier_t4 REAL;
+ALTER TABLE experiments ADD COLUMN tier_t5 REAL;
+ALTER TABLE experiments ADD COLUMN tier_t6 REAL;
+"#;
 
 #[cfg(test)]
 mod tests {

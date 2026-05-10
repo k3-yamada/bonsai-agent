@@ -159,6 +159,20 @@ pub struct Experiment {
     /// 本 plan では計算のみ、ACCEPT 判定には未使用 (active gate 化は別 plan)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stability_delta: Option<f64>,
+    /// AgentFloor tier map (plan §4.5/§4.6): CapabilityTier T1..T6 の平均スコア。
+    /// `MultiRunBenchmarkResult::tier_avg_scores` から設定。ladder mode 非使用時は全 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_t1: Option<f64>, // CapabilityTier::InstructionFollowing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_t2: Option<f64>, // CapabilityTier::SingleToolUse
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_t3: Option<f64>, // CapabilityTier::ToolSelection
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_t4: Option<f64>, // CapabilityTier::MultiStepToolChain
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_t5: Option<f64>, // CapabilityTier::ErrorRecovery
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_t6: Option<f64>, // CapabilityTier::LongHorizonPlanning
 }
 
 impl Experiment {
@@ -192,6 +206,12 @@ impl Experiment {
             variance_amplification: None,
             graceful_degradation: None,
             stability_delta: None,
+            tier_t1: None,
+            tier_t2: None,
+            tier_t3: None,
+            tier_t4: None,
+            tier_t5: None,
+            tier_t6: None,
         }
     }
 
@@ -214,6 +234,8 @@ impl Experiment {
         let gds_base = baseline.composite_graceful_degradation();
         // stability_delta は VAF が None なら計算不能 (baseline variance=0 のケース)
         let stability_delta = vaf.map(|v| (1.0 - v) + (rdc_exp - rdc_base) + (gds_exp - gds_base));
+        // tier_avg_scores から tier_t1..t6 を展開 (ladder mode 非使用時は全 None)
+        let tiers = experiment.tier_avg_scores;
         Self {
             experiment_id,
             mutation_type,
@@ -239,6 +261,12 @@ impl Experiment {
             variance_amplification: vaf,
             graceful_degradation: Some(gds_exp),
             stability_delta,
+            tier_t1: tiers.and_then(|t| t[0]),
+            tier_t2: tiers.and_then(|t| t[1]),
+            tier_t3: tiers.and_then(|t| t[2]),
+            tier_t4: tiers.and_then(|t| t[3]),
+            tier_t5: tiers.and_then(|t| t[4]),
+            tier_t6: tiers.and_then(|t| t[5]),
         }
     }
 }
@@ -252,8 +280,10 @@ impl ExperimentLog {
         conn.execute(
             "INSERT INTO experiments (experiment_id, mutation_type, mutation_detail, \
              baseline_score, experiment_score, delta, accepted, duration_secs, prescreened, \
-             reliability_decay, variance_amplification, graceful_degradation, stability_delta) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             reliability_decay, variance_amplification, graceful_degradation, stability_delta, \
+             tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
+             ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 exp.experiment_id,
                 exp.mutation_type.as_str(),
@@ -268,6 +298,12 @@ impl ExperimentLog {
                 exp.variance_amplification,
                 exp.graceful_degradation,
                 exp.stability_delta,
+                exp.tier_t1,
+                exp.tier_t2,
+                exp.tier_t3,
+                exp.tier_t4,
+                exp.tier_t5,
+                exp.tier_t6,
             ],
         )?;
 
@@ -292,13 +328,16 @@ impl ExperimentLog {
         if needs_header {
             writeln!(
                 file,
-                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\tdelta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\tprescreened\treliability_decay\tvariance_amplification\tgraceful_degradation"
+                "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\t\
+                 delta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\t\
+                 prescreened\treliability_decay\tvariance_amplification\tgraceful_degradation\t\
+                 tier_t1\ttier_t2\ttier_t3\ttier_t4\ttier_t5\ttier_t6"
             )?;
         }
 
         writeln!(
             file,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             exp.experiment_id,
             exp.mutation_type.as_str(),
             exp.mutation_detail.replace('\t', " "),
@@ -319,6 +358,12 @@ impl ExperimentLog {
                 .map_or("-".to_string(), |v| format!("{v:.4}")),
             exp.graceful_degradation
                 .map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.tier_t1.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.tier_t2.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.tier_t3.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.tier_t4.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.tier_t5.map_or("-".to_string(), |v| format!("{v:.4}")),
+            exp.tier_t6.map_or("-".to_string(), |v| format!("{v:.4}")),
         )?;
         Ok(())
     }
@@ -329,7 +374,8 @@ impl ExperimentLog {
             "SELECT experiment_id, mutation_type, mutation_detail, \
              baseline_score, experiment_score, delta, accepted, duration_secs, \
              COALESCE(prescreened, 0), \
-             reliability_decay, variance_amplification, graceful_degradation, stability_delta \
+             reliability_decay, variance_amplification, graceful_degradation, stability_delta, \
+             tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6 \
              FROM experiments ORDER BY id DESC LIMIT ?1",
         )?;
 
@@ -348,6 +394,12 @@ impl ExperimentLog {
                 row.get::<_, Option<f64>>(10)?,
                 row.get::<_, Option<f64>>(11)?,
                 row.get::<_, Option<f64>>(12)?,
+                row.get::<_, Option<f64>>(13)?,
+                row.get::<_, Option<f64>>(14)?,
+                row.get::<_, Option<f64>>(15)?,
+                row.get::<_, Option<f64>>(16)?,
+                row.get::<_, Option<f64>>(17)?,
+                row.get::<_, Option<f64>>(18)?,
             ))
         })?;
 
@@ -372,6 +424,12 @@ impl ExperimentLog {
                 vaf,
                 gds,
                 stab,
+                t1,
+                t2,
+                t3,
+                t4,
+                t5,
+                t6,
             ) = row?;
             let mutation_type = MutationType::parse(&mt).unwrap_or(MutationType::PromptRule);
 
@@ -400,6 +458,12 @@ impl ExperimentLog {
                 variance_amplification: vaf,
                 graceful_degradation: gds,
                 stability_delta: stab,
+                tier_t1: t1,
+                tier_t2: t2,
+                tier_t3: t3,
+                tier_t4: t4,
+                tier_t5: t5,
+                tier_t6: t6,
             });
         }
         Ok(experiments)
@@ -429,8 +493,8 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // V1, V2, V7 (prescreened), V9 (項目 200 信頼性メトリクス 4 カラム) 適用
-        for version in [1, 2, 7, 9] {
+        // V1, V2, V7 (prescreened), V9 (信頼性メトリクス), V14 (tier map) 適用
+        for version in [1, 2, 7, 9, 14] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -456,6 +520,12 @@ mod tests {
             variance_amplification: None,
             graceful_degradation: None,
             stability_delta: None,
+            tier_t1: None,
+            tier_t2: None,
+            tier_t3: None,
+            tier_t4: None,
+            tier_t5: None,
+            tier_t6: None,
         }
     }
 
@@ -581,8 +651,8 @@ mod tests {
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
         let data_line = content.lines().nth(1).unwrap();
-        // 項目 200: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) = 15 列
-        assert_eq!(data_line.split('\t').count(), 15);
+        // 項目 200: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) + tier 6 列 = 21 列
+        assert_eq!(data_line.split('\t').count(), 21);
     }
 
     #[test]
@@ -659,7 +729,7 @@ mod tests {
             extended_avg_score: None,
             tier_avg_scores: None,
         };
-        let experiment = MultiRunBenchmarkResult {
+        let experiment_result = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
                 "t".into(),
                 vec![1.0, 0.5, 0.0],
@@ -675,7 +745,7 @@ mod tests {
             MutationType::PromptRule,
             "test".into(),
             &baseline,
-            &experiment,
+            &experiment_result,
             HashMap::new(),
         );
         // RDC/GDS は composite メソッドから設定される
@@ -710,5 +780,197 @@ mod tests {
         let cloned = am.clone();
         assert_eq!(cloned.mutation_type, MutationType::MetaMutation);
         assert_eq!(cloned.detail, "compound test");
+    }
+
+    // ── Phase 4 AgentFloor tier map tests (plan §4.5/§4.6) ──────────────────
+
+    fn setup_test_db_v14() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // V14 migration まで必要な分を適用
+        for version in [1, 2, 7, 9, 14] {
+            let sql = migrate::get_migration_sql(version).unwrap();
+            conn.execute_batch(sql).unwrap();
+        }
+        conn
+    }
+
+    fn sample_experiment_with_tiers(id: &str, delta: f64) -> Experiment {
+        Experiment {
+            experiment_id: id.into(),
+            mutation_type: MutationType::PromptRule,
+            mutation_detail: "tier test".into(),
+            baseline_score: 0.5,
+            experiment_score: 0.5 + delta,
+            delta,
+            accepted: delta > 0.0,
+            duration_secs: 10.0,
+            config_snapshot: HashMap::new(),
+            pass_at_k: None,
+            pass_consecutive_k: None,
+            score_variance: None,
+            prescreened: false,
+            reliability_decay: None,
+            variance_amplification: None,
+            graceful_degradation: None,
+            stability_delta: None,
+            tier_t1: Some(0.80),
+            tier_t2: Some(0.70),
+            tier_t3: Some(0.60),
+            tier_t4: Some(0.50),
+            tier_t5: Some(0.40),
+            tier_t6: Some(0.30),
+        }
+    }
+
+    /// 1. Experiment struct に tier_t1..t6 フィールドが存在し default None
+    #[test]
+    fn test_experiment_tier_fields_default_none() {
+        let exp = Experiment {
+            experiment_id: "def".into(),
+            mutation_type: MutationType::PromptRule,
+            mutation_detail: "".into(),
+            baseline_score: 0.0,
+            experiment_score: 0.0,
+            delta: 0.0,
+            accepted: false,
+            duration_secs: 0.0,
+            config_snapshot: HashMap::new(),
+            pass_at_k: None,
+            pass_consecutive_k: None,
+            score_variance: None,
+            prescreened: false,
+            reliability_decay: None,
+            variance_amplification: None,
+            graceful_degradation: None,
+            stability_delta: None,
+            tier_t1: None,
+            tier_t2: None,
+            tier_t3: None,
+            tier_t4: None,
+            tier_t5: None,
+            tier_t6: None,
+        };
+        assert!(exp.tier_t1.is_none());
+        assert!(exp.tier_t2.is_none());
+        assert!(exp.tier_t3.is_none());
+        assert!(exp.tier_t4.is_none());
+        assert!(exp.tier_t5.is_none());
+        assert!(exp.tier_t6.is_none());
+    }
+
+    /// 2. tier 値ありの場合 21 列出力 (header + data row)
+    #[test]
+    fn test_append_tsv_21_columns_with_tier() {
+        let dir = TempDir::new().unwrap();
+        let tsv_path = dir.path().join("tier_21.tsv");
+        let exp = sample_experiment_with_tiers("tsv_tier_01", 0.1);
+        ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
+        let content = std::fs::read_to_string(&tsv_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "header + 1 data row");
+        let header_cols = lines[0].split('\t').count();
+        let data_cols = lines[1].split('\t').count();
+        assert_eq!(header_cols, 21, "header は 21 列");
+        assert_eq!(data_cols, 21, "data row は 21 列");
+        assert!(
+            lines[0].contains("tier_t1"),
+            "header に tier_t1 が含まれること"
+        );
+        assert!(
+            lines[0].contains("tier_t6"),
+            "header に tier_t6 が含まれること"
+        );
+        assert!(
+            lines[1].contains("0.8000"),
+            "t1 score が data に含まれること"
+        );
+    }
+
+    /// 3. tier 全 None でも 21 列出力、末尾 6 列は "-"
+    #[test]
+    fn test_append_tsv_21_columns_tier_none_dash() {
+        let dir = TempDir::new().unwrap();
+        let tsv_path = dir.path().join("tier_none.tsv");
+        let exp = sample_experiment("tsv_none_01", 0.1);
+        ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
+        let content = std::fs::read_to_string(&tsv_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let data_cols: Vec<&str> = lines[1].split('\t').collect();
+        assert_eq!(data_cols.len(), 21, "tier None でも 21 列固定");
+        // 末尾 6 列は全て "-"
+        for col in &data_cols[15..21] {
+            assert_eq!(*col, "-", "tier None 列は '-' 表現");
+        }
+    }
+
+    /// 4. SQLite に tier 列 6 件 round-trip
+    #[test]
+    fn test_save_to_db_tier_columns() {
+        let conn = setup_test_db_v14();
+        let exp = sample_experiment_with_tiers("tier_rt_01", 0.1);
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let (t1, t2, t3, t4, t5, t6): (
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        ) = conn
+            .query_row(
+                "SELECT tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6 \
+                 FROM experiments WHERE experiment_id = ?1",
+                rusqlite::params!["tier_rt_01"],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert!((t1.unwrap() - 0.80).abs() < 1e-6);
+        assert!((t2.unwrap() - 0.70).abs() < 1e-6);
+        assert!((t3.unwrap() - 0.60).abs() < 1e-6);
+        assert!((t4.unwrap() - 0.50).abs() < 1e-6);
+        assert!((t5.unwrap() - 0.40).abs() < 1e-6);
+        assert!((t6.unwrap() - 0.30).abs() < 1e-6);
+    }
+
+    /// 5. migration 後 PRAGMA で tier_t1..t6 列存在
+    #[test]
+    fn test_migration_v14_adds_tier_columns() {
+        let conn = setup_test_db_v14();
+        let mut stmt = conn.prepare("PRAGMA table_info(experiments)").unwrap();
+        let col_names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in [
+            "tier_t1", "tier_t2", "tier_t3", "tier_t4", "tier_t5", "tier_t6",
+        ] {
+            assert!(
+                col_names.contains(&col.to_string()),
+                "列 '{col}' が experiments テーブルに存在すること"
+            );
+        }
+    }
+
+    /// 6. tier None の実験を DB に保存し recent_experiments で取得できること
+    #[test]
+    fn test_save_to_db_tier_columns_null_roundtrip() {
+        let conn = setup_test_db_v14();
+        let exp = sample_experiment("tier_null_01", 0.05);
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let results = ExperimentLog::recent_experiments(&conn, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].tier_t1.is_none());
+        assert!(results[0].tier_t6.is_none());
     }
 }
