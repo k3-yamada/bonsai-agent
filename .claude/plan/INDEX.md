@@ -1,8 +1,8 @@
 # `.claude/plan/` インデックス
 
-19 ファイルの状態と関係を一覧化。新規セッションで最初に参照する起点。
+67 ファイル (2026-05-10 時点) の状態と関係を一覧化。新規セッションで最初に参照する起点。
 
-**Last Updated:** 2026-05-08
+**Last Updated:** 2026-05-10
 
 ---
 
@@ -71,8 +71,26 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `cerememory-decay-port-impl.md` | `co-r-e/cerememory` ADR-005 (commit b08d201、MIT) | 0.5 day | Lab v18 paired t-test (decay ON/OFF) で Δscore ≥ +0.015 |
 | `cerememory-review-state-v12-impl.md` | `co-r-e/cerememory` ADR-011 (Strength/Freshness 分離) | 1.5 day | Lab v19 paired t-test (freshness gate ON/OFF) で Δscore ≥ +0.015 |
 | `cerememory-extension-roadmap-d-g.md` | Cerememory 5-store + 周辺機構の bonsai 取込み master roadmap (Phase D Emotional / E MCP / F Audit hashchain / G Working memory cap) | planning-only (1.5h、各 Phase 個別 plan は採否ゲート後展開) | Lab v17/v18/v19 結果に応じ Phase D-G 優先順動的決定 |
+| `ds4-insights-port-impl.md` | `antirez/ds4` (DeepSeek V4 Flash inference engine、5,036 stars、MIT) | Stage 1: 1 day / 全 Stage: ~3 day | Stage 1 paired smoke で duration −10% AND score ±0.02 |
 
-3 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)、Lab v17 完了後着手必須。
+4 plan は production default OFF (env opt-in、項目 214 toggle pattern と一貫)。ds4 plan は Stage 1 (KV cache wiring) のみ本 plan で完結、Stage 2 (rax skill index) / Stage 3 (tool_id replay map) は派生 plan で別 session 起票。Lab v17 完了後着手必須 (cerememory 3 plan)、ds4 は独立着手可。
+
+## 🔬 arxiv 2026-05 由来 plan (research_arxiv_2026_05_07.md ★★★ 高優先 10 件)
+
+| ファイル | 由来論文 | 種別 | 工数 |
+|---|---|---|---|
+| `beyond-pass1-rdc-vaf-impl.md` | arxiv 2603.29231 Beyond pass@1 | 実装済 (項目 200) | — |
+| `agenther-runtime-integration-impl.md` | arxiv 2603.21357 AgentHER (HSL relabel) | 実装済 (項目 201-205) | — |
+| `arag-hierarchical-retrieval-docs.md` | arxiv 2602.03442 A-RAG | docs (項目 199) | — |
+| `erl-heuristics-pool-impl-v2.md` | arxiv ERL Heuristics | 実装済 (項目 213-216、Lab v17 REJECT) | — |
+| `self-verify-dilemma-impl.md` | arxiv Self-Verification Dilemma | 実装済 (項目 210-212、Lab v16 REJECT) | — |
+| `agentfloor-tier-eval-impl.md` | arxiv 2605.00334 AgentFloor 6-tier | 🔄 Phase 2 Green 完遂 (commit `2b63441`、1153 passed)、Phase 3-5 残 | ~5h 残 |
+| `pass-k-t-metric-impl.md` | arxiv 2604.14877 PASS@(k,T) | 起票済 (907 行)、未実装 | ~5h |
+| `vllm-mlx-backend-impl.md` | arxiv 2601.19139 vllm-mlx | 起票済 (734 行)、未実装 | ~17h |
+| `mcp-bench-integration-impl.md` | arxiv MCP-Bench | 起票済 (540 行)、未実装 | ~12h |
+| `building-ai-coding-agents-gap-analysis.md` | arxiv survey 系 | meta-plan、4 派生候補 (G1-G4) 起票済、未着手 | ~0.5 day + 6 day |
+
+派生 plan 候補 (`building-ai-coding-agents-gap-analysis.md` 由来): G1 Critic 別 LLM ★★★ / G2 Agent-Side TDD ★★ / G3 並列 Sub-Agent ★ / G4 Task-Aware Prompt ★★。推奨着手順序 = AgentFloor Phase 3-5 → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。
 
 ## メンテナンス方針
 
