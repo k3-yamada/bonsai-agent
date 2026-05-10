@@ -97,10 +97,10 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 |---|---|---|---|---|
 | `critic-separate-llm-impl.md` | G1 Critic 別 LLM | ★★★ | ~1.25-1.5 day | 起票済 (640 行)、未実装 |
 | `task-aware-system-prompt-impl.md` | G4 Task-Aware Prompt | ★★ | ~0.7-1 day | 起票済 (519 行)、未実装 |
-| (未起票) | G2 Agent-Side TDD | ★★ | ~2 day | rate limit 後着手 |
-| (未起票) | G3 並列 Sub-Agent | ★ | ~1.5 day | 後段着手 |
+| `agent-side-tdd-enforcement-impl.md` | G2 Agent-Side TDD | ★★ | ~2 day | 起票済 (770 行)、G1 dependency + 独立着手可、未実装 |
+| `parallel-subagent-roles-impl.md` | G3 並列 Sub-Agent | ★ | ~1.5 day | 起票済 (819 行)、std::thread::scope 経路踏襲 (tokio 移行は Phase 2 派生)、未実装 |
 
-推奨着手順序 = AgentFloor Phase 3-5 (Phase 4 Smoke 進行中) → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。
+推奨着手順序 = AgentFloor Phase 3-5 (Phase 4 Smoke 進行中) → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。派生 plan 4 件全て起票済 (合計 2748 行)、production code 変更ゼロ。
 
 ## メンテナンス方針
 
