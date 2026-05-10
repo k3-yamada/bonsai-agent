@@ -10,3 +10,4 @@ pub mod review;
 pub mod search;
 pub mod skill;
 pub mod store;
+pub(crate) mod vec_index_toggle;

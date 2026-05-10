@@ -538,6 +538,68 @@ impl MemoryStore {
         }
         Ok(results)
     }
+
+    /// Plan A1+A3 (`.claude/plan/sqlite-vec-a1-a3-impl.md`) G-2.2:
+    /// `save_memory` 直後に呼出して vec_memories を動的 populate する hook。
+    ///
+    /// production default = env unset = no-op (cold path 短絡、既存挙動 100% 維持)。
+    /// `BONSAI_VEC_INDEX_ENABLED=1` で initial embed → insert を実行。
+    ///
+    /// # 設計 (plan D-3 / D-6)
+    /// - **non-fatal**: embedder.embed や insert_memory_embedding が Err でも
+    ///   warn log + Ok 返却 (vec0 投入失敗で memory 本体まで失敗扱いさせない)
+    /// - **OnceLock**: process-global の Embedder を初回呼出時 lazy 生成、
+    ///   2 回目以降は lock-free read (`OnceLock` 標準保証)
+    /// - **default build (no embeddings)** では always no-op (compile 時短絡)
+    ///
+    /// # See Also
+    /// - Cerememory 三本柱 (項目 217 decay / 218 review / 219 working cap)
+    ///   と同じ env opt-in pattern
+    /// - `is_vec_index_enabled()` in `crate::memory::vec_index_toggle`
+    pub fn index_memory_if_enabled(&self, memory_id: i64, content: &str) -> Result<()> {
+        #[cfg(not(feature = "embeddings"))]
+        {
+            let _ = (memory_id, content);
+            Ok(())
+        }
+
+        #[cfg(feature = "embeddings")]
+        {
+            if !crate::memory::vec_index_toggle::is_vec_index_enabled() {
+                return Ok(());
+            }
+            let ctx = vec_index_ctx();
+            match ctx.embedder.embed(&[content]) {
+                Ok(emb) => {
+                    if let Some(first) = emb.first()
+                        && let Err(e) = self.insert_memory_embedding(memory_id, first)
+                    {
+                        eprintln!("[warn] vec_index insert failed for memory_id={memory_id}: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[warn] vec_index embed failed for memory_id={memory_id}: {e}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Plan A1+A3 G-2.2 D-6: process-global Embedder cache。
+/// `OnceLock::get_or_init` は冪等で initial init を serialize、以後 lock-free read。
+#[cfg(feature = "embeddings")]
+struct VecIndexCtx {
+    embedder: Box<dyn crate::runtime::embedder::Embedder>,
+}
+
+#[cfg(feature = "embeddings")]
+fn vec_index_ctx() -> &'static VecIndexCtx {
+    use std::sync::OnceLock;
+    static VEC_INDEX_CTX: OnceLock<VecIndexCtx> = OnceLock::new();
+    VEC_INDEX_CTX.get_or_init(|| VecIndexCtx {
+        embedder: crate::runtime::embedder::create_embedder(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -900,6 +962,100 @@ mod tests {
         assert!(
             result.is_err(),
             "256d 以外の embedding は insert 拒否すべき (128d 入力)"
+        );
+    }
+
+    // --- Plan A1+A3 (`.claude/plan/sqlite-vec-a1-a3-impl.md`) Phase 1 Red ---
+    // T-1.2 / T-1.3 / T-1.6: `MemoryStore::index_memory_if_enabled` は Phase 1 では
+    // **未定義** のため compile error で Red 確証 (Phase 2 Green で実装)。
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_a1_2_index_memory_if_enabled_noop_when_env_unset() {
+        use crate::memory::vec_index_toggle::VEC_INDEX_TEST_LOCK;
+        let _g = VEC_INDEX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: test 専用 env mutation、TEST_LOCK で serialize 済。
+        unsafe { std::env::remove_var("BONSAI_VEC_INDEX_ENABLED") };
+
+        let store = test_store();
+        for i in 0..5 {
+            let content = format!("noop {i}");
+            let id = store.save_memory(&content, "fact", &[]).unwrap();
+            store.index_memory_if_enabled(id, &content).unwrap();
+        }
+        let count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "env unset で vec_memories に投入されないべき (no-op、production default)"
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_a1_3_index_memory_if_enabled_inserts_when_env_one() {
+        use crate::memory::vec_index_toggle::VEC_INDEX_TEST_LOCK;
+        let _g = VEC_INDEX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("BONSAI_VEC_INDEX_ENABLED", "1") };
+
+        let store = test_store();
+        let initial: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))
+            .unwrap();
+
+        for i in 0..5 {
+            let content = format!("indexed {i}");
+            let id = store.save_memory(&content, "fact", &[]).unwrap();
+            store.index_memory_if_enabled(id, &content).unwrap();
+        }
+
+        let after: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_memories", [], |row| row.get(0))
+            .unwrap();
+
+        unsafe { std::env::remove_var("BONSAI_VEC_INDEX_ENABLED") };
+
+        assert_eq!(
+            after - initial,
+            5,
+            "env=1 で 5 件全て vec_memories に投入されるべき"
+        );
+    }
+
+    #[cfg(feature = "embeddings")]
+    #[test]
+    fn t_a1_6_index_memory_if_enabled_swallows_insert_errors() {
+        use crate::memory::vec_index_toggle::VEC_INDEX_TEST_LOCK;
+        let _g = VEC_INDEX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("BONSAI_VEC_INDEX_ENABLED", "1") };
+
+        let store = test_store();
+        let id = store.save_memory("dup", "fact", &[]).unwrap();
+
+        // 1 回目: vec_memories に正常投入
+        let r1 = store.index_memory_if_enabled(id, "dup");
+        assert!(r1.is_ok(), "1 回目は成功すべき");
+
+        // 2 回目: 同じ memory_id (vec_memories.memory_id PRIMARY KEY) で
+        // 内部 insert は UNIQUE 制約違反で Err → しかし index_memory_if_enabled は
+        // warn log + Ok 返却 (non-fatal、save_memory 自体を失敗扱いさせない設計)。
+        let r2 = store.index_memory_if_enabled(id, "dup again");
+
+        unsafe { std::env::remove_var("BONSAI_VEC_INDEX_ENABLED") };
+
+        assert!(
+            r2.is_ok(),
+            "重複 insert エラーは内部で握り潰されるべき (non-fatal、plan D-3)"
         );
     }
 }

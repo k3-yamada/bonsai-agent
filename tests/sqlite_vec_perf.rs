@@ -203,23 +203,18 @@ fn vec_perf_synthetic_g44_backfill_10k() {
     }
 }
 
-#[test]
-#[ignore = "G-4.5 (Step B 第 1 軸): recall@10 of vec0 vs linear (exact KNN parity)"]
-fn vec_perf_synthetic_g45_recall_at_10() {
-    // sqlite-vec vec0 は brute-force exact KNN (HNSW ではない) のため、recall@10
-    // は理論上 linear scan と完全一致する。本 test は plan §8 Step B 判定の
-    // 第 1 軸 (recall@10 axis) を実機で検証する。
-    //
-    // PASS 条件 (Step B 不要):  recall@10 ≥ 95% (tie-break ばらつき許容)
-    // FAIL 条件 (Step B 検討):  recall@10 < 95% → ANN 採用検討
-    const N_MEMORIES: usize = 1000;
+/// Plan A1+A3 G-2.4: G-4.5 recall@k の k-parametric helper。
+///
+/// 戻り値: (avg_recall, zero_recall_queries)。
+/// - vec0 brute-force exact KNN (HNSW ではない) なので recall は理論上 linear と一致
+/// - 50 query × top-k で intersect 計上、tie-break ばらつき許容
+fn run_recall_at_k(k: usize, n_memories: usize) -> (f64, usize) {
     const N_QUERIES: usize = 50;
-    const TOP_K: usize = 10;
 
     let store = MemoryStore::in_memory().expect("create in-memory store");
 
-    let mut embeddings: Vec<(i64, Vec<f32>)> = Vec::with_capacity(N_MEMORIES);
-    for i in 0..N_MEMORIES {
+    let mut embeddings: Vec<(i64, Vec<f32>)> = Vec::with_capacity(n_memories);
+    for i in 0..n_memories {
         let id = store
             .save_memory(&format!("recall memory {i}"), "perf", &[])
             .expect("save_memory");
@@ -237,20 +232,17 @@ fn vec_perf_synthetic_g45_recall_at_10() {
     let mut total_intersect = 0usize;
     let mut zero_recall_queries = 0usize;
     for q in &queries {
-        // linear ground truth (cosine similarity 上位 TOP_K)
+        // linear ground truth (cosine similarity 上位 k)
         let mut linear_scored: Vec<(i64, f32)> = embeddings
             .iter()
             .map(|(id, v)| (*id, cosine_similarity(q, v)))
             .collect();
         linear_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let linear_top: std::collections::HashSet<i64> = linear_scored
-            .iter()
-            .take(TOP_K)
-            .map(|(id, _)| *id)
-            .collect();
+        let linear_top: std::collections::HashSet<i64> =
+            linear_scored.iter().take(k).map(|(id, _)| *id).collect();
 
         // vec0 candidate (distance 昇順 = similarity 降順)
-        let vec_scored = store.vec_knn(q, TOP_K).expect("vec_knn");
+        let vec_scored = store.vec_knn(q, k).expect("vec_knn");
         let vec_top: std::collections::HashSet<i64> =
             vec_scored.iter().map(|(id, _)| *id).collect();
 
@@ -261,7 +253,25 @@ fn vec_perf_synthetic_g45_recall_at_10() {
         }
     }
 
-    let avg_recall = total_intersect as f64 / (N_QUERIES * TOP_K) as f64;
+    let avg_recall = total_intersect as f64 / (N_QUERIES * k) as f64;
+    (avg_recall, zero_recall_queries)
+}
+
+#[test]
+#[ignore = "G-4.5 (Step B 第 1 軸): recall@10 of vec0 vs linear (exact KNN parity)"]
+fn vec_perf_synthetic_g45_recall_at_10() {
+    // sqlite-vec vec0 は brute-force exact KNN (HNSW ではない) のため、recall@10
+    // は理論上 linear scan と完全一致する。本 test は plan §8 Step B 判定の
+    // 第 1 軸 (recall@10 axis) を実機で検証する。
+    //
+    // PASS 条件 (Step B 不要):  recall@10 ≥ 95% (tie-break ばらつき許容)
+    // FAIL 条件 (Step B 検討):  recall@10 < 95% → ANN 採用検討
+    const N_MEMORIES: usize = 1000;
+    const TOP_K: usize = 10;
+    const N_QUERIES: usize = 50;
+
+    let (avg_recall, zero_recall_queries) = run_recall_at_k(TOP_K, N_MEMORIES);
+
     eprintln!(
         "[G-4.5] avg recall@10 = {avg_recall:.4} (over {N_QUERIES} queries, {N_MEMORIES} memories)"
     );
@@ -275,4 +285,29 @@ fn vec_perf_synthetic_g45_recall_at_10() {
             "[G-4.5] WARN Step B axis-1 fail: vec0 recall@10 ({avg_recall:.4}) < 95% → Milvus Lite 検討"
         );
     }
+}
+
+// --- Plan A1+A3 (`.claude/plan/sqlite-vec-a1-a3-impl.md`) Phase 1 Red T-1.8 ---
+// 既存 G-4.5 の k=10 限定測定を k>10 に拡張する informational test (gate なし)。
+// `run_recall_at_k(k, n_memories)` helper は Phase 1 では **未定義** のため
+// compile error で Red 確証 (Phase 2 Green G-2.4 で helper 抽出)。
+
+#[test]
+#[ignore = "G-4.5 extended k=20 (informational、plan A3 D-4)"]
+fn vec_perf_synthetic_g45_recall_at_20() {
+    let (avg_recall, zero_recall_queries) = run_recall_at_k(20, 1000);
+    eprintln!(
+        "[G-4.5 k=20] avg recall@20 = {avg_recall:.4}, zero-recall queries: {zero_recall_queries}/50"
+    );
+    // gate なし、informational only (vec0 brute-force exact KNN なので 1.0 期待)
+}
+
+#[test]
+#[ignore = "G-4.5 extended k=50 (informational、plan A3 D-4)"]
+fn vec_perf_synthetic_g45_recall_at_50() {
+    let (avg_recall, zero_recall_queries) = run_recall_at_k(50, 1000);
+    eprintln!(
+        "[G-4.5 k=50] avg recall@50 = {avg_recall:.4}, zero-recall queries: {zero_recall_queries}/50"
+    );
+    // gate なし、informational only
 }
