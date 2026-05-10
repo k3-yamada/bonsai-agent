@@ -1697,13 +1697,41 @@ impl BenchmarkSuite {
         let core_avg_score = compute_tier_avg(&self.tasks, &task_scores, TaskTier::Core);
         let extended_avg_score = compute_tier_avg(&self.tasks, &task_scores, TaskTier::Extended);
 
+        // 項目 209 (AgentFloor): CapabilityTier (T1-T6) 別平均 mean_score 集計
+        // compute_capability_tier_avg は HashMap<String, BenchmarkTask> を必要とするため inline 構築
+        let task_descs: std::collections::HashMap<String, BenchmarkTask> = self
+            .tasks
+            .iter()
+            .map(|t| (t.id.clone(), t.clone()))
+            .collect();
+        let tier_avg_scores = [
+            compute_capability_tier_avg(
+                &task_scores,
+                &task_descs,
+                CapabilityTier::InstructionFollowing,
+            ),
+            compute_capability_tier_avg(&task_scores, &task_descs, CapabilityTier::SingleToolUse),
+            compute_capability_tier_avg(&task_scores, &task_descs, CapabilityTier::ToolSelection),
+            compute_capability_tier_avg(
+                &task_scores,
+                &task_descs,
+                CapabilityTier::MultiStepToolChain,
+            ),
+            compute_capability_tier_avg(&task_scores, &task_descs, CapabilityTier::ErrorRecovery),
+            compute_capability_tier_avg(
+                &task_scores,
+                &task_descs,
+                CapabilityTier::LongHorizonPlanning,
+            ),
+        ];
+
         Ok(MultiRunBenchmarkResult {
             task_scores,
             duration_secs: start.elapsed().as_secs_f64(),
             core_avg_score,
             extended_avg_score,
-            // AgentFloor tier 別集計は Phase 4 (Lab 組込) で設定。run_k 単体では None。
-            tier_avg_scores: None,
+            // 項目 209: AgentFloor tier 別集計を populate (Phase 2/3/4 後の最終配線)
+            tier_avg_scores: Some(tier_avg_scores),
         })
     }
 
