@@ -339,3 +339,34 @@ $EDITOR /Users/keizo/bonsai-agent/CLAUDE.md  # 項目 224
   - `gbrain-wikilink-extractor-impl.md` (Stage 4、defer 推奨)
   - `lab-v22-backlink-boost-effectiveness.md` (Stage 1 ACCEPT 後の Lab paired t-test plan)
 - 既存 OSS 比較: `memory/external_memory_oss_comparison_2026_05_09.md` (gbrain 行追加候補)
+
+---
+
+## 13. ★★★ DRAFT WARNING (session 05-11b gap analysis、実装着手前必読)
+
+> **status**: 本 plan は **draft / 設計再考必要**。INDEX.md status も同訂正済。
+>
+> **由来**: handoff `session_2026_05_11b_handoff.md` 後の gbrain plan deep-read で **major blocking gap 3 件発見**、即実装着手は危険。
+
+### Major blocking gap (実装前に解決必須)
+- **G-1 (★★★)**: plan §4.1.2 で `r.node_name` 参照、実 `SearchResult` field = `memory: MemoryRecord, score: f32, source: SearchSource`、`MemoryRecord` field = `id/content/category/tags/access_count/created_at` のみ、**`node_name` も `name` も両 struct に存在しない**
+- **G-2 (★★★)**: HybridSearch (`MemoryStore` 系) と KnowledgeGraph (`knowledge_nodes/edges` 系) の **bridging 経路が design レベルで未定義**。`MemoryRecord.id` → `knowledge_nodes.name` の mapping 規則なし、両 store は独立で同期保証なし、HybridSearch 結果が graph に登録されている保証なし
+- **G-3 (★★ minor)**: `HybridSearch<'a>` / `KnowledgeGraph<'a>` の lifetime parameter 整合 (compile 時 fix 可能、minor)
+- **G-4 (★★ medium)**: `KnowledgeGraph::incoming_count(name)` の SQL は plan §4.1.2 part B に提示済だが、「name はどこから来るか」(memory.content から抽出? title? hash?) 未定義
+
+### 設計再考の方向性候補
+- **Option A**: `MemoryRecord` に `node_name: Option<String>` field 追加 (extractor で graph add_edge 時に同期)
+- **Option B**: `memory.id` を `knowledge_nodes.name` として登録 (`name = format!("memory:{}", id)` 規約)、graph と memory を id 経由で 1:1 mapping
+- **Option C**: HybridSearch の post-RRF で `memory.content` から `extract_top_term()` で代表 keyword 抽出 → graph lookup (heuristic、精度依存)
+- **Option D**: gbrain Stage 1 を **Stage 1.5「bridging design」と Stage 1.6「backlink boost」に分割** し、bridging design plan 別途起票
+
+### 推奨次 action (次 session で gbrain 着手前)
+1. 上記 Option A-D を `/ccg:plan` agent で 30 min discussion + design 確定
+2. plan §4.1 全面書き直し (bridging logic 明示、Phase 1-5 再設計)
+3. version 2 として `gbrain-insights-port-v2-impl.md` 別 file 起票推奨 (現 v1 は思想 capture として保持)
+
+### 優先度 downgrade
+- handoff session 05-11b §6 task #7 (gbrain Stage 1) priority: ★★ → ★ (設計再考必要)
+- 次 session 推奨着手は **G1 Critic (★★★ 優先順 1 位)** を先行、gbrain は設計再考後
+
+**本 plan は思想 (gbrain Knowledge Graph 設計の bonsai 取込み候補) として保持、実装 plan としては未完**。
