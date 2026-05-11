@@ -325,3 +325,46 @@ $EDITOR /Users/keizo/bonsai-agent/CLAUDE.md  # 項目 223
 - 派生 plan (本 plan ACCEPT 後起票):
   - `ds4-rax-skill-index-impl.md` (Stage 2、独立着手可)
   - `ds4-tool-id-replay-impl.md` (Stage 3、Stage 1 ACCEPT 後)
+
+## 13. session 05-11b gap analysis 補注 (★ minor、次 session 着手時に注意)
+
+> **補注由来**: handoff `session_2026_05_11b_handoff.md` 完了後、本 plan を deep-read で gap 検査した結果。**design レベル gap なし** (gbrain と異なり Stage 1 は純粋 config 拡張で実装可能)、minor 4 件を以下に集中記録。次 session 着手 (Phase 2 Green) 時に本 §13 を必ず参照して訂正。
+
+### G-1: CLAUDE.md 項目番号衝突 (★★★ blocking、§5 Phase 5 / §10 / §12)
+- plan §5 Phase 5 commit #5「`docs(claude.md): 項目 223 — ds4 知見 Stage 1 KV cache wiring 完遂`」と記載
+- **訂正**: 本 session で項目 220-225 を予約済:
+  - 220 = sqlite-vec Activation
+  - 221 = sqlite-vec G-4.2 REJECT
+  - 222 = sqlite-vec wiring 削除
+  - 223 = AgentFloor 6-tier (本 session)
+  - 224 = pre-screen tier fix (本 session、commit `a52edc6`)
+  - 225 = experiment-from-results-deletion plan 予約 (実装時の commit 番号)
+- **ds4 Stage 1 は項目 226 (or 後続実装次第で 227+) に renumber 必要**
+- 影響: Phase 5 commit message + handoff entry + memory/ds4_alignment.md 内 cross-link
+
+### G-2: SCHEMA バージョン outdated (★★ medium、§4.3 Stage 3 関連)
+- plan §4.3 Stage 3「`EventStore` に `original_emitted_text: String` 列追加 (**SCHEMA_V11 → V12**)」と記載
+- **訂正**: 現状 `SCHEMA_VERSION = 14` (src/db/schema.rs:2、本 session AgentFloor で V13→V14 bump 済)、Stage 3 派生 plan 起票時に **V14 → V15** が正確
+- 影響: Stage 3 派生 plan `ds4-tool-id-replay-impl.md` 起票時に migration 番号を最新化、Stage 1 自体は SQLite 変更なしのため Phase 1-3 着手には影響なし
+
+### G-3: 期待 test count outdated (★ low、§5 Phase 2 + §10)
+- plan §5 Phase 2 / §10「既存 1150 passed + 新規 6 test = **1156 passed**」と記載
+- **訂正**: 本 session (commit `a52edc6` 項目 224 pre-screen tier fix) で test 1162→**1165 passed** に増、本 plan の正確な期待値は **1165 + 6 = 1171 passed**
+- 影響: Quality Gate G-2 と完了条件 #7 の数値修正必要
+
+### G-4: API 影響表記 (★ informational、§6)
+- plan §6「**signature 変更ゼロ** — 全 additive、項目 205 のような必須化はなし」と記載
+- **正確には**: `AgentSettings` への `llama_server: Option<LlamaServerSettings>` field 追加は **struct 拡張 = 厳密には minor breaking change** (downstream Rust caller がいる場合)
+- bonsai は private project + `serde(default, skip_serializing_if = "Option::is_none")` で **実質互換** (TOML 既存 file 読込影響なし、Rust caller も Default で初期化可能)、informational only
+- 影響: なし、ただし「signature 変更ゼロ」表現は厳密には誇張のため Phase 5 の handoff entry で「struct field 追加 (実質互換)」と表現修正可
+
+### gap analysis サマリー
+- **major blocking**: 0 件 (gbrain と異なり design レベル gap なし)
+- **minor (実装影響あり)**: G-1 (項目番号 renumber) — Phase 5 commit 直前に修正
+- **minor (派生 plan 影響)**: G-2 (SCHEMA V11→V14) — Stage 3 派生 plan 起票時に修正
+- **minor (数値 outdated)**: G-3 (test count 1156→1171) — Phase 2 / Quality Gate 直前に値更新
+- **informational**: G-4 (API 表記) — 対応任意
+
+### Phase 0 追加 (本 plan §5 に追加、次 session 着手時)
+Phase 0a: 本 §13 G-1 で項目番号を実際の使用状況に合わせて renumber (CLAUDE.md 末尾を grep して max 番号確認 + 1)
+Phase 0b: G-3 の test count を当時の 1165 (または最新の数値) に更新
