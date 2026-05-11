@@ -86,7 +86,8 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `arag-hierarchical-retrieval-docs.md` | arxiv 2602.03442 A-RAG | docs (項目 199) | — |
 | `erl-heuristics-pool-impl-v2.md` | arxiv ERL Heuristics | 実装済 (項目 213-216、Lab v17 REJECT) | — |
 | `self-verify-dilemma-impl.md` | arxiv Self-Verification Dilemma | 実装済 (項目 210-212、Lab v16 REJECT) | — |
-| `agentfloor-tier-eval-impl.md` | arxiv 2605.00334 AgentFloor 6-tier | 🔄 Phase 2 Green 完遂 (commit `2b63441`、1153 passed)、Phase 3-5 残 | ~5h 残 |
+| `agentfloor-tier-eval-impl.md` | arxiv 2605.00334 AgentFloor 6-tier | ✓ 完遂 (項目 223、5 commits 2b63441→6be9b67、1162 passed)、副次=run_k tier populate fix `572a9a4` | — |
+| `agentfloor-prescreen-tier-fix.md` | G-4c v3 PARTIAL PASS で発覚 (項目 223 wiring 最終 fix) | 起票済 (285 行)、未実装、★★★ T6-LongHorizon weakest 確証含む | ~6h (Phase 4 G-4c v4 3h は background) |
 | `pass-k-t-metric-impl.md` | arxiv 2604.14877 PASS@(k,T) | 起票済 (907 行)、未実装 | ~5h |
 | `vllm-mlx-backend-impl.md` | arxiv 2601.19139 vllm-mlx | 起票済 (734 行)、未実装 | ~17h |
 | `mcp-bench-integration-impl.md` | arxiv MCP-Bench | 起票済 (540 行)、未実装 | ~12h |
@@ -101,7 +102,7 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `agent-side-tdd-enforcement-impl.md` | G2 Agent-Side TDD | ★★ | ~2 day | 起票済 (770 行)、G1 dependency + 独立着手可、未実装 |
 | `parallel-subagent-roles-impl.md` | G3 並列 Sub-Agent | ★ | ~1.5 day | 起票済 (819 行)、std::thread::scope 経路踏襲 (tokio 移行は Phase 2 派生)、未実装 |
 
-推奨着手順序 = AgentFloor Phase 3-5 (Phase 4 Smoke 進行中) → G1 → G4 → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。派生 plan 4 件全て起票済 (合計 2748 行)、production code 変更ゼロ。
+推奨着手順序 = **AgentFloor pre-screen tier fix (本 session 着手中、~6h)** → G1 Critic → G4 Task-Aware → PASS@(k,T) → vllm-mlx → MCP-Bench → G2 → G3。派生 plan 4 件全て起票済 (合計 2748 行)、production code 変更ゼロ。AgentFloor 本体 (`agentfloor-tier-eval-impl.md`) は項目 223 で完遂、最終 wiring fix のみ残 (`agentfloor-prescreen-tier-fix.md` 起票済)。
 
 ## 📊 Lab effectiveness paired t-test plan (G1-G4 実装 ACCEPT 後の Phase 5 検証)
 
