@@ -638,3 +638,42 @@ Lab v18 paired t-test で critic-on の Δscore < +0.015:
    - Phase 2 派生 `critic-separate-backend-phase2-impl.md` で **真の別 model** (gpt-4-class) で再測定 → ACCEPT 可能性が残る
    - 副次 finding (stability 軸 ON 顕著優位) があれば項目 200 RDC/VAF re-eval 候補
    - dead-code 削除 plan は別 session (項目 222 pattern: sqlite-vec wiring 削除と同経路)
+
+## 13. session 05-11b gap analysis 補注 (★ minor、次 session 着手時に注意)
+
+> **補注由来**: handoff `session_2026_05_11b_handoff.md` 完了後、本 plan を deep-read で gap 検査した結果。major blocking gap なし、minor 4 件を以下に集中記録。**次 session 着手 (Phase 2 Green) 時に本 §13 を必ず参照** し、§4.6 / §5 Phase 1-2 / §10 の outdated 数値を実装直前に更新。
+
+### G-1: TSV 列拡張見積もりの outdated (★ low、§4.6)
+- plan §4.6 「TSV 12→15 列 (項目 200 で拡張済)、本 plan で **15→18 列**」と記載
+- **訂正**: 本 session (commit `ec4bd73` AgentFloor Phase 4 Green) で TSV を **15→21 列に拡張済** (tier_t1..t6 追加)、本 plan の critic 3 列追加は正確には **21→24 列**
+- 影響: Phase 2 Green step 6 (`MultiRunBenchmarkResult` への `Option<CriticStats>` field 追加) で TSV 列追加実装時に正確な列番号 22/23/24 を使う
+
+### G-2: 期待 test count の outdated (★ low、§5 Phase 2 + §10)
+- plan §5 Phase 2 「**既存 1150 passed + 新規 8-10 test = 1158-1160 passed**」と記載
+- **訂正**: 本 session (commit `a52edc6` 項目 224 pre-screen tier fix) で test 1162→**1165 passed** に増、本 plan の正確な期待値は **1165 + 8-10 = 1173-1175 passed**
+- 影響: Quality Gate G-2 と完了条件 #6 の数値修正必要、判定基準として再計算
+
+### G-3: `LlmBackend::generate` signature と test #5 期待の不整合 (★ medium、§5 Phase 1)
+- plan §5 Phase 1 Red test #5 `t_critic_invokes_with_temperature_override` で「temperature=0.7 が `generate` 引数の **GenerateOptions / temperature override** に反映」と記載
+- **訂正**: bonsai 現行 `LlmBackend::generate(messages, tools, on_token, cancel) -> GenerateResult` signature には `GenerateOptions` 引数なし、temperature 制御は `crate::config::InferenceParams` または `AgentConfig.base_inference` 経由の暗黙設定が現状
+- **対応必須**: Phase 2 Green 着手時に以下のいずれかを設計判断:
+  - **Option A**: `LlmBackend` trait に `generate_with_options(messages, tools, options: &GenerateOptions, on_token, cancel)` 新 method 追加 (additive、既存 `generate` 不変、Mock + LlamaServer 両 impl 必要)
+  - **Option B**: critic 呼出時に専用 `AgentConfig` clone + `base_inference.temperature = 0.7` で executor と分離 (signature 変更ゼロ、ただし AgentConfig 全 clone コスト)
+  - **Option C**: `LlmBackend::generate` signature を破壊変更 (project-wide 影響大、却下推奨)
+- 推奨 = **Option B** (signature 変更ゼロ、本 plan §6 「signature 変更ゼロ」 commitment 維持)、ただし AgentConfig clone は per-call なため performance 影響軽微検証 (Phase 4 G-4b smoke で duration 計測)
+- 影響: Phase 1 Red test #5 を Option B 採用前提で書き直し (`AgentConfig.base_inference.temperature` が critic 呼出時のみ 0.7 になることを assert)
+
+### G-4: 既存項目親和性 list 重複 (informational、§1.5 + §3)
+- §1.5 「既存項目との親和性」と §3 「既存項目との関係 表」で項目 89/210/213 が両方 list 化されている
+- 影響: 認知負荷軽微、実装影響なし、informational only
+- 対応 (任意): Phase 5 commit 時に §1.5 を §3 に統合する整理も可、ただし scope creep 回避なら現状維持で OK
+
+### gap analysis サマリー
+- **major blocking gap**: 0 件
+- **minor (実装影響あり)**: G-3 (LlmBackend signature) — Phase 2 Green 着手前に Option B 採用判断が必要
+- **minor (数値 outdated)**: G-1 (TSV 列), G-2 (test count) — Phase 2 / Quality Gate 直前に値更新
+- **informational**: G-4 (docs 重複) — 対応任意
+
+### Phase 0 追加 (本 plan §5 に追加、次 session 着手時)
+Phase 0a: 本 §13 G-3 の Option B vs A 判断を `/ccg:plan` agent で 30 min discussion (LlmBackend trait 影響 + 全 impl 確認)
+Phase 0b: G-1 / G-2 の outdated 数値を §4.6 / §5 Phase 2 / §10 で実装直前に置換
