@@ -173,6 +173,14 @@ pub struct Experiment {
     pub tier_t5: Option<f64>, // CapabilityTier::ErrorRecovery
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_t6: Option<f64>, // CapabilityTier::LongHorizonPlanning
+    /// 項目 225 (arxiv 2604.14877): 実験結果の PASS@(k, T_steps) composite。
+    /// 各要素は `(T_steps, pass_rate)`。env `BONSAI_PASS_K_T_STEPS` 未指定なら空 Vec。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pass_at_k_t_steps: Vec<(usize, f64)>,
+    /// 項目 225 (arxiv 2604.14877): 実験結果の PASS@(k, T_seconds) composite。
+    /// 各要素は `(T_seconds, pass_rate)`。env `BONSAI_PASS_K_T_SECONDS` 未指定なら空 Vec。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pass_at_k_t_seconds: Vec<(f64, f64)>,
 }
 
 impl Experiment {
@@ -212,6 +220,9 @@ impl Experiment {
             tier_t4: None,
             tier_t5: None,
             tier_t6: None,
+            // 項目 225: legacy BenchmarkResult 経路は PASS@(k,T) を計算しない (multi-run のみ対応)
+            pass_at_k_t_steps: Vec::new(),
+            pass_at_k_t_seconds: Vec::new(),
         }
     }
 
@@ -236,6 +247,9 @@ impl Experiment {
         let stability_delta = vaf.map(|v| (1.0 - v) + (rdc_exp - rdc_base) + (gds_exp - gds_base));
         // tier_avg_scores から tier_t1..t6 を展開 (ladder mode 非使用時は全 None)
         let tiers = experiment.tier_avg_scores;
+        // 項目 225: PASS@(k,T) composite を T 軸 (steps/seconds) 別に集計
+        let pass_at_k_t_steps = experiment.composite_pass_at_k_t_steps();
+        let pass_at_k_t_seconds = experiment.composite_pass_at_k_t_seconds();
         Self {
             experiment_id,
             mutation_type,
@@ -267,6 +281,8 @@ impl Experiment {
             tier_t4: tiers.and_then(|t| t[3]),
             tier_t5: tiers.and_then(|t| t[4]),
             tier_t6: tiers.and_then(|t| t[5]),
+            pass_at_k_t_steps,
+            pass_at_k_t_seconds,
         }
     }
 }
@@ -277,13 +293,18 @@ pub struct ExperimentLog;
 impl ExperimentLog {
     /// SQLiteに実験を記録
     pub fn save_to_db(conn: &Connection, exp: &Experiment) -> Result<()> {
+        // 項目 225 (PASS@(k,T)): T 閾値数は env 駆動で可変のため JSON TEXT として保存。
+        // 空 Vec は `"[]"` に encode され、reader は from_str で空 Vec を得る (NULL と区別)。
+        let pass_at_k_t_steps_json = serde_json::to_string(&exp.pass_at_k_t_steps)?;
+        let pass_at_k_t_seconds_json = serde_json::to_string(&exp.pass_at_k_t_seconds)?;
         conn.execute(
             "INSERT INTO experiments (experiment_id, mutation_type, mutation_detail, \
              baseline_score, experiment_score, delta, accepted, duration_secs, prescreened, \
              reliability_decay, variance_amplification, graceful_degradation, stability_delta, \
-             tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6) \
+             tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6, \
+             pass_at_k_t_steps, pass_at_k_t_seconds) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-             ?14, ?15, ?16, ?17, ?18, ?19)",
+             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 exp.experiment_id,
                 exp.mutation_type.as_str(),
@@ -304,6 +325,8 @@ impl ExperimentLog {
                 exp.tier_t4,
                 exp.tier_t5,
                 exp.tier_t6,
+                pass_at_k_t_steps_json,
+                pass_at_k_t_seconds_json,
             ],
         )?;
 
@@ -331,13 +354,28 @@ impl ExperimentLog {
                 "experiment_id\tmutation_type\tmutation_detail\tbaseline_score\texperiment_score\t\
                  delta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\t\
                  prescreened\treliability_decay\tvariance_amplification\tgraceful_degradation\t\
-                 tier_t1\ttier_t2\ttier_t3\ttier_t4\ttier_t5\ttier_t6"
+                 tier_t1\ttier_t2\ttier_t3\ttier_t4\ttier_t5\ttier_t6\t\
+                 pass_at_k_t_steps\tpass_at_k_t_seconds"
             )?;
         }
 
+        // 項目 225 (PASS@(k,T)): TSV 末尾 2 列。空 Vec は `-` で表記 (環境変数未指定 /
+        // pre-screen REJECT 等で計測がない場合と一致)、非空時は JSON 配列をそのまま記録。
+        // `replace('\t', " ")` は JSON 内に `\t` を含まないため不要だが防御的に統一。
+        let pass_at_k_t_steps = if exp.pass_at_k_t_steps.is_empty() {
+            "-".to_string()
+        } else {
+            serde_json::to_string(&exp.pass_at_k_t_steps).unwrap_or_else(|_| "-".into())
+        };
+        let pass_at_k_t_seconds = if exp.pass_at_k_t_seconds.is_empty() {
+            "-".to_string()
+        } else {
+            serde_json::to_string(&exp.pass_at_k_t_seconds).unwrap_or_else(|_| "-".into())
+        };
+
         writeln!(
             file,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             exp.experiment_id,
             exp.mutation_type.as_str(),
             exp.mutation_detail.replace('\t', " "),
@@ -364,6 +402,8 @@ impl ExperimentLog {
             exp.tier_t4.map_or("-".to_string(), |v| format!("{v:.4}")),
             exp.tier_t5.map_or("-".to_string(), |v| format!("{v:.4}")),
             exp.tier_t6.map_or("-".to_string(), |v| format!("{v:.4}")),
+            pass_at_k_t_steps,
+            pass_at_k_t_seconds,
         )?;
         Ok(())
     }
@@ -375,7 +415,8 @@ impl ExperimentLog {
              baseline_score, experiment_score, delta, accepted, duration_secs, \
              COALESCE(prescreened, 0), \
              reliability_decay, variance_amplification, graceful_degradation, stability_delta, \
-             tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6 \
+             tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6, \
+             pass_at_k_t_steps, pass_at_k_t_seconds \
              FROM experiments ORDER BY id DESC LIMIT ?1",
         )?;
 
@@ -400,6 +441,8 @@ impl ExperimentLog {
                 row.get::<_, Option<f64>>(16)?,
                 row.get::<_, Option<f64>>(17)?,
                 row.get::<_, Option<f64>>(18)?,
+                row.get::<_, Option<String>>(19)?,
+                row.get::<_, Option<String>>(20)?,
             ))
         })?;
 
@@ -430,6 +473,8 @@ impl ExperimentLog {
                 t4,
                 t5,
                 t6,
+                pass_at_k_t_steps_json,
+                pass_at_k_t_seconds_json,
             ) = row?;
             let mutation_type = MutationType::parse(&mt).unwrap_or(MutationType::PromptRule);
 
@@ -439,6 +484,16 @@ impl ExperimentLog {
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
+
+            // 項目 225 (PASS@(k,T)): TEXT 列を JSON decode。NULL / 解析失敗 → 空 Vec。
+            // env 未指定セッションの旧 row (V15 migration 前) は NULL になるため
+            // `and_then(|json| serde_json::from_str(...))` で `None` を吸収する。
+            let pass_at_k_t_steps = pass_at_k_t_steps_json
+                .and_then(|json| serde_json::from_str::<Vec<(usize, f64)>>(&json).ok())
+                .unwrap_or_default();
+            let pass_at_k_t_seconds = pass_at_k_t_seconds_json
+                .and_then(|json| serde_json::from_str::<Vec<(f64, f64)>>(&json).ok())
+                .unwrap_or_default();
 
             experiments.push(Experiment {
                 experiment_id: id,
@@ -464,6 +519,8 @@ impl ExperimentLog {
                 tier_t4: t4,
                 tier_t5: t5,
                 tier_t6: t6,
+                pass_at_k_t_steps,
+                pass_at_k_t_seconds,
             });
         }
         Ok(experiments)
@@ -493,8 +550,8 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // V1, V2, V7 (prescreened), V9 (信頼性メトリクス), V14 (tier map) 適用
-        for version in [1, 2, 7, 9, 14] {
+        // V1, V2, V7 (prescreened), V9 (信頼性メトリクス), V14 (tier map), V15 (PASS@(k,T)) 適用
+        for version in [1, 2, 7, 9, 14, 15] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -526,6 +583,8 @@ mod tests {
             tier_t4: None,
             tier_t5: None,
             tier_t6: None,
+            pass_at_k_t_steps: Vec::new(),
+            pass_at_k_t_seconds: Vec::new(),
         }
     }
 
@@ -651,8 +710,9 @@ mod tests {
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
         let data_line = content.lines().nth(1).unwrap();
-        // 項目 200: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) + tier 6 列 = 21 列
-        assert_eq!(data_line.split('\t').count(), 21);
+        // 項目 200/223/225: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) + tier 6 列
+        // + PASS@(k,T) 2 列 (steps/seconds) = 23 列
+        assert_eq!(data_line.split('\t').count(), 23);
     }
 
     #[test]
@@ -786,8 +846,10 @@ mod tests {
 
     fn setup_test_db_v14() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // V14 migration まで必要な分を適用
-        for version in [1, 2, 7, 9, 14] {
+        // V14 (AgentFloor tier 列) まで必要な migration を適用。
+        // 項目 225 で save_to_db が V15 列 (pass_at_k_t_*) を INSERT するため
+        // V15 も併せて適用しないと既存 tier round-trip テストが失敗する。
+        for version in [1, 2, 7, 9, 14, 15] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -819,6 +881,8 @@ mod tests {
             tier_t4: Some(0.50),
             tier_t5: Some(0.40),
             tier_t6: Some(0.30),
+            pass_at_k_t_steps: Vec::new(),
+            pass_at_k_t_seconds: Vec::new(),
         }
     }
 
@@ -849,6 +913,8 @@ mod tests {
             tier_t4: None,
             tier_t5: None,
             tier_t6: None,
+            pass_at_k_t_steps: Vec::new(),
+            pass_at_k_t_seconds: Vec::new(),
         };
         assert!(exp.tier_t1.is_none());
         assert!(exp.tier_t2.is_none());
@@ -856,13 +922,15 @@ mod tests {
         assert!(exp.tier_t4.is_none());
         assert!(exp.tier_t5.is_none());
         assert!(exp.tier_t6.is_none());
+        assert!(exp.pass_at_k_t_steps.is_empty());
+        assert!(exp.pass_at_k_t_seconds.is_empty());
     }
 
-    /// 2. tier 値ありの場合 21 列出力 (header + data row)
+    /// 2. tier 値ありの場合 23 列出力 (header + data row、項目 225 で 21→23 拡張)
     #[test]
-    fn test_append_tsv_21_columns_with_tier() {
+    fn test_append_tsv_23_columns_with_tier() {
         let dir = TempDir::new().unwrap();
-        let tsv_path = dir.path().join("tier_21.tsv");
+        let tsv_path = dir.path().join("tier_23.tsv");
         let exp = sample_experiment_with_tiers("tsv_tier_01", 0.1);
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
@@ -870,8 +938,8 @@ mod tests {
         assert_eq!(lines.len(), 2, "header + 1 data row");
         let header_cols = lines[0].split('\t').count();
         let data_cols = lines[1].split('\t').count();
-        assert_eq!(header_cols, 21, "header は 21 列");
-        assert_eq!(data_cols, 21, "data row は 21 列");
+        assert_eq!(header_cols, 23, "header は 23 列");
+        assert_eq!(data_cols, 23, "data row は 23 列");
         assert!(
             lines[0].contains("tier_t1"),
             "header に tier_t1 が含まれること"
@@ -881,14 +949,18 @@ mod tests {
             "header に tier_t6 が含まれること"
         );
         assert!(
+            lines[0].ends_with("tier_t6\tpass_at_k_t_steps\tpass_at_k_t_seconds"),
+            "PASS@(k,T) 列は tier_t6 の後に追加されること"
+        );
+        assert!(
             lines[1].contains("0.8000"),
             "t1 score が data に含まれること"
         );
     }
 
-    /// 3. tier 全 None でも 21 列出力、末尾 6 列は "-"
+    /// 3. tier 全 None + PASS@(k,T) 空 Vec でも 23 列出力、末尾 8 列は "-"
     #[test]
-    fn test_append_tsv_21_columns_tier_none_dash() {
+    fn test_append_tsv_23_columns_tier_none_dash() {
         let dir = TempDir::new().unwrap();
         let tsv_path = dir.path().join("tier_none.tsv");
         let exp = sample_experiment("tsv_none_01", 0.1);
@@ -897,15 +969,16 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
         let data_cols: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(data_cols.len(), 21, "tier None でも 21 列固定");
-        // 末尾 6 列は全て "-"
-        for col in &data_cols[15..21] {
-            assert_eq!(*col, "-", "tier None 列は '-' 表現");
+        assert_eq!(data_cols.len(), 23, "tier None + PASS@(k,T) 空でも 23 列固定");
+        // 末尾 8 列 (tier 6 + PASS@(k,T) 2) は全て "-"
+        for col in &data_cols[15..23] {
+            assert_eq!(*col, "-", "tier/PASS@(k,T) None 列は '-' 表現");
         }
     }
 
     /// 4. SQLite に tier 列 6 件 round-trip
     #[test]
+    #[allow(clippy::type_complexity)] // 項目 223 由来の 6-Option<f64> 型注釈、テスト内 round-trip 検証専用
     fn test_save_to_db_tier_columns() {
         let conn = setup_test_db_v14();
         let exp = sample_experiment_with_tiers("tier_rt_01", 0.1);
@@ -972,5 +1045,36 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].tier_t1.is_none());
         assert!(results[0].tier_t6.is_none());
+    }
+
+    // ── 項目 225 (PASS@(k,T)) Red phase tests ──────────────────────────────
+
+    /// serde: Experiment に PASS@(k,T) 2 軸を設定して round-trip
+    #[test]
+    fn t_experiment_serde_with_pass_k_t() {
+        let mut exp = sample_experiment("e1", 0.05);
+        exp.pass_at_k_t_steps = vec![(3, 0.33), (5, 0.66)];
+        exp.pass_at_k_t_seconds = vec![(60.0, 0.5), (300.0, 0.83)];
+        let json = serde_json::to_string(&exp).unwrap();
+        let exp2: Experiment = serde_json::from_str(&json).unwrap();
+        assert_eq!(exp2.pass_at_k_t_steps.len(), 2);
+        assert_eq!(exp2.pass_at_k_t_seconds.len(), 2);
+        assert_eq!(exp2.pass_at_k_t_steps[0], (3, 0.33));
+        assert!((exp2.pass_at_k_t_seconds[1].0 - 300.0).abs() < 1e-6);
+    }
+
+    /// SQLite V15: PASS@(k,T) 列に JSON encode で保存 → recent_experiments で decode
+    #[test]
+    fn t_experiment_db_roundtrip_with_pass_k_t_v15() {
+        let conn = setup_test_db();
+        let mut exp = sample_experiment("e_pkt", 0.05);
+        exp.pass_at_k_t_steps = vec![(3, 0.33), (5, 0.66)];
+        exp.pass_at_k_t_seconds = vec![(60.0, 0.5)];
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let results = ExperimentLog::recent_experiments(&conn, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].pass_at_k_t_steps.len(), 2);
+        assert_eq!(results[0].pass_at_k_t_seconds.len(), 1);
+        assert!((results[0].pass_at_k_t_seconds[0].0 - 60.0).abs() < 1e-6);
     }
 }

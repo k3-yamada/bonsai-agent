@@ -940,6 +940,12 @@ fn build_prescreen_reject_experiment(
         tier_t4: tiers.and_then(|t| t[3]),
         tier_t5: tiers.and_then(|t| t[4]),
         tier_t6: tiers.and_then(|t| t[5]),
+        // 項目 225 (PASS@(k,T)): pre-screen REJECT は full run 未実行のため measurement なし。
+        // tier carry-over と異なり baseline には PASS@(k,T) が計算済 (run_k 内で env 起動時)
+        // でも、experiment 側に carry-over するセマンティクスは無意味 (T 軸は experiment の
+        // efficiency を測る軸であり baseline 値の流用は誤情報)。空 Vec で保持する。
+        pass_at_k_t_steps: Vec::new(),
+        pass_at_k_t_seconds: Vec::new(),
     }
 }
 
@@ -2275,6 +2281,8 @@ mod tests {
                 tier_t4: None,
                 tier_t5: None,
                 tier_t6: None,
+                pass_at_k_t_steps: Vec::new(),
+                pass_at_k_t_seconds: Vec::new(),
             },
             Experiment {
                 experiment_id: "e2".into(),
@@ -2300,6 +2308,8 @@ mod tests {
                 tier_t4: None,
                 tier_t5: None,
                 tier_t6: None,
+                pass_at_k_t_steps: Vec::new(),
+                pass_at_k_t_seconds: Vec::new(),
             },
             Experiment {
                 experiment_id: "e3".into(),
@@ -2325,6 +2335,8 @@ mod tests {
                 tier_t4: None,
                 tier_t5: None,
                 tier_t6: None,
+                pass_at_k_t_steps: Vec::new(),
+                pass_at_k_t_seconds: Vec::new(),
             },
         ];
         let worst = extract_worst_reasoning(&experiments, 5);
@@ -2361,6 +2373,8 @@ mod tests {
                 tier_t4: None,
                 tier_t5: None,
                 tier_t6: None,
+                pass_at_k_t_steps: Vec::new(),
+                pass_at_k_t_seconds: Vec::new(),
             })
             .collect();
         let worst = extract_worst_reasoning(&experiments, 3);

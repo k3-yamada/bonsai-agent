@@ -860,10 +860,12 @@ mod tests {
     #[test]
     fn t_1_4_schema_version_is_v14_for_tier_map() {
         use crate::db::schema::SCHEMA_VERSION;
-        assert_eq!(
-            SCHEMA_VERSION, 14,
-            "V14 migration が AgentFloor tier_t1..t6 列を experiments に追加するため SCHEMA_VERSION=14 になるべき (plan §4.5/§4.6 で適用)"
-        );
+        // V14 migration で AgentFloor tier_t1..t6 列を experiments に追加 (plan §4.5/§4.6)。
+        // 項目 225 で V15 (PASS@(k,T) JSON 列) を追加したため、SCHEMA_VERSION は 14 以上を
+        // 要求する形に緩和した (本テストは V14 機能の存在保証、最新バージョン固定値ではない)。
+        // V14 自体の SQL は別途 `db::schema::tests::test_schema_v14_*` で内容検証されている。
+        // const block で wrap し compile 時アサート (clippy::assertions_on_constants 回避)。
+        const { assert!(SCHEMA_VERSION >= 14) };
     }
 
     #[cfg(feature = "embeddings")]

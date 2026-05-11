@@ -330,6 +330,94 @@ fn compute_graceful_degradation(scores: &[f64], pass_threshold: f64) -> f64 {
     avg.clamp(0.0, 1.0)
 }
 
+/// 項目 225 (arxiv 2604.14877): PASS@(k, T_steps) の計算。
+/// k 回中 (score >= pass_threshold && iter <= T) を満たした割合を閾値ごとに返す。
+/// `scores` と `iterations_used` の長さが不一致 / k=0 の場合は空 Vec。
+fn compute_pass_at_k_t_steps(
+    scores: &[f64],
+    iterations_used: &[usize],
+    pass_threshold: f64,
+    thresholds: &[usize],
+) -> Vec<(usize, f64)> {
+    let k = scores.len();
+    if k == 0 || iterations_used.len() != k {
+        return Vec::new();
+    }
+
+    thresholds
+        .iter()
+        .map(|&t| {
+            let pass_count = scores
+                .iter()
+                .zip(iterations_used.iter())
+                .filter(|&(&score, &iter)| score >= pass_threshold && iter <= t)
+                .count();
+            (t, pass_count as f64 / k as f64)
+        })
+        .collect()
+}
+
+/// 項目 225 (arxiv 2604.14877): PASS@(k, T_seconds) の計算。
+/// k 回中 (score >= pass_threshold && duration <= T) を満たした割合を閾値ごとに返す。
+/// `scores` と `durations_secs` の長さが不一致 / k=0 の場合は空 Vec。
+///
+/// 非有限値 (NaN / ±Inf) の閾値は除外する: `serde_json` は非有限 f64 を encode 不可
+/// なため、persistence 経路 (save_to_db / append_tsv) で実験全体が失敗するのを防ぐ。
+fn compute_pass_at_k_t_seconds(
+    scores: &[f64],
+    durations_secs: &[f64],
+    pass_threshold: f64,
+    thresholds: &[f64],
+) -> Vec<(f64, f64)> {
+    let k = scores.len();
+    if k == 0 || durations_secs.len() != k {
+        return Vec::new();
+    }
+
+    thresholds
+        .iter()
+        .copied()
+        .filter(|t| t.is_finite())
+        .map(|t| {
+            let pass_count = scores
+                .iter()
+                .zip(durations_secs.iter())
+                .filter(|&(&score, &duration)| score >= pass_threshold && duration <= t)
+                .count();
+            (t, pass_count as f64 / k as f64)
+        })
+        .collect()
+}
+
+/// 項目 225: env `BONSAI_PASS_K_T_STEPS` から T_steps 閾値列を解析。
+/// 例: `"3,5,7"` → `vec![3, 5, 7]`。未指定 / 解析失敗 → 空 Vec。
+fn parse_t_steps_env() -> Vec<usize> {
+    std::env::var("BONSAI_PASS_K_T_STEPS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 項目 225: env `BONSAI_PASS_K_T_SECONDS` から T_seconds 閾値列を解析。
+/// 例: `"60,180,600"` → `vec![60.0, 180.0, 600.0]`。負値 / 0 はフィルタで除外。
+/// 非有限値 (NaN / ±Inf) も `is_finite()` で除外する: `BONSAI_PASS_K_T_SECONDS=60,inf`
+/// 等の不正入力で persistence 経路が失敗しないよう防御 (Codex audit MEDIUM finding)。
+fn parse_t_seconds_env() -> Vec<f64> {
+    std::env::var("BONSAI_PASS_K_T_SECONDS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|part| part.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// 複数回実行時の単一タスクスコア
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiRunTaskScore {
@@ -359,6 +447,16 @@ pub struct MultiRunTaskScore {
     /// 1.0 = 全 pass or 失敗時も threshold 近く、0.0 = 完全失敗。
     #[serde(default = "default_graceful_degradation")]
     pub graceful_degradation: f64,
+    /// 項目 225 (arxiv 2604.14877): step 軸 PASS@(k, T_steps) 列。
+    /// 各要素は `(T_steps, pass_rate)`。env `BONSAI_PASS_K_T_STEPS` 未指定時は
+    /// 空 Vec で既存挙動を維持する。
+    #[serde(default)]
+    pub pass_at_k_t_steps: Vec<(usize, f64)>,
+    /// 項目 225 (arxiv 2604.14877): 時間軸 PASS@(k, T_seconds) 列。
+    /// 各要素は `(T_seconds, pass_rate)`。env `BONSAI_PASS_K_T_SECONDS` 未指定時は
+    /// 空 Vec で既存挙動を維持する。
+    #[serde(default)]
+    pub pass_at_k_t_seconds: Vec<(f64, f64)>,
 }
 
 impl MultiRunTaskScore {
@@ -377,6 +475,8 @@ impl MultiRunTaskScore {
                 last_trajectory: None,
                 reliability_decay: 1.0,
                 graceful_degradation: 1.0,
+                pass_at_k_t_steps: Vec::new(),
+                pass_at_k_t_seconds: Vec::new(),
             };
         }
 
@@ -416,6 +516,9 @@ impl MultiRunTaskScore {
             // RDC/GDS を計算する経路は from_scores_with_metrics を使う。
             reliability_decay: 1.0,
             graceful_degradation: 1.0,
+            // 項目 225: PASS@(k,T) は v2 経路 (from_scores_with_metrics_v2) のみで設定。
+            pass_at_k_t_steps: Vec::new(),
+            pass_at_k_t_seconds: Vec::new(),
         }
     }
 
@@ -442,6 +545,48 @@ impl MultiRunTaskScore {
         score.reliability_decay =
             compute_reliability_decay(&scores, &iterations_used, iteration_budget);
         score.graceful_degradation = compute_graceful_degradation(&scores, pass_threshold);
+        score
+    }
+
+    /// 項目 225 (arxiv 2604.14877): PASS@(k,T) を含むフル指標版。
+    ///
+    /// 既存 `from_scores_with_metrics` (v1) に T 軸 2 種 (steps / seconds) を追加。
+    /// v1 signature を維持するため新規メソッドとして公開し、既存呼出側 (4 test fixture)
+    /// は無変更で動作する。env `BONSAI_PASS_K_T_STEPS` / `BONSAI_PASS_K_T_SECONDS`
+    /// 未指定時は `t_*_thresholds` を空 slice で渡すことで既存挙動を維持。
+    ///
+    /// - `durations_secs`: 各 run の wallclock 秒数 (失敗 run も elapsed を含む)
+    /// - `t_steps_thresholds`: step 軸閾値 (例: `&[3, 5, 7]`)
+    /// - `t_seconds_thresholds`: 時間軸閾値 (例: `&[60.0, 180.0, 600.0]`)
+    pub fn from_scores_with_metrics_v2(
+        task_id: String,
+        scores: Vec<f64>,
+        iterations_used: Vec<usize>,
+        durations_secs: Vec<f64>,
+        iteration_budget: usize,
+        pass_threshold: f64,
+        t_steps_thresholds: &[usize],
+        t_seconds_thresholds: &[f64],
+    ) -> Self {
+        let mut score = Self::from_scores_with_metrics(
+            task_id,
+            scores.clone(),
+            iterations_used.clone(),
+            iteration_budget,
+            pass_threshold,
+        );
+        score.pass_at_k_t_steps = compute_pass_at_k_t_steps(
+            &scores,
+            &iterations_used,
+            pass_threshold,
+            t_steps_thresholds,
+        );
+        score.pass_at_k_t_seconds = compute_pass_at_k_t_seconds(
+            &scores,
+            &durations_secs,
+            pass_threshold,
+            t_seconds_thresholds,
+        );
         score
     }
 
@@ -600,6 +745,60 @@ impl MultiRunBenchmarkResult {
             .map(|s| s.graceful_degradation)
             .sum();
         sum / self.task_scores.len() as f64
+    }
+
+    /// 項目 225 (arxiv 2604.14877): 全タスク平均 PASS@(k, T_steps) を閾値ごとに集計。
+    /// 同一 `T_steps` 値の `pass_rate` を task 間で算術平均。`BTreeMap` で順序を
+    /// 保証 (log 出力 / TSV の deterministic 順序のため)。
+    /// task_scores が空 / 各 task の `pass_at_k_t_steps` が空なら空 Vec。
+    pub fn composite_pass_at_k_t_steps(&self) -> Vec<(usize, f64)> {
+        if self.task_scores.is_empty() {
+            return Vec::new();
+        }
+
+        let mut acc: std::collections::BTreeMap<usize, (f64, usize)> =
+            std::collections::BTreeMap::new();
+        for task_score in &self.task_scores {
+            for &(threshold, rate) in &task_score.pass_at_k_t_steps {
+                let entry = acc.entry(threshold).or_insert((0.0, 0));
+                entry.0 += rate;
+                entry.1 += 1;
+            }
+        }
+
+        acc.into_iter()
+            .map(|(threshold, (sum, count))| (threshold, sum / count as f64))
+            .collect()
+    }
+
+    /// 項目 225 (arxiv 2604.14877): 全タスク平均 PASS@(k, T_seconds) を閾値ごとに集計。
+    /// f64 キーは `BTreeMap` 不可のため `1e-6` epsilon バケットで集約し、末尾で
+    /// `T_seconds` 昇順に sort する (log 出力の deterministic 順序のため)。
+    pub fn composite_pass_at_k_t_seconds(&self) -> Vec<(f64, f64)> {
+        if self.task_scores.is_empty() {
+            return Vec::new();
+        }
+
+        let mut buckets: Vec<(f64, f64, usize)> = Vec::new();
+        for task_score in &self.task_scores {
+            for &(threshold, rate) in &task_score.pass_at_k_t_seconds {
+                if let Some(bucket) = buckets
+                    .iter_mut()
+                    .find(|bucket| (bucket.0 - threshold).abs() < 1e-6)
+                {
+                    bucket.1 += rate;
+                    bucket.2 += 1;
+                } else {
+                    buckets.push((threshold, rate, 1));
+                }
+            }
+        }
+
+        buckets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        buckets
+            .into_iter()
+            .map(|(threshold, sum, count)| (threshold, sum / count as f64))
+            .collect()
     }
 
     /// 全 6 tier の中で平均スコアが最低の tier を返す (AgentFloor Phase 3、arxiv 2605.00334)。
@@ -1602,6 +1801,11 @@ impl BenchmarkSuite {
     ) -> Result<MultiRunBenchmarkResult> {
         let start = std::time::Instant::now();
         let mut task_scores = Vec::new();
+        // 項目 225 (arxiv 2604.14877): PASS@(k,T) 閾値は env 経由で 1 度だけ解析。
+        // 未指定時は空 Vec が返り、`from_scores_with_metrics_v2` の T 軸計算が空 Vec
+        // になることで既存挙動 (env 未設定環境) と 100% 互換になる。
+        let t_steps_thresholds = parse_t_steps_env();
+        let t_seconds_thresholds = parse_t_seconds_env();
 
         for task in &self.tasks {
             if cancel.is_cancelled() {
@@ -1611,6 +1815,9 @@ impl BenchmarkSuite {
             let mut scores = Vec::new();
             // 項目 200 (Beyond pass@1): 各 run の使用 iteration を収集して RDC 計算に渡す
             let mut iterations_per_run: Vec<usize> = Vec::with_capacity(multi.k);
+            // 項目 225 (PASS@(k,T)): 各 run の wallclock 秒数を収集して T_seconds 軸計算に渡す。
+            // 成功 run / 失敗 run 共に `Instant::now()` で計測 (RDC と一貫した記録方針)。
+            let mut durations_per_run: Vec<f64> = Vec::with_capacity(multi.k);
             // 最終 run の代表 trajectory（B2: judge gate 用、最後に成功した run を優先）
             let mut last_run_capture: Option<(String, Vec<String>)> = None;
             for run_idx in 0..multi.k {
@@ -1649,6 +1856,9 @@ impl BenchmarkSuite {
                     n_ctx_budget: config.n_ctx_budget,
                     memory_blocks: config.memory_blocks.clone(),
                 };
+                // 項目 225: per-run wallclock 計測。`run_agent_loop` 内 retry 含む total
+                // が論文 (arxiv 2604.14877) の interaction depth 定義と整合する。
+                let run_start = std::time::Instant::now();
                 let result = run_agent_loop(
                     &task.input,
                     backend,
@@ -1658,6 +1868,7 @@ impl BenchmarkSuite {
                     cancel,
                     Some(store),
                 );
+                let run_duration_secs = run_start.elapsed().as_secs_f64();
 
                 let score = match result {
                     Ok(ref loop_result) => {
@@ -1666,24 +1877,31 @@ impl BenchmarkSuite {
                             Some((loop_result.answer.clone(), loop_result.tools_called.clone()));
                         // 項目 200: 各 run の iteration 使用数を収集
                         iterations_per_run.push(loop_result.iterations_used);
+                        // 項目 225: 成功 run の wallclock を T_seconds 軸計算用に収集
+                        durations_per_run.push(run_duration_secs);
                         evaluate_task_response(task, loop_result).score()
                     }
                     Err(_) => {
                         // 失敗 run は budget 完全消費とみなす (RDC で late-iteration fail 扱い)
                         iterations_per_run.push(task.max_iterations);
+                        // 項目 225: 失敗 run も elapsed を push (RDC の "late-iteration fail" 方針と一貫)
+                        durations_per_run.push(run_duration_secs);
                         0.0
                     }
                 };
                 scores.push(score);
             }
 
-            // 項目 200: from_scores_with_metrics で RDC/GDS を計算
-            let mut task_score = MultiRunTaskScore::from_scores_with_metrics(
+            // 項目 200 + 225: from_scores_with_metrics_v2 で RDC/GDS/PASS@(k,T) を一括計算
+            let mut task_score = MultiRunTaskScore::from_scores_with_metrics_v2(
                 task.id.clone(),
                 scores,
                 iterations_per_run,
+                durations_per_run,
                 task.max_iterations,
                 pass_threshold,
+                &t_steps_thresholds,
+                &t_seconds_thresholds,
             );
             if let Some((response, trajectory)) = last_run_capture {
                 task_score = task_score.with_last_run(response, trajectory);
@@ -2459,6 +2677,180 @@ mod tests {
             "all-pass GDS should be 1.0, got {}",
             task.graceful_degradation
         );
+    }
+
+    // ─── 項目 225 (arxiv 2604.14877 PASS@(k,T)) Red phase tests ─────────────
+
+    #[test]
+    fn t_pass_at_k_t_steps_basic() {
+        // 3 run: scores=[1.0, 1.0, 0.0], iters=[2, 5, 10], threshold=0.5
+        // T=3 -> run0 (s=1.0, i=2) のみ -> 1/3
+        // T=5 -> run0+run1 (s=1.0, i<=5) -> 2/3
+        // T=10 -> run0+run1 (run2 は score<0.5 で fail) -> 2/3
+        let task = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "t".into(),
+            vec![1.0, 1.0, 0.0],
+            vec![2, 5, 10],
+            vec![10.0, 30.0, 100.0],
+            10,
+            0.5,
+            &[3, 5, 10],
+            &[],
+        );
+        assert_eq!(task.pass_at_k_t_steps.len(), 3);
+        let map: std::collections::HashMap<usize, f64> =
+            task.pass_at_k_t_steps.iter().copied().collect();
+        assert!((map[&3] - 1.0 / 3.0).abs() < 1e-6);
+        assert!((map[&5] - 2.0 / 3.0).abs() < 1e-6);
+        assert!((map[&10] - 2.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn t_pass_at_k_t_seconds_basic() {
+        // 同 scores、durations=[10, 60, 300], thresholds=[30, 120, 600]
+        // T=30 -> run0 のみ pass、1/3
+        // T=120 -> run0+run1 pass、2/3 (run1 dur=60 <= 120 + score=1.0)
+        // T=600 -> run0+run1 (run2 score<0.5 で fail)、2/3
+        let task = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "t".into(),
+            vec![1.0, 1.0, 0.0],
+            vec![2, 5, 10],
+            vec![10.0, 60.0, 300.0],
+            10,
+            0.5,
+            &[],
+            &[30.0, 120.0, 600.0],
+        );
+        let map = task.pass_at_k_t_seconds;
+        assert!((map[0].1 - 1.0 / 3.0).abs() < 1e-6); // T=30
+        assert!((map[1].1 - 2.0 / 3.0).abs() < 1e-6); // T=120
+        assert!((map[2].1 - 2.0 / 3.0).abs() < 1e-6); // T=600
+    }
+
+    #[test]
+    fn t_pass_at_k_t_empty_thresholds_returns_empty_vec() {
+        // env 未指定相当 -> 空 Vec で既存挙動互換
+        let task = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "t".into(),
+            vec![1.0, 0.5],
+            vec![1, 2],
+            vec![10.0, 20.0],
+            5,
+            0.5,
+            &[],
+            &[],
+        );
+        assert!(task.pass_at_k_t_steps.is_empty());
+        assert!(task.pass_at_k_t_seconds.is_empty());
+    }
+
+    #[test]
+    fn t_pass_at_k_t_seconds_non_finite_thresholds_are_ignored() {
+        // Codex audit MEDIUM finding: `BONSAI_PASS_K_T_SECONDS=60,inf` 等で
+        // 非有限 f64 が閾値に混入すると serde_json::to_string が失敗し persistence
+        // 経路が壊れる。compute_pass_at_k_t_seconds + parse_t_seconds_env で
+        // `is_finite()` フィルタを追加、混入時は静かにスキップして有限値のみ出力。
+        let task = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "t".into(),
+            vec![1.0],
+            vec![1],
+            vec![10.0],
+            10,
+            0.5,
+            &[],
+            &[30.0, f64::INFINITY, f64::NAN, f64::NEG_INFINITY],
+        );
+        assert_eq!(
+            task.pass_at_k_t_seconds.len(),
+            1,
+            "有限な T=30.0 のみが残るべき (Inf/NaN/-Inf は除外)"
+        );
+        assert!((task.pass_at_k_t_seconds[0].0 - 30.0).abs() < 1e-6);
+        assert!((task.pass_at_k_t_seconds[0].1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn t_pass_at_k_t_all_pass_within_t() {
+        // 全 run が T 制約内で pass -> pass_rate=1.0
+        let task = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "t".into(),
+            vec![1.0, 1.0, 1.0],
+            vec![1, 1, 1],
+            vec![5.0, 5.0, 5.0],
+            10,
+            0.5,
+            &[3],
+            &[10.0],
+        );
+        assert!((task.pass_at_k_t_steps[0].1 - 1.0).abs() < 1e-6);
+        assert!((task.pass_at_k_t_seconds[0].1 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn t_pass_at_k_t_all_exceed_t_returns_zero() {
+        // 全 run の iter > T_steps -> pass_rate=0.0 (score>=threshold でも T 違反)
+        let task = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "t".into(),
+            vec![1.0, 1.0, 1.0],
+            vec![5, 6, 7],
+            vec![100.0, 100.0, 100.0],
+            10,
+            0.5,
+            &[3],
+            &[50.0],
+        );
+        assert!((task.pass_at_k_t_steps[0].1 - 0.0).abs() < 1e-6);
+        assert!((task.pass_at_k_t_seconds[0].1 - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn t_composite_pass_at_k_t_steps_average_across_tasks() {
+        // 2 task: T=5 で task_a=0.5, task_b=1.0 -> average=0.75
+        let task_a = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "a".into(),
+            vec![1.0, 0.0],
+            vec![3, 4],
+            vec![10.0, 20.0],
+            10,
+            0.5,
+            &[5],
+            &[],
+        );
+        let task_b = MultiRunTaskScore::from_scores_with_metrics_v2(
+            "b".into(),
+            vec![1.0, 1.0],
+            vec![3, 4],
+            vec![10.0, 20.0],
+            10,
+            0.5,
+            &[5],
+            &[],
+        );
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![task_a, task_b],
+            duration_secs: 0.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+        };
+        let composite = result.composite_pass_at_k_t_steps();
+        assert_eq!(composite.len(), 1);
+        assert_eq!(composite[0].0, 5);
+        assert!(
+            (composite[0].1 - 0.75).abs() < 1e-6,
+            "got {}",
+            composite[0].1
+        );
+    }
+
+    #[test]
+    fn t_serde_backward_compat_old_json_loads_pass_k_t_empty() {
+        // 旧 JSON (pass_at_k_t_* なし) -> load 成功 / Vec が空
+        let old = r#"{"task_id":"x","pass_at_k":1.0,"pass_consecutive_k":1.0,
+                      "mean_score":0.8,"variance":0.0,"individual_scores":[0.8,0.8]}"#;
+        let task: MultiRunTaskScore = serde_json::from_str(old).unwrap();
+        assert!(task.pass_at_k_t_steps.is_empty());
+        assert!(task.pass_at_k_t_seconds.is_empty());
     }
 
     #[test]

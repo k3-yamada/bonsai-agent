@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 ///
@@ -9,6 +9,8 @@ pub const SCHEMA_VERSION: u32 = 14;
 /// V13 = sqlite-vec vec0 virtual table (plan T-1.4)。embeddings feature ON で
 ///       `vec_memories(memory_id, embedding float[256])` を作成、OFF では空 SQL
 ///       (no-op、version のみ記録) で MIGRATIONS.len() invariant 維持。
+/// V14 = AgentFloor tier map (experiments.tier_t1..t6、項目 223)。
+/// V15 = PASS@(k,T) JSON columns (experiments.pass_at_k_t_steps / seconds、項目 225)。
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -79,6 +81,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 14,
         description: "AgentFloor tier map 永続化: experiments に tier_t1..t6 REAL 列追加 (plan §4.5/§4.6)",
         sql: SCHEMA_V14,
+    },
+    Migration {
+        version: 15,
+        description: "PASS@(k,T) 永続化: experiments に pass_at_k_t_steps/pass_at_k_t_seconds JSON 列追加 (項目 225)",
+        sql: SCHEMA_V15,
     },
 ];
 
@@ -348,6 +355,15 @@ ALTER TABLE experiments ADD COLUMN tier_t5 REAL;
 ALTER TABLE experiments ADD COLUMN tier_t6 REAL;
 "#;
 
+/// V15: PASS@(k,T) capability/efficiency metric 永続化 (項目 225、arxiv 2604.14877)。
+/// T 閾値数は env (`BONSAI_PASS_K_T_STEPS` / `BONSAI_PASS_K_T_SECONDS`) 駆動で
+/// 可変のため、JSON TEXT 列として `Vec<(T, pass_rate)>` を serialize して保存する。
+/// env 未指定セッションでは NULL ではなく `"[]"` (空配列の JSON encode) が入る。
+const SCHEMA_V15: &str = r#"
+ALTER TABLE experiments ADD COLUMN pass_at_k_t_steps TEXT;
+ALTER TABLE experiments ADD COLUMN pass_at_k_t_seconds TEXT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +570,23 @@ mod tests {
         assert!(
             SCHEMA_V13.is_empty(),
             "embeddings OFF では V13 SQL 空 (no-op で migration 失敗回避)"
+        );
+    }
+
+    #[test]
+    fn test_schema_v15_contains_pass_k_t_columns() {
+        // 項目 225: PASS@(k,T) capability/efficiency metric 永続化
+        assert!(
+            SCHEMA_V15.contains("pass_at_k_t_steps"),
+            "V15 に pass_at_k_t_steps 列追加が必要"
+        );
+        assert!(
+            SCHEMA_V15.contains("pass_at_k_t_seconds"),
+            "V15 に pass_at_k_t_seconds 列追加が必要"
+        );
+        assert!(
+            SCHEMA_V15.contains("ALTER TABLE experiments"),
+            "V15 は experiments テーブルの ALTER"
         );
     }
 }
