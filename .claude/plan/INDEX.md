@@ -89,7 +89,7 @@ structural-improvements-v2.md ← 全体俯瞰（Step 0-9 状態管理）
 | `agentfloor-tier-eval-impl.md` | arxiv 2605.00334 AgentFloor 6-tier | ✓ 完遂 (項目 223、5 commits 2b63441→6be9b67、1162 passed)、副次=run_k tier populate fix `572a9a4` | — |
 | `agentfloor-prescreen-tier-fix.md` | G-4c v3 PARTIAL PASS で発覚 (項目 223 wiring 最終 fix) | Phase 1-3 完遂 (commit a52edc6+fd30398、1162→1165 passed)、Phase 4 G-4c v4 background 検証中 | ~6h |
 | `experiment-from-results-deletion-impl.md` | session 05-11b §11 wiring gap 全網羅検査の副次発見 (legacy ctor + BenchmarkResult dead-code chain) | 起票済 (237 行)、未実装、★ 機能影響なし cleanup、項目 222 sqlite-vec wiring 削除と同 pattern | ~3.5h ≈ 0.5 day |
-| `pass-k-t-metric-impl.md` | arxiv 2604.14877 PASS@(k,T) | 起票済 (907 行)、未実装 | ~5h |
+| `pass-k-t-metric-impl.md` | arxiv 2604.14877 PASS@(k,T) | ✓ 完遂 (項目 225、TDD strict + Codex audit、1165→1176 passed、SCHEMA_V14→V15、TSV 21→23 列、smoke は user 引継ぎ) | — |
 | `vllm-mlx-backend-impl.md` | arxiv 2601.19139 vllm-mlx | 起票済 (734 行)、未実装 | ~17h |
 | `mcp-bench-integration-impl.md` | arxiv MCP-Bench | 起票済 (540 行)、未実装 | ~12h |
 | `building-ai-coding-agents-gap-analysis.md` | arxiv survey 系 | meta-plan、4 派生候補 (G1-G4) 起票済、未着手 | ~0.5 day + 6 day |
