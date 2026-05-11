@@ -898,6 +898,51 @@ fn emit_tier_map_log(result: &MultiRunBenchmarkResult, cycle_label: &str) {
     }
 }
 
+/// pre-screen REJECT 経路で `Experiment` を構築する private helper (項目 224)。
+///
+/// G-4c v3 PARTIAL PASS で発覚: pre-screen REJECT は full run 未実行のため
+/// `MultiRunBenchmarkResult` を生成せず、従来は inline literal で `tier_t1..t6: None`
+/// 固定だった。修正 = baseline の tier 値を carry-over する (full-cycle と一貫した
+/// `from_multi_results` の `and_then(|t| t[N])` pattern と同形)。
+///
+/// `baseline_tier_avg_scores=None` 時 (LADDER mode 未使用) は全 tier None で後方互換。
+fn build_prescreen_reject_experiment(
+    experiment_id: String,
+    mutation_type: MutationType,
+    mutation_detail: String,
+    baseline_score: f64,
+    baseline_tier_avg_scores: Option<[Option<f64>; 6]>,
+    estimated_delta: f64,
+    snapshot: HashMap<String, String>,
+) -> Experiment {
+    let tiers = baseline_tier_avg_scores;
+    Experiment {
+        experiment_id,
+        mutation_type,
+        mutation_detail,
+        baseline_score,
+        experiment_score: baseline_score + estimated_delta,
+        delta: estimated_delta,
+        accepted: false,
+        duration_secs: 0.0,
+        config_snapshot: snapshot,
+        pass_at_k: None,
+        pass_consecutive_k: None,
+        score_variance: None,
+        prescreened: true,
+        reliability_decay: None,
+        variance_amplification: None,
+        graceful_degradation: None,
+        stability_delta: None,
+        tier_t1: tiers.and_then(|t| t[0]),
+        tier_t2: tiers.and_then(|t| t[1]),
+        tier_t3: tiers.and_then(|t| t[2]),
+        tier_t4: tiers.and_then(|t| t[3]),
+        tier_t5: tiers.and_then(|t| t[4]),
+        tier_t6: tiers.and_then(|t| t[5]),
+    }
+}
+
 /// Lab 自己改善ループ本体
 ///
 /// # ADK Phase D 評価結果（項目166）
@@ -1113,31 +1158,16 @@ pub fn run_experiment_loop(
                     mutation.detail, estimated_delta
                 );
                 let snapshot = config_snapshot(&modified_config);
-                let exp = Experiment {
-                    experiment_id: experiment_id.clone(),
-                    mutation_type: mutation.mutation_type,
-                    mutation_detail: mutation.detail,
-                    baseline_score: baseline.composite_score(),
-                    experiment_score: baseline.composite_score() + estimated_delta,
-                    delta: estimated_delta,
-                    accepted: false,
-                    duration_secs: 0.0,
-                    config_snapshot: snapshot,
-                    pass_at_k: None,
-                    pass_consecutive_k: None,
-                    score_variance: None,
-                    prescreened: true,
-                    reliability_decay: None,
-                    variance_amplification: None,
-                    graceful_degradation: None,
-                    stability_delta: None,
-                    tier_t1: None,
-                    tier_t2: None,
-                    tier_t3: None,
-                    tier_t4: None,
-                    tier_t5: None,
-                    tier_t6: None,
-                };
+                // 項目 224: baseline tier carry-over (G-4c v3 PARTIAL PASS で SQLite tier NULL 発覚の修正)。
+                let exp = build_prescreen_reject_experiment(
+                    experiment_id.clone(),
+                    mutation.mutation_type,
+                    mutation.detail,
+                    baseline.composite_score(),
+                    baseline.tier_avg_scores,
+                    estimated_delta,
+                    snapshot,
+                );
                 ExperimentLog::save_to_db(store.conn(), &exp)?;
                 if let Some(tsv) = &loop_config.tsv_path {
                     ExperimentLog::append_tsv(tsv, &exp)?;
@@ -1908,6 +1938,87 @@ mod tests {
             estimated_delta_border >= threshold,
             "閾値ちょうどは通過（<で判定するため）"
         );
+    }
+
+    // --- pre-screen REJECT tier carry-over テスト (項目 224、本 plan agentfloor-prescreen-tier-fix.md) ---
+    //
+    // 由来 = G-4c v3 PARTIAL PASS で SQLite tier_t1..t6 全 NULL 発覚。
+    // commit 572a9a4 (run_k tier populate) は意図通り動作するが、pre-screen REJECT 経路の
+    // Experiment inline literal が tier_t1..t6 を hardcoded None で構築していた。
+    // 修正 = baseline.tier_avg_scores を carry-over (full run 未実行のため baseline 値が論理的に正しい)。
+
+    #[test]
+    fn t_prescreen_reject_carries_baseline_tier_when_populated() {
+        use std::collections::HashMap;
+        let baseline_tiers = Some([
+            Some(0.68),
+            Some(0.52),
+            Some(0.77),
+            Some(0.64),
+            Some(0.70),
+            Some(0.47),
+        ]);
+        let exp = build_prescreen_reject_experiment(
+            "test-prescreen-001".to_string(),
+            MutationType::PromptRule,
+            "test_mutation".to_string(),
+            0.6, // baseline_score
+            baseline_tiers,
+            -0.1583, // estimated_delta
+            HashMap::new(),
+        );
+        assert_eq!(exp.tier_t1, Some(0.68), "T1 carry-over from baseline");
+        assert_eq!(exp.tier_t2, Some(0.52), "T2 carry-over from baseline");
+        assert_eq!(exp.tier_t3, Some(0.77), "T3 carry-over from baseline");
+        assert_eq!(exp.tier_t4, Some(0.64), "T4 carry-over from baseline");
+        assert_eq!(exp.tier_t5, Some(0.70), "T5 carry-over from baseline");
+        assert_eq!(exp.tier_t6, Some(0.47), "T6 carry-over from baseline");
+        assert!(exp.prescreened, "prescreened=true 維持");
+        assert!(!exp.accepted, "accepted=false 維持");
+        assert!((exp.delta - (-0.1583)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn t_prescreen_reject_tier_none_when_baseline_none() {
+        use std::collections::HashMap;
+        // LADDER mode 未使用時 (baseline.tier_avg_scores=None) の後方互換性
+        let exp = build_prescreen_reject_experiment(
+            "test-prescreen-002".to_string(),
+            MutationType::AgentParam,
+            "test_mutation".to_string(),
+            0.5, // baseline_score
+            None,
+            -0.05, // estimated_delta
+            HashMap::new(),
+        );
+        assert_eq!(exp.tier_t1, None, "LADDER mode OFF で全 tier None");
+        assert_eq!(exp.tier_t2, None);
+        assert_eq!(exp.tier_t3, None);
+        assert_eq!(exp.tier_t4, None);
+        assert_eq!(exp.tier_t5, None);
+        assert_eq!(exp.tier_t6, None);
+    }
+
+    #[test]
+    fn t_prescreen_reject_partial_tier_carries_correctly() {
+        use std::collections::HashMap;
+        // 部分 NULL の伝搬 (一部 tier に該当 task がない smoke 等のケース)
+        let baseline_tiers = Some([Some(0.68), None, Some(0.77), None, Some(0.70), None]);
+        let exp = build_prescreen_reject_experiment(
+            "test-prescreen-003".to_string(),
+            MutationType::PromptRule,
+            "test_mutation".to_string(),
+            0.6,
+            baseline_tiers,
+            -0.02,
+            HashMap::new(),
+        );
+        assert_eq!(exp.tier_t1, Some(0.68));
+        assert_eq!(exp.tier_t2, None, "部分 NULL は伝搬");
+        assert_eq!(exp.tier_t3, Some(0.77));
+        assert_eq!(exp.tier_t4, None);
+        assert_eq!(exp.tier_t5, Some(0.70));
+        assert_eq!(exp.tier_t6, None);
     }
 
     // --- smoke 補正係数テスト (項目 184 由来、Lab smoke→core 42% retention) ---
