@@ -517,3 +517,40 @@ Lab v18 paired t-test で全 tier Δscore が +0.02 未満:
 3. **`task_aware_prompt.rs` dead-code 候補化** (項目 217 ERL pattern 踏襲、CLAUDE.md negative finding 記録)
 4. **classifier 単独活用検討**: `TaskComplexityClassifier` は audit log の `inferred_capability_tier` として残置、Lab metric の tier 別変異効果可視化に流用 (`MultiRunTaskScore` 拡張候補)
 5. **CLAUDE.md** に negative finding 記録 (Lab 天井打破失敗 evidence、項目 215 pattern)
+
+## 13. session 05-11b gap analysis 補注 (★ minor、次 session 着手時に注意)
+
+> **補注由来**: handoff `session_2026_05_11b_handoff.md` 完了後、本 plan を deep-read で gap 検査した結果。**design レベル gap なし** (`inject_memory_blocks` / `inject_heuristics` / `inject_contextual_memories` / `inject_planning_step` 4 関数全存在、`CapabilityTier::short_code` 存在、core.rs:136-141 順序が plan §4.3 と完全一致)。minor 4 件を以下に集中記録、次 session 着手 (Phase 2 Green) 時に本 §13 を必ず参照して renumber。
+
+### G-1: CLAUDE.md 項目番号衝突 (★★★ blocking、5 箇所参照)
+- plan §4.1 docstring「項目 222 候補」/ §4.2 prompt file ヘッダ「項目 223 候補」/ §9 「項目 222 candidates (= 223 候補)」/ §10 commit message「項目 223 候補」/ §11 P5 表 で項目 222/223 を G4 用に予約
+- **訂正**: 本 session で項目 220-225 を予約済 (220=sqlite-vec / 221=G-4.2 REJECT / 222=wiring 削除 / **223=AgentFloor** / **224=pre-screen tier fix** / 225=experiment-from-results-deletion 予約)
+- **G4 は項目 226 以降** (G1 Critic/ds4 後の実装順次第) に renumber 必要
+- 影響: §4.1 docstring + §4.2 prompt file ヘッダ 6 件 + §9 / §10 / §11 内 commit message + handoff entry
+
+### G-2: Lab v18 番号衝突 (★★★ blocking、§5 Phase 5 / §10 / §11)
+- plan §5 Phase 5 / §10 / §11 で「Lab v18+ 候補」「`lab-v18-task-aware-prompt-effectiveness.md` 候補」と記載
+- **訂正**: 既存 `lab-v18-critic-effectiveness.md` (41.2KB、G1 Critic 用、handoff 05-10d §4 起票済) と衝突
+- **G4 effectiveness は Lab v19 (`lab-v19-task-aware-prompt-effectiveness.md`) または `lab-v18b-task-aware-prompt-effectiveness.md`** に renumber 必要
+- 影響: 本 plan §5 / §10 / §11 + 派生 effectiveness plan 起票時
+
+### G-3: 期待 test count outdated (★ low、§5 Phase 2 + §10)
+- plan §5 Phase 2 「**1150 → ≥ 1158 passed**」と記載
+- **訂正**: 本 session (commit `a52edc6` 項目 224 pre-screen tier fix) で test 1162→**1165 passed** に増、本 plan の正確な期待値は **1165 + 8 = ≥ 1173 passed**
+- 影響: Quality Gate G-2 と完了条件 #6 の数値修正必要
+
+### G-4: 1093+ task count outdated (★ informational、§1.3)
+- plan §1.3 「`BenchmarkTask.capability_tier` に tag 付与済 (1093+ tier-tagged tasks)」と記載
+- **訂正**: 本 session (commit `2b63441` AgentFloor Phase 2 Green) で **agentfloor_tasks() 30 task suite 追加**、現状 source 内の `capability_tier:` field 出現 = 94 task fixture matches (test fixture + production task)、informational only
+- 影響: なし、軽微な数値表現のみ
+
+### gap analysis サマリー
+- **major blocking**: 0 件 (dependencies 全 OK、design 実装可能)
+- **minor (実装影響あり)**: G-1 (項目番号 5 箇所 renumber)、G-2 (Lab v18 → v19/v18b renumber)
+- **minor (数値 outdated)**: G-3 (test count 1158→1173)
+- **informational**: G-4 (task count 1093→~94 fixture matches) — 対応任意
+
+### Phase 0 追加 (本 plan §5 に追加、次 session 着手時)
+Phase 0a: 本 §13 G-1 で項目番号を実際の使用状況に合わせて renumber (CLAUDE.md 末尾を grep して max 番号確認 + 1)、5 箇所 (§4.1 / §4.2 / §9 / §10 / §11) を一括置換
+Phase 0b: G-2 で Lab version を確認 (既存 v18 = G1 Critic、本 plan effectiveness を v19 に確定 or v18b sub-version 採用判断)
+Phase 0c: G-3 の test count を当時の実値 (1165 or G1/ds4 着手後の最新値) に更新
