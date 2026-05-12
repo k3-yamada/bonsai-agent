@@ -392,6 +392,29 @@ impl LlmBackend for LlamaServerBackend {
             }
         }
     }
+
+    /// G1 Critic 別 LLM 分離 (項目 226 候補): 呼出ごとに `InferenceParams` を上書きする。
+    /// trait default は `generate` に委譲して params を捨てるため、production で
+    /// critic の temperature override を効かせるには本 override が必須。
+    /// 既存 `inference` フィールドを `params` で置き換えた scoped self に委譲する。
+    fn generate_with_params(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        on_token: &mut dyn FnMut(&str),
+        cancel: &CancellationToken,
+        params: &InferenceParams,
+    ) -> Result<GenerateResult> {
+        let scoped = Self {
+            base_url: self.base_url.clone(),
+            model_id: self.model_id.clone(),
+            inference: params.clone(),
+            mlx_compatible: self.mlx_compatible,
+            seed: self.seed,
+            sse_chunk_timeout_secs: self.sse_chunk_timeout_secs,
+        };
+        scoped.generate(messages, tools, on_token, cancel)
+    }
 }
 
 /// llama-serverプロセスの管理

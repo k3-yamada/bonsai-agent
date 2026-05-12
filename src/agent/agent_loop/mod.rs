@@ -26,3 +26,5 @@ pub(crate) use core::emit_event;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_critic;

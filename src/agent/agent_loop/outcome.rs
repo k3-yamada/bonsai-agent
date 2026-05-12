@@ -3,12 +3,18 @@
 //! `StepOutcome` を `OutcomeAction` に解釈する `handle_outcome` と、
 //! 計画プレステップ要否を判定する `detect_task_complexity` を集約。
 
-use crate::agent::conversation::Session;
+use crate::agent::conversation::{Message, Session};
 use crate::agent::middleware::StepResult as MwStepResult;
+use crate::cancel::CancellationToken;
+use crate::config::InferenceParams;
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
+use crate::runtime::inference::LlmBackend;
+use crate::runtime::model_router::{CriticDisagreementAction, CriticOutcome};
 
-use super::advisor_inject::{inject_replan_on_stall, inject_verification_step};
+use super::advisor_inject::{
+    inject_critic_review, inject_replan_on_stall, inject_verification_step,
+};
 use super::state::{AgentLoopResult, LoopState, OutcomeAction, StepOutcome};
 use super::support::{
     check_invariants, compute_output_hash, record_abort, record_heuristic_outcomes, record_success,
@@ -30,6 +36,9 @@ pub(super) fn handle_outcome(
     final_iteration: usize,
     iteration: usize,
     duration_ms: u64,
+    backend: &dyn LlmBackend,
+    base_inference: &InferenceParams,
+    cancel: &CancellationToken,
 ) -> OutcomeAction {
     match outcome {
         StepOutcome::FinalAnswer(answer) => {
@@ -54,6 +63,28 @@ pub(super) fn handle_outcome(
                 &state.trial_summary,
             ) {
                 return OutcomeAction::Continue;
+            }
+            // G1 Critic 別 LLM 分離 (項目 226 候補、plan: critic-separate-llm-impl.md)
+            // Reflexion が発火しなかった final answer を第三者 role で review する。
+            if state.critic.enabled {
+                let critic_outcome = inject_critic_review(
+                    session,
+                    &mut state.critic,
+                    backend,
+                    base_inference,
+                    task_context,
+                    &answer,
+                    cancel,
+                    store,
+                );
+                if let CriticOutcome::Disagree { raw_response, .. } = critic_outcome {
+                    if state.critic.on_disagreement
+                        == CriticDisagreementAction::InjectAsSystemMessage
+                    {
+                        session.add_message(Message::system(format!("[critic] {raw_response}")));
+                        return OutcomeAction::Continue;
+                    }
+                }
             }
             // 不変条件チェック（非ブロッキング警告）
             let violations = check_invariants(session, task_context);

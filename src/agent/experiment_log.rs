@@ -788,6 +788,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         let experiment_result = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
@@ -799,6 +800,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         let exp = Experiment::from_multi_results(
             "e1".into(),
@@ -969,7 +971,11 @@ mod tests {
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
         let data_cols: Vec<&str> = lines[1].split('\t').collect();
-        assert_eq!(data_cols.len(), 23, "tier None + PASS@(k,T) 空でも 23 列固定");
+        assert_eq!(
+            data_cols.len(),
+            23,
+            "tier None + PASS@(k,T) 空でも 23 列固定"
+        );
         // 末尾 8 列 (tier 6 + PASS@(k,T) 2) は全て "-"
         for col in &data_cols[15..23] {
             assert_eq!(*col, "-", "tier/PASS@(k,T) None 列は '-' 表現");

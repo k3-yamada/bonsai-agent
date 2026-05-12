@@ -523,6 +523,226 @@ impl AdvisorConfig {
     }
 }
 
+/// G1 Critic 別 LLM 分離 — step 中の独立 critique 機構。
+#[derive(Debug, Clone)]
+pub struct CriticConfig {
+    /// `BONSAI_CRITIC_ENABLED=1` で opt-in。default OFF で観測動作完全互換。
+    pub enabled: bool,
+    /// critic 呼出モード。
+    pub mode: CriticMode,
+    /// critic 呼出の最大回数 (advisor max_uses と独立)。
+    pub max_critic_uses: usize,
+    /// 現在の呼出回数。
+    pub critic_calls_used: usize,
+    /// critic 専用 system prompt。
+    pub critic_system_prompt: String,
+    /// critic 呼出時の temperature override。
+    pub critic_temperature: f64,
+    /// critic 応答の最大トークン数。
+    pub max_critic_tokens: usize,
+    /// critic 呼出の hook 位置。
+    pub hook: CriticHook,
+    /// disagreement 検出時の挙動。
+    pub on_disagreement: CriticDisagreementAction,
+}
+
+/// critic 呼出モード。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CriticMode {
+    #[default]
+    SamePromptDifferentTemperature,
+    DifferentSystemPrompt,
+    SeparateBackend,
+}
+
+impl CriticMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SamePromptDifferentTemperature => "same_temp",
+            Self::DifferentSystemPrompt => "different_prompt",
+            Self::SeparateBackend => "separate_backend",
+        }
+    }
+}
+
+/// critic 呼出の hook 位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CriticHook {
+    #[default]
+    AfterStepOutcome,
+    BeforeToolCall,
+}
+
+/// critic が executor に disagree した時の挙動。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CriticDisagreementAction {
+    #[default]
+    InjectAsSystemMessage,
+    LogOnly,
+    ForceReplan,
+}
+
+/// critic review の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CriticOutcome {
+    Agree {
+        raw_response: String,
+    },
+    Disagree {
+        raw_response: String,
+        suggested_revision: Option<String>,
+    },
+    Uncertain {
+        raw_response: String,
+    },
+    Skipped {
+        reason: &'static str,
+    },
+    BackendError {
+        err: String,
+    },
+}
+
+impl CriticOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agree { .. } => "agree",
+            Self::Disagree { .. } => "disagree",
+            Self::Uncertain { .. } => "uncertain",
+            Self::Skipped { .. } => "skipped",
+            Self::BackendError { .. } => "error",
+        }
+    }
+
+    pub fn raw_response(&self) -> Option<&str> {
+        match self {
+            Self::Agree { raw_response }
+            | Self::Disagree { raw_response, .. }
+            | Self::Uncertain { raw_response } => Some(raw_response),
+            Self::Skipped { .. } | Self::BackendError { .. } => None,
+        }
+    }
+}
+
+impl Default for CriticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: CriticMode::SamePromptDifferentTemperature,
+            max_critic_uses: 3,
+            critic_calls_used: 0,
+            critic_system_prompt: include_str!("../../prompts/critic.txt").to_string(),
+            critic_temperature: 0.7,
+            max_critic_tokens: 400,
+            hook: CriticHook::AfterStepOutcome,
+            on_disagreement: CriticDisagreementAction::InjectAsSystemMessage,
+        }
+    }
+}
+
+impl CriticConfig {
+    /// critic 呼出が可能か。
+    pub fn can_critique(&self) -> bool {
+        self.enabled && self.critic_calls_used < self.max_critic_uses
+    }
+
+    /// 呼び出しを記録。
+    pub fn record_call(&mut self) {
+        self.critic_calls_used += 1;
+    }
+
+    /// env opt-in で critic 設定を構築する。
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        let enabled = std::env::var("BONSAI_CRITIC_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !enabled {
+            return config;
+        }
+        config.enabled = true;
+
+        if let Ok(mode) = std::env::var("BONSAI_CRITIC_MODE") {
+            config.mode = match mode.as_str() {
+                "same_temp" => CriticMode::SamePromptDifferentTemperature,
+                "different_prompt" => CriticMode::DifferentSystemPrompt,
+                "separate_backend" => {
+                    log_event(
+                        LogLevel::Warn,
+                        "critic",
+                        "BONSAI_CRITIC_MODE=separate_backend は Phase 2 未実装のため default にフォールバック",
+                    );
+                    CriticMode::SamePromptDifferentTemperature
+                }
+                other => {
+                    log_event(
+                        LogLevel::Warn,
+                        "critic",
+                        &format!("不正な BONSAI_CRITIC_MODE={other}、default にフォールバック"),
+                    );
+                    CriticMode::SamePromptDifferentTemperature
+                }
+            };
+        }
+        if let Ok(temp) = std::env::var("BONSAI_CRITIC_TEMPERATURE")
+            && let Ok(parsed) = temp.parse::<f64>()
+        {
+            config.critic_temperature = parsed;
+        }
+        if let Ok(max_uses) = std::env::var("BONSAI_CRITIC_MAX_USES")
+            && let Ok(parsed) = max_uses.parse::<usize>()
+        {
+            config.max_critic_uses = parsed;
+        }
+        if let Ok(hook) = std::env::var("BONSAI_CRITIC_HOOK") {
+            config.hook = match hook.as_str() {
+                "after_step" => CriticHook::AfterStepOutcome,
+                "before_tool" => {
+                    log_event(
+                        LogLevel::Warn,
+                        "critic",
+                        "BONSAI_CRITIC_HOOK=before_tool は Phase 2 未実装のため default にフォールバック",
+                    );
+                    CriticHook::AfterStepOutcome
+                }
+                other => {
+                    log_event(
+                        LogLevel::Warn,
+                        "critic",
+                        &format!("不正な BONSAI_CRITIC_HOOK={other}、default にフォールバック"),
+                    );
+                    CriticHook::AfterStepOutcome
+                }
+            };
+        }
+        if let Ok(action) = std::env::var("BONSAI_CRITIC_DISAGREEMENT") {
+            config.on_disagreement = match action.as_str() {
+                "inject" => CriticDisagreementAction::InjectAsSystemMessage,
+                "log_only" => CriticDisagreementAction::LogOnly,
+                "force_replan" => {
+                    log_event(
+                        LogLevel::Warn,
+                        "critic",
+                        "BONSAI_CRITIC_DISAGREEMENT=force_replan は Phase 2 未実装のため inject にフォールバック",
+                    );
+                    CriticDisagreementAction::InjectAsSystemMessage
+                }
+                other => {
+                    log_event(
+                        LogLevel::Warn,
+                        "critic",
+                        &format!(
+                            "不正な BONSAI_CRITIC_DISAGREEMENT={other}、inject にフォールバック"
+                        ),
+                    );
+                    CriticDisagreementAction::InjectAsSystemMessage
+                }
+            };
+        }
+        config
+    }
+}
+
 /// タスクコンテキスト（モデル選択の入力）
 pub struct TaskContext {
     pub has_image: bool,

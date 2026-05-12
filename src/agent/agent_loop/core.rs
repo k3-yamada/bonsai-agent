@@ -17,6 +17,7 @@ use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::inference::LlmBackend;
+use crate::runtime::model_router::CriticConfig;
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::ToolRegistry;
 
@@ -152,6 +153,7 @@ pub fn run_agent_loop_with_session(
     }
 
     let mut state = LoopState::new(config.advisor.clone());
+    state.critic = CriticConfig::from_env();
     state.injected_heuristic_ids = injected_heuristic_ids;
     // ミドルウェアチェーン構築（DeerFlow知見: 4段パイプライン、項目 193 で F3 削除）
     state.middleware_chain =
@@ -251,6 +253,9 @@ pub fn run_agent_loop_with_session(
             final_iteration,
             iteration,
             duration_ms,
+            ctx.backend,
+            &config.base_inference,
+            ctx.cancel,
         ) {
             OutcomeAction::Return(result) => {
                 emit_event(

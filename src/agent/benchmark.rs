@@ -601,6 +601,37 @@ impl MultiRunTaskScore {
     }
 }
 
+/// G1 Critic 別 LLM 分離の informational metric。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CriticStats {
+    pub critic_calls: usize,
+    pub agree_count: usize,
+    pub disagree_count: usize,
+    pub uncertain_count: usize,
+    pub skipped_count: usize,
+    pub backend_error_count: usize,
+}
+
+impl CriticStats {
+    pub fn agreement_rate(&self) -> Option<f64> {
+        let total = self.agree_count + self.disagree_count + self.uncertain_count;
+        if total == 0 {
+            None
+        } else {
+            Some(self.agree_count as f64 / total as f64)
+        }
+    }
+
+    pub fn disagreement_rate(&self) -> Option<f64> {
+        let total = self.agree_count + self.disagree_count + self.uncertain_count;
+        if total == 0 {
+            None
+        } else {
+            Some(self.disagree_count as f64 / total as f64)
+        }
+    }
+}
+
 /// 複数回実行のベンチマーク全体結果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiRunBenchmarkResult {
@@ -619,6 +650,9 @@ pub struct MultiRunBenchmarkResult {
     /// serde default で旧データとの互換を保つ (旧 JSON に列がなければ None)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_avg_scores: Option<[Option<f64>; 6]>,
+    /// G1 Critic 呼出の副次集計。Phase 1 では hook 定義のみで run_k 配線は行わない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub critic_stats: Option<CriticStats>,
 }
 
 /// tier 別平均 mean_score を算出（項目 172 P1）。
@@ -1950,6 +1984,7 @@ impl BenchmarkSuite {
             extended_avg_score,
             // 項目 209: AgentFloor tier 別集計を populate (Phase 2/3/4 後の最終配線)
             tier_avg_scores: Some(tier_avg_scores),
+            critic_stats: None,
         })
     }
 
@@ -2533,6 +2568,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         assert!((result.composite_pass_at_k() - 0.5).abs() < 0.001);
         assert!((result.composite_score() - 0.5).abs() < 0.001);
@@ -2618,6 +2654,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         let experiment = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
@@ -2629,6 +2666,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         assert!(experiment.variance_amplification_vs(&baseline).is_none());
     }
@@ -2646,6 +2684,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         let experiment = MultiRunBenchmarkResult {
             task_scores: vec![MultiRunTaskScore::from_scores(
@@ -2657,6 +2696,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         let vaf = experiment.variance_amplification_vs(&baseline).unwrap();
         assert!(vaf > 1.0, "expected amplification VAF > 1.0, got {vaf}");
@@ -2832,6 +2872,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         let composite = result.composite_pass_at_k_t_steps();
         assert_eq!(composite.len(), 1);
@@ -2885,6 +2926,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: None,
+            critic_stats: None,
         };
         assert!(
             (result.composite_reliability_decay() - 0.75).abs() < 1e-6,
@@ -3695,6 +3737,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: Some(scores),
+            critic_stats: None,
         };
         let weakest = result.weakest_tier();
         assert!(weakest.is_some(), "weakest_tier は Some を返すべき");
@@ -3724,6 +3767,7 @@ mod tests {
             core_avg_score: None,
             extended_avg_score: None,
             tier_avg_scores: Some(scores),
+            critic_stats: None,
         };
         let deltas = result.paper_delta_map();
         // T1: 0.80 - 0.85 = -0.05

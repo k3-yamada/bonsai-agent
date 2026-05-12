@@ -804,6 +804,9 @@ fn test_handle_outcome_final_answer_returns() {
     let mut session = Session::new();
     let mut state = LoopState::new(AdvisorConfig::default());
     let outcome = StepOutcome::FinalAnswer("回答".to_string());
+    let backend = MockLlmBackend::single("noop");
+    let inference = InferenceParams::default();
+    let cancel = CancellationToken::new();
     let action = handle_outcome(
         outcome,
         &mut session,
@@ -814,6 +817,9 @@ fn test_handle_outcome_final_answer_returns() {
         1,
         0,
         100,
+        &backend,
+        &inference,
+        &cancel,
     );
     assert!(matches!(action, OutcomeAction::Return(_)));
 }
@@ -824,6 +830,9 @@ fn test_handle_outcome_continue_returns_continue() {
     let mut session = Session::new();
     let mut state = LoopState::new(AdvisorConfig::default());
     let outcome = StepOutcome::Continue(vec!["shell".to_string()]);
+    let backend = MockLlmBackend::single("noop");
+    let inference = InferenceParams::default();
+    let cancel = CancellationToken::new();
     let action = handle_outcome(
         outcome,
         &mut session,
@@ -834,6 +843,9 @@ fn test_handle_outcome_continue_returns_continue() {
         1,
         0,
         100,
+        &backend,
+        &inference,
+        &cancel,
     );
     assert!(matches!(action, OutcomeAction::Continue));
     assert_eq!(state.all_tools.len(), 1);
@@ -845,6 +857,9 @@ fn test_handle_outcome_aborted_returns() {
     let mut session = Session::new();
     let mut state = LoopState::new(AdvisorConfig::default());
     let outcome = StepOutcome::Aborted("cancelled".to_string());
+    let backend = MockLlmBackend::single("noop");
+    let inference = InferenceParams::default();
+    let cancel = CancellationToken::new();
     let action = handle_outcome(
         outcome,
         &mut session,
@@ -855,6 +870,9 @@ fn test_handle_outcome_aborted_returns() {
         1,
         0,
         100,
+        &backend,
+        &inference,
+        &cancel,
     );
     assert!(matches!(action, OutcomeAction::Return(_)));
     assert_eq!(state.consecutive_failures, 1);

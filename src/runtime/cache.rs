@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use crate::agent::conversation::Message;
 use crate::cancel::CancellationToken;
+use crate::config::InferenceParams;
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 use crate::tools::ToolSchema;
 
@@ -117,6 +118,25 @@ impl CachedBackend {
         }
         format!("{:x}", hasher.finish())
     }
+
+    /// G1 Critic 別 LLM 分離 (項目 226 候補): `InferenceParams` 込みのハッシュキー生成。
+    /// 同一 messages/tools でも temperature 等が違えば別キャッシュとして扱う。
+    /// f64 は `to_bits()` で bit-level 比較し NaN ≠ NaN を区別する (Lab 再現性確保)。
+    fn compute_prompt_hash_with_params(
+        messages: &[Message],
+        tools: &[ToolSchema],
+        params: &InferenceParams,
+    ) -> String {
+        let mut hasher = DefaultHasher::new();
+        Self::compute_prompt_hash(messages, tools).hash(&mut hasher);
+        params.temperature.to_bits().hash(&mut hasher);
+        params.top_p.to_bits().hash(&mut hasher);
+        params.top_k.hash(&mut hasher);
+        params.min_p.to_bits().hash(&mut hasher);
+        params.max_tokens.hash(&mut hasher);
+        params.repeat_penalty.to_bits().hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
 }
 
 impl LlmBackend for CachedBackend {
@@ -157,6 +177,49 @@ impl LlmBackend for CachedBackend {
 
         // キャッシュミス: 内部バックエンド呼び出し
         let result = self.inner.generate(messages, tools, on_token, cancel)?;
+        self.cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("キャッシュロック取得失敗: {e}"))?
+            .put(key, result.text.clone());
+        Ok(result)
+    }
+
+    /// G1 Critic 別 LLM 分離 (項目 226 候補): params 入りキーで cache し、inner へ params 透過。
+    /// trait default は `generate` に委譲して params を捨てるため、critic temperature override を
+    /// production で効かせるには本 override が必須。
+    fn generate_with_params(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        on_token: &mut dyn FnMut(&str),
+        cancel: &CancellationToken,
+        params: &InferenceParams,
+    ) -> anyhow::Result<GenerateResult> {
+        let prompt_hash = Self::compute_prompt_hash_with_params(messages, tools, params);
+        let key = InferenceCache::compute_key(self.inner.model_id(), &prompt_hash);
+
+        let mut guard = self
+            .cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("キャッシュロック取得失敗: {e}"))?;
+        if let Some(cached) = guard.get(key).map(|s| s.to_string()) {
+            drop(guard);
+            on_token(&cached);
+            return Ok(GenerateResult {
+                text: cached,
+                usage: TokenUsage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    duration: std::time::Duration::ZERO,
+                },
+                model_id: self.inner.model_id().to_string(),
+            });
+        }
+        drop(guard);
+
+        let result = self
+            .inner
+            .generate_with_params(messages, tools, on_token, cancel, params)?;
         self.cache
             .lock()
             .map_err(|e| anyhow::anyhow!("キャッシュロック取得失敗: {e}"))?

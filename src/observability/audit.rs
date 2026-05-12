@@ -80,6 +80,14 @@ pub enum AuditAction {
         /// 設定上の threshold (`AdvisorConfig::dynamic_skip_threshold`)
         threshold: f64,
     },
+    CriticCall {
+        mode: String,
+        /// "agree" | "disagree" | "uncertain" | "skipped" | "error"
+        outcome: String,
+        prompt_len: usize,
+        response_len: usize,
+        duration_ms: u64,
+    },
     // 項目 193 (2026-05-06d): F3SizeGuard variant 削除。
     // F3 RequestSizeGuard を削除したため、対応する audit variant も不要化。
     // 既存 audit_log table 内の action_type='f3_size_guard' row は残存 (data loss なし)。
@@ -107,6 +115,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::TaskComplete { .. } => "task_complete",
             AuditAction::MultiFileNudge { .. } => "multi_file_nudge",
             AuditAction::AdvisorSkip { .. } => "advisor_skip",
+            AuditAction::CriticCall { .. } => "critic_call",
         };
         let action_data = serde_json::to_string(action)?;
 

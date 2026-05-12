@@ -14,7 +14,7 @@ use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
 use crate::runtime::inference::LlmBackend;
-use crate::runtime::model_router::AdvisorConfig;
+use crate::runtime::model_router::{AdvisorConfig, CriticConfig};
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::{ToolRegistry, ToolResultCache};
 
@@ -48,6 +48,7 @@ pub struct LoopState<'a> {
     pub loop_detector: LoopDetector,
     pub stall_detector: StallDetector,
     pub advisor: AdvisorConfig,
+    pub critic: CriticConfig,
     pub all_tools: Vec<String>,
     pub consecutive_failures: usize,
     pub iteration: usize,
@@ -74,6 +75,7 @@ impl<'a> LoopState<'a> {
             loop_detector: LoopDetector::default(),
             stall_detector: StallDetector::default(),
             advisor,
+            critic: CriticConfig::default(),
             all_tools: Vec::new(),
             consecutive_failures: 0,
             iteration: 0,
@@ -84,6 +86,12 @@ impl<'a> LoopState<'a> {
             cycle_detector: MultiFileEditCycleDetector::default(),
             injected_heuristic_ids: Vec::new(),
         }
+    }
+
+    pub fn new_with_critic(advisor: AdvisorConfig, critic: CriticConfig) -> Self {
+        let mut state = Self::new(advisor);
+        state.critic = critic;
+        state
     }
 }
 
