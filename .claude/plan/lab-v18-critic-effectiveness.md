@@ -1,4 +1,6 @@
-# Plan: Lab v18 — G1 Critic 別 LLM Effectiveness 検証 paired t-test (項目候補 224、F11 falsifiable hypothesis)
+# Plan: Lab v18 — G1 Critic 別 LLM Effectiveness 検証 paired t-test (項目 226 Phase 5、F11 falsifiable hypothesis)
+
+> **項目番号訂正 (2026-05-12)**: 起票時 "項目候補 224" だったが、項目 224 (AgentFloor pre-screen tier fix) と項目 225 (PASS@(k,T)) が先行確定したため、G1 Critic Phase 1 完遂は **項目 226** に確定 (commit `b95e809` + LOW fix commit、1190 passed)。本 plan は項目 226 の Phase 5 effectiveness 検証として位置付けを更新。
 
 > **由来 plan**: `.claude/plan/critic-separate-llm-impl.md` (G1、640 行起票済) の **Phase 5 effectiveness 検証** として明記。本 plan は G1 critic 機構が **天井 8 候補** か **dead-code 候補** かを paired t-test で data-driven に判定する Lab v18 設計。
 >
