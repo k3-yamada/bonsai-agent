@@ -684,8 +684,11 @@ impl CriticConfig {
                 }
             };
         }
+        // Codex audit LOW: NaN / ±Inf は persistence / JSON encode 経路で破綻するため
+        // 非有限値は default (0.7) にフォールバックする (項目 225 PASS@(k,T) と同 pattern)。
         if let Ok(temp) = std::env::var("BONSAI_CRITIC_TEMPERATURE")
             && let Ok(parsed) = temp.parse::<f64>()
+            && parsed.is_finite()
         {
             config.critic_temperature = parsed;
         }
