@@ -14,7 +14,7 @@ use crate::eval::longmemeval::dataset::LongMemEvalEntry;
 use crate::eval::longmemeval::metrics::{mrr, ndcg_at_k, recall_any_at_k};
 use crate::memory::search::HybridSearch;
 use crate::memory::store::MemoryStore;
-use crate::runtime::embedder::SimpleEmbedder;
+use crate::runtime::embedder::create_embedder;
 
 #[derive(Debug, Clone)]
 pub struct BenchConfig {
@@ -108,12 +108,13 @@ pub fn run_benchmark(entries: &[LongMemEvalEntry], cfg: &BenchConfig) -> Result<
     let mut processed = 0usize;
 
     let take_n = cfg.limit.unwrap_or(entries.len()).min(entries.len());
-    let embedder = SimpleEmbedder::default();
+    let embedder = create_embedder();
 
     for (idx, entry) in entries.iter().take(take_n).enumerate() {
         let store = MemoryStore::in_memory()?;
 
         // 1 session = 1 memory として narrative 化、tags[0] に session_id を埋め込む
+        let mut indexed: Vec<(i64, String)> = Vec::with_capacity(entry.haystack_sessions.len());
         for (sess_idx, turns) in entry.haystack_sessions.iter().enumerate() {
             let sess_id = entry
                 .haystack_session_ids
@@ -125,10 +126,23 @@ pub fn run_benchmark(entries: &[LongMemEvalEntry], cfg: &BenchConfig) -> Result<
                 .map(|t| format!("{}: {}", t.role, t.content))
                 .collect::<Vec<_>>()
                 .join("\n");
-            store.save_memory(&narrative, "session", &[sess_id])?;
+            let mid = store.save_memory(&narrative, "session", &[sess_id])?;
+            indexed.push((mid, narrative));
         }
 
-        let search = HybridSearch::new(&store, &embedder);
+        // vec0 KNN 経路を有効化するため、save_memory の後に embedding を別途 insert する
+        // (save_memory は memories table のみ書き込み、vec_memories は別 op)。
+        // SimpleEmbedder fallback / FastEmbedder どちらも DEFAULT_EMBEDDING_DIM=256 を返す。
+        #[cfg(feature = "embeddings")]
+        {
+            let texts: Vec<&str> = indexed.iter().map(|(_, t)| t.as_str()).collect();
+            let embs = embedder.embed(&texts)?;
+            for ((mid, _), emb) in indexed.iter().zip(embs.iter()) {
+                store.insert_memory_embedding(*mid, emb)?;
+            }
+        }
+
+        let search = HybridSearch::new(&store, &*embedder);
         let results = search.search(&entry.question, cfg.top_k_retrieve)?;
 
         let retrieved_ids: Vec<String> = results
