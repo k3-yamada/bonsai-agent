@@ -10,6 +10,10 @@ repository = "https://github.com/k3-yamada/bonsai-agent"
 name = "bonsai"
 path = "src/main.rs"
 
+[[bin]]
+name = "longmemeval-bench"
+path = "src/bin/longmemeval_bench.rs"
+
 [profile.release]
 lto = "thin"
 strip = true
