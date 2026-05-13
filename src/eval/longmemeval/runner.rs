@@ -22,6 +22,9 @@ pub struct BenchConfig {
     pub k_values: Vec<usize>,
     pub top_k_retrieve: usize,
     pub progress_every: usize,
+    /// Graph stream の重み (0.0-1.0、0.0 = 2-stream legacy)。
+    /// `BONSAI_GRAPH_FUSION_ENABLED=1` で `BONSAI_GRAPH_FUSION_WEIGHT` (default 0.25) から populate される。
+    pub graph_weight: f32,
 }
 
 impl Default for BenchConfig {
@@ -31,6 +34,7 @@ impl Default for BenchConfig {
             k_values: vec![5, 10, 20],
             top_k_retrieve: 20,
             progress_every: progress_every_from_env(50),
+            graph_weight: graph_weight_from_env(),
         }
     }
 }
@@ -41,6 +45,20 @@ fn progress_every_from_env(default_val: usize) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(default_val)
+}
+
+/// `BONSAI_GRAPH_FUSION_ENABLED=1` のとき `BONSAI_GRAPH_FUSION_WEIGHT` (default 0.25) を返す。
+/// 未設定なら 0.0 (2-stream legacy 経路、production default OFF / Cerememory 三本柱 pattern)。
+fn graph_weight_from_env() -> f32 {
+    let enabled = std::env::var("BONSAI_GRAPH_FUSION_ENABLED").ok().as_deref() == Some("1");
+    if !enabled {
+        return 0.0;
+    }
+    std::env::var("BONSAI_GRAPH_FUSION_WEIGHT")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|w| w.is_finite() && *w > 0.0 && *w <= 1.0)
+        .unwrap_or(0.25)
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -142,7 +160,15 @@ pub fn run_benchmark(entries: &[LongMemEvalEntry], cfg: &BenchConfig) -> Result<
             }
         }
 
-        let search = HybridSearch::new(&store, &*embedder);
+        let mut search = HybridSearch::new(&store, &*embedder);
+        if cfg.graph_weight > 0.0 {
+            search = search.with_graph_weight(cfg.graph_weight);
+            // Graph stream indexing: 各 session narrative を token 化して
+            // KnowledgeGraph に (token -[appears_in]-> memory:{id}) edge を張る。
+            for (mid, narrative) in &indexed {
+                search.index_memory_tokens(*mid, narrative)?;
+            }
+        }
         let results = search.search(&entry.question, cfg.top_k_retrieve)?;
 
         let retrieved_ids: Vec<String> = results
@@ -228,6 +254,7 @@ mod tests {
             k_values: vec![5, 10, 20],
             top_k_retrieve: 20,
             progress_every: 9999,
+            graph_weight: 0.0,
         };
         let report = run_benchmark(&[entry], &cfg).unwrap();
         assert_eq!(report.processed, 1);
@@ -236,6 +263,35 @@ mod tests {
         assert!(report.overall.recall_at_k_sum.contains_key(&5));
         assert!(report.overall.recall_at_k_sum.contains_key(&10));
         assert!(report.overall.recall_at_k_sum.contains_key(&20));
+    }
+
+    #[test]
+    fn test_graph_weight_env_default_off() {
+        // 環境変数未設定なら 0.0 (2-stream legacy 経路)
+        // Safety: env var を unset するため `unsafe` block 必要 (Rust 2024)
+        unsafe { std::env::remove_var("BONSAI_GRAPH_FUSION_ENABLED") };
+        unsafe { std::env::remove_var("BONSAI_GRAPH_FUSION_WEIGHT") };
+        let cfg = BenchConfig::default();
+        assert_eq!(cfg.graph_weight, 0.0);
+    }
+
+    #[test]
+    fn test_runner_3stream_graph_fusion_smoke() {
+        // graph_weight > 0 で 3-stream 経路を indexing + search する smoke。
+        // 1bit retrieval 数値は assert しない (SimpleEmbedder hash 経路は不安定)。
+        let entry = entry_single_session_user("q-001", 7, 53);
+        let cfg = BenchConfig {
+            limit: None,
+            k_values: vec![5, 10, 20],
+            top_k_retrieve: 20,
+            progress_every: 9999,
+            graph_weight: 0.25,
+        };
+        let report = run_benchmark(&[entry], &cfg).unwrap();
+        assert_eq!(report.processed, 1);
+        assert_eq!(report.overall.n, 1);
+        // graph 経路が crash せず top-K を返却することを確認
+        assert!(report.overall.recall_at_k_sum.contains_key(&5));
     }
 
     #[test]
@@ -249,6 +305,7 @@ mod tests {
             k_values: vec![5],
             top_k_retrieve: 20,
             progress_every: 9999,
+            graph_weight: 0.0,
         };
         let report = run_benchmark(&[e1, e2], &cfg).unwrap();
         assert_eq!(report.processed, 2);

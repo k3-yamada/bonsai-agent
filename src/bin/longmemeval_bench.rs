@@ -11,6 +11,12 @@
 //! cargo run --release --bin longmemeval-bench -- --limit 10
 //! # Full
 //! cargo run --release --bin longmemeval-bench
+//!
+//! # 3-stream RRF (graph fusion) opt-in
+//! BONSAI_GRAPH_FUSION_ENABLED=1 cargo run --release --bin longmemeval-bench -- --limit 100
+//! # graph 重みカスタム (default 0.25)
+//! BONSAI_GRAPH_FUSION_ENABLED=1 BONSAI_GRAPH_FUSION_WEIGHT=0.3 \
+//!   cargo run --release --bin longmemeval-bench -- --limit 100
 //! ```
 
 use std::path::PathBuf;
