@@ -1,5 +1,5 @@
 /// 現在のスキーマバージョン
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// 全SQLiteスキーマ定義。マイグレーション時に順次適用される。
 ///
@@ -86,6 +86,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 15,
         description: "PASS@(k,T) 永続化: experiments に pass_at_k_t_steps/pass_at_k_t_seconds JSON 列追加 (項目 225)",
         sql: SCHEMA_V15,
+    },
+    Migration {
+        version: 16,
+        description: "Frontier benchmark 永続化: experiments に frontier_bucket_scores/frontier_inject_scores JSON 列追加 (frontier-benchmark-impl.md、antirez/ds4 ds4-bench inspired)",
+        sql: SCHEMA_V16,
     },
 ];
 
@@ -364,6 +369,16 @@ ALTER TABLE experiments ADD COLUMN pass_at_k_t_steps TEXT;
 ALTER TABLE experiments ADD COLUMN pass_at_k_t_seconds TEXT;
 "#;
 
+/// V16: Frontier benchmark 永続化 (`frontier-benchmark-impl.md`、antirez/ds4 inspired)。
+/// 第 6 軸 = context-length axis baseline 確立用、`Vec<(usize, f64)>` を JSON TEXT で保存する。
+/// `frontier_bucket_scores` = post-hoc bucketing (各 task の累積 token を bucket 別に集計、案 C 1st pillar)。
+/// `frontier_inject_scores` = T6 inject variant (各 filler_kb size での score、案 C 2nd pillar、未実装で empty)。
+/// env `BONSAI_FRONTIER_ENABLED` 未指定セッションでは NULL ではなく `"[]"` (空配列の JSON encode) が入る。
+const SCHEMA_V16: &str = r#"
+ALTER TABLE experiments ADD COLUMN frontier_bucket_scores TEXT;
+ALTER TABLE experiments ADD COLUMN frontier_inject_scores TEXT;
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +603,28 @@ mod tests {
             SCHEMA_V15.contains("ALTER TABLE experiments"),
             "V15 は experiments テーブルの ALTER"
         );
+    }
+
+    #[test]
+    fn test_schema_v16_contains_frontier_columns() {
+        // frontier-benchmark-impl.md Sub-Phase 2B: 第 6 軸 context-length axis 永続化
+        assert!(
+            SCHEMA_V16.contains("frontier_bucket_scores"),
+            "V16 に frontier_bucket_scores 列追加が必要"
+        );
+        assert!(
+            SCHEMA_V16.contains("frontier_inject_scores"),
+            "V16 に frontier_inject_scores 列追加が必要"
+        );
+        assert!(
+            SCHEMA_V16.contains("ALTER TABLE experiments"),
+            "V16 は experiments テーブルの ALTER"
+        );
+    }
+
+    #[test]
+    fn test_schema_version_is_at_least_v16() {
+        // V16 (frontier benchmark) 以降の minimum invariant 維持
+        const { assert!(SCHEMA_VERSION >= 16) };
     }
 }

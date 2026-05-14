@@ -946,6 +946,11 @@ fn build_prescreen_reject_experiment(
         // efficiency を測る軸であり baseline 値の流用は誤情報)。空 Vec で保持する。
         pass_at_k_t_steps: Vec::new(),
         pass_at_k_t_seconds: Vec::new(),
+        // V16 (frontier benchmark) も同じ理由で pre-screen REJECT 経路では計測なし。
+        // frontier_bucket は task ごとの累積 token を要し、frontier_inject は inject variant 実行を要する
+        // = どちらも experiment 自身の full execution が前提のため、空 Vec で保持。
+        frontier_bucket_scores: Vec::new(),
+        frontier_inject_scores: Vec::new(),
     }
 }
 
@@ -2283,6 +2288,8 @@ mod tests {
                 tier_t6: None,
                 pass_at_k_t_steps: Vec::new(),
                 pass_at_k_t_seconds: Vec::new(),
+                frontier_bucket_scores: Vec::new(),
+                frontier_inject_scores: Vec::new(),
             },
             Experiment {
                 experiment_id: "e2".into(),
@@ -2310,6 +2317,8 @@ mod tests {
                 tier_t6: None,
                 pass_at_k_t_steps: Vec::new(),
                 pass_at_k_t_seconds: Vec::new(),
+                frontier_bucket_scores: Vec::new(),
+                frontier_inject_scores: Vec::new(),
             },
             Experiment {
                 experiment_id: "e3".into(),
@@ -2337,6 +2346,8 @@ mod tests {
                 tier_t6: None,
                 pass_at_k_t_steps: Vec::new(),
                 pass_at_k_t_seconds: Vec::new(),
+                frontier_bucket_scores: Vec::new(),
+                frontier_inject_scores: Vec::new(),
             },
         ];
         let worst = extract_worst_reasoning(&experiments, 5);
@@ -2375,6 +2386,8 @@ mod tests {
                 tier_t6: None,
                 pass_at_k_t_steps: Vec::new(),
                 pass_at_k_t_seconds: Vec::new(),
+                frontier_bucket_scores: Vec::new(),
+                frontier_inject_scores: Vec::new(),
             })
             .collect();
         let worst = extract_worst_reasoning(&experiments, 3);

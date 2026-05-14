@@ -181,6 +181,17 @@ pub struct Experiment {
     /// 各要素は `(T_seconds, pass_rate)`。env `BONSAI_PASS_K_T_SECONDS` 未指定なら空 Vec。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pass_at_k_t_seconds: Vec<(f64, f64)>,
+    /// Frontier benchmark (`frontier-benchmark-impl.md`、antirez/ds4 ds4-bench inspired):
+    /// 第 6 軸 context-length axis のため、task ごとの累積 token を bucket 別に集計した
+    /// `(bucket_index, mean_score)` を保存。env `BONSAI_FRONTIER_ENABLED` 未指定なら空 Vec。
+    /// Sub-Phase 2B では Experiment 持ち回りまで実装、Sub-Phase 2C で `run_k` から populate。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontier_bucket_scores: Vec<(usize, f64)>,
+    /// Frontier benchmark の T6 inject variant (案 C 2nd pillar):
+    /// `(filler_kb, score)` ペア。Sub-Phase 2E で T6-LongHorizon に filler context inject する
+    /// 設計、Sub-Phase 2B 時点では常に空 Vec で持ち回りのみ。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontier_inject_scores: Vec<(usize, f64)>,
 }
 
 impl Experiment {
@@ -223,6 +234,8 @@ impl Experiment {
             // 項目 225: legacy BenchmarkResult 経路は PASS@(k,T) を計算しない (multi-run のみ対応)
             pass_at_k_t_steps: Vec::new(),
             pass_at_k_t_seconds: Vec::new(),
+            frontier_bucket_scores: Vec::new(),
+            frontier_inject_scores: Vec::new(),
         }
     }
 
@@ -283,6 +296,10 @@ impl Experiment {
             tier_t6: tiers.and_then(|t| t[5]),
             pass_at_k_t_steps,
             pass_at_k_t_seconds,
+            // Sub-Phase 2C で `experiment.composite_frontier_bucket_scores()` などから populate 予定。
+            // 本 Sub-Phase 2B では struct field の persistence 配線が scope のため Vec::new() で固定。
+            frontier_bucket_scores: Vec::new(),
+            frontier_inject_scores: Vec::new(),
         }
     }
 }
@@ -297,14 +314,18 @@ impl ExperimentLog {
         // 空 Vec は `"[]"` に encode され、reader は from_str で空 Vec を得る (NULL と区別)。
         let pass_at_k_t_steps_json = serde_json::to_string(&exp.pass_at_k_t_steps)?;
         let pass_at_k_t_seconds_json = serde_json::to_string(&exp.pass_at_k_t_seconds)?;
+        // V16 (frontier benchmark): Vec<(usize, f64)> も同 pattern で JSON TEXT 永続化。
+        let frontier_bucket_json = serde_json::to_string(&exp.frontier_bucket_scores)?;
+        let frontier_inject_json = serde_json::to_string(&exp.frontier_inject_scores)?;
         conn.execute(
             "INSERT INTO experiments (experiment_id, mutation_type, mutation_detail, \
              baseline_score, experiment_score, delta, accepted, duration_secs, prescreened, \
              reliability_decay, variance_amplification, graceful_degradation, stability_delta, \
              tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6, \
-             pass_at_k_t_steps, pass_at_k_t_seconds) \
+             pass_at_k_t_steps, pass_at_k_t_seconds, \
+             frontier_bucket_scores, frontier_inject_scores) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+             ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 exp.experiment_id,
                 exp.mutation_type.as_str(),
@@ -327,6 +348,8 @@ impl ExperimentLog {
                 exp.tier_t6,
                 pass_at_k_t_steps_json,
                 pass_at_k_t_seconds_json,
+                frontier_bucket_json,
+                frontier_inject_json,
             ],
         )?;
 
@@ -355,7 +378,8 @@ impl ExperimentLog {
                  delta\taccepted\tduration_secs\tpass_at_k\tpass_consecutive_k\tscore_variance\t\
                  prescreened\treliability_decay\tvariance_amplification\tgraceful_degradation\t\
                  tier_t1\ttier_t2\ttier_t3\ttier_t4\ttier_t5\ttier_t6\t\
-                 pass_at_k_t_steps\tpass_at_k_t_seconds"
+                 pass_at_k_t_steps\tpass_at_k_t_seconds\t\
+                 frontier_bucket_scores\tfrontier_inject_scores"
             )?;
         }
 
@@ -372,10 +396,21 @@ impl ExperimentLog {
         } else {
             serde_json::to_string(&exp.pass_at_k_t_seconds).unwrap_or_else(|_| "-".into())
         };
+        // V16 (frontier benchmark): TSV 末尾 2 列。PASS@(k,T) 同 pattern で空 Vec → `-`。
+        let frontier_bucket = if exp.frontier_bucket_scores.is_empty() {
+            "-".to_string()
+        } else {
+            serde_json::to_string(&exp.frontier_bucket_scores).unwrap_or_else(|_| "-".into())
+        };
+        let frontier_inject = if exp.frontier_inject_scores.is_empty() {
+            "-".to_string()
+        } else {
+            serde_json::to_string(&exp.frontier_inject_scores).unwrap_or_else(|_| "-".into())
+        };
 
         writeln!(
             file,
-            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             exp.experiment_id,
             exp.mutation_type.as_str(),
             exp.mutation_detail.replace('\t', " "),
@@ -404,6 +439,8 @@ impl ExperimentLog {
             exp.tier_t6.map_or("-".to_string(), |v| format!("{v:.4}")),
             pass_at_k_t_steps,
             pass_at_k_t_seconds,
+            frontier_bucket,
+            frontier_inject,
         )?;
         Ok(())
     }
@@ -416,7 +453,8 @@ impl ExperimentLog {
              COALESCE(prescreened, 0), \
              reliability_decay, variance_amplification, graceful_degradation, stability_delta, \
              tier_t1, tier_t2, tier_t3, tier_t4, tier_t5, tier_t6, \
-             pass_at_k_t_steps, pass_at_k_t_seconds \
+             pass_at_k_t_steps, pass_at_k_t_seconds, \
+             frontier_bucket_scores, frontier_inject_scores \
              FROM experiments ORDER BY id DESC LIMIT ?1",
         )?;
 
@@ -443,6 +481,8 @@ impl ExperimentLog {
                 row.get::<_, Option<f64>>(18)?,
                 row.get::<_, Option<String>>(19)?,
                 row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
+                row.get::<_, Option<String>>(22)?,
             ))
         })?;
 
@@ -475,6 +515,8 @@ impl ExperimentLog {
                 t6,
                 pass_at_k_t_steps_json,
                 pass_at_k_t_seconds_json,
+                frontier_bucket_json,
+                frontier_inject_json,
             ) = row?;
             let mutation_type = MutationType::parse(&mt).unwrap_or(MutationType::PromptRule);
 
@@ -493,6 +535,13 @@ impl ExperimentLog {
                 .unwrap_or_default();
             let pass_at_k_t_seconds = pass_at_k_t_seconds_json
                 .and_then(|json| serde_json::from_str::<Vec<(f64, f64)>>(&json).ok())
+                .unwrap_or_default();
+            // V16 (frontier benchmark): PASS@(k,T) 同 pattern で NULL / parse 失敗 → 空 Vec。
+            let frontier_bucket_scores = frontier_bucket_json
+                .and_then(|json| serde_json::from_str::<Vec<(usize, f64)>>(&json).ok())
+                .unwrap_or_default();
+            let frontier_inject_scores = frontier_inject_json
+                .and_then(|json| serde_json::from_str::<Vec<(usize, f64)>>(&json).ok())
                 .unwrap_or_default();
 
             experiments.push(Experiment {
@@ -521,6 +570,8 @@ impl ExperimentLog {
                 tier_t6: t6,
                 pass_at_k_t_steps,
                 pass_at_k_t_seconds,
+                frontier_bucket_scores,
+                frontier_inject_scores,
             });
         }
         Ok(experiments)
@@ -550,8 +601,9 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        // V1, V2, V7 (prescreened), V9 (信頼性メトリクス), V14 (tier map), V15 (PASS@(k,T)) 適用
-        for version in [1, 2, 7, 9, 14, 15] {
+        // V1, V2, V7 (prescreened), V9 (信頼性メトリクス), V14 (tier map), V15 (PASS@(k,T)),
+        // V16 (frontier benchmark) 適用 — save_to_db が V16 列を INSERT するため必須。
+        for version in [1, 2, 7, 9, 14, 15, 16] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -585,6 +637,8 @@ mod tests {
             tier_t6: None,
             pass_at_k_t_steps: Vec::new(),
             pass_at_k_t_seconds: Vec::new(),
+            frontier_bucket_scores: Vec::new(),
+            frontier_inject_scores: Vec::new(),
         }
     }
 
@@ -710,9 +764,9 @@ mod tests {
         ExperimentLog::append_tsv(&tsv_path, &exp).unwrap();
         let content = std::fs::read_to_string(&tsv_path).unwrap();
         let data_line = content.lines().nth(1).unwrap();
-        // 項目 200/223/225: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) + tier 6 列
-        // + PASS@(k,T) 2 列 (steps/seconds) = 23 列
-        assert_eq!(data_line.split('\t').count(), 23);
+        // 項目 200/223/225 + V16 frontier: 12 列 + 信頼性メトリクス 3 列 (rdc/vaf/gds) + tier 6 列
+        // + PASS@(k,T) 2 列 (steps/seconds) + frontier 2 列 (bucket/inject) = 25 列
+        assert_eq!(data_line.split('\t').count(), 25);
     }
 
     #[test]
@@ -851,7 +905,8 @@ mod tests {
         // V14 (AgentFloor tier 列) まで必要な migration を適用。
         // 項目 225 で save_to_db が V15 列 (pass_at_k_t_*) を INSERT するため
         // V15 も併せて適用しないと既存 tier round-trip テストが失敗する。
-        for version in [1, 2, 7, 9, 14, 15] {
+        // V16 (frontier benchmark) も save_to_db が INSERT するため必須。
+        for version in [1, 2, 7, 9, 14, 15, 16] {
             let sql = migrate::get_migration_sql(version).unwrap();
             conn.execute_batch(sql).unwrap();
         }
@@ -885,6 +940,8 @@ mod tests {
             tier_t6: Some(0.30),
             pass_at_k_t_steps: Vec::new(),
             pass_at_k_t_seconds: Vec::new(),
+            frontier_bucket_scores: Vec::new(),
+            frontier_inject_scores: Vec::new(),
         }
     }
 
@@ -917,6 +974,8 @@ mod tests {
             tier_t6: None,
             pass_at_k_t_steps: Vec::new(),
             pass_at_k_t_seconds: Vec::new(),
+            frontier_bucket_scores: Vec::new(),
+            frontier_inject_scores: Vec::new(),
         };
         assert!(exp.tier_t1.is_none());
         assert!(exp.tier_t2.is_none());
@@ -940,8 +999,8 @@ mod tests {
         assert_eq!(lines.len(), 2, "header + 1 data row");
         let header_cols = lines[0].split('\t').count();
         let data_cols = lines[1].split('\t').count();
-        assert_eq!(header_cols, 23, "header は 23 列");
-        assert_eq!(data_cols, 23, "data row は 23 列");
+        assert_eq!(header_cols, 25, "header は 25 列 (V16 frontier 2 列追加)");
+        assert_eq!(data_cols, 25, "data row は 25 列 (V16 frontier 2 列追加)");
         assert!(
             lines[0].contains("tier_t1"),
             "header に tier_t1 が含まれること"
@@ -951,8 +1010,10 @@ mod tests {
             "header に tier_t6 が含まれること"
         );
         assert!(
-            lines[0].ends_with("tier_t6\tpass_at_k_t_steps\tpass_at_k_t_seconds"),
-            "PASS@(k,T) 列は tier_t6 の後に追加されること"
+            lines[0].ends_with(
+                "pass_at_k_t_steps\tpass_at_k_t_seconds\tfrontier_bucket_scores\tfrontier_inject_scores"
+            ),
+            "frontier 列は PASS@(k,T) 列の後に追加されること"
         );
         assert!(
             lines[1].contains("0.8000"),
@@ -960,7 +1021,7 @@ mod tests {
         );
     }
 
-    /// 3. tier 全 None + PASS@(k,T) 空 Vec でも 23 列出力、末尾 8 列は "-"
+    /// 3. tier 全 None + PASS@(k,T) + frontier 全 None / 空 Vec でも 25 列出力、末尾 10 列は "-"
     #[test]
     fn test_append_tsv_23_columns_tier_none_dash() {
         let dir = TempDir::new().unwrap();
@@ -973,12 +1034,12 @@ mod tests {
         let data_cols: Vec<&str> = lines[1].split('\t').collect();
         assert_eq!(
             data_cols.len(),
-            23,
-            "tier None + PASS@(k,T) 空でも 23 列固定"
+            25,
+            "tier None + PASS@(k,T) + frontier 空でも 25 列固定 (V16 で 2 列追加)"
         );
-        // 末尾 8 列 (tier 6 + PASS@(k,T) 2) は全て "-"
-        for col in &data_cols[15..23] {
-            assert_eq!(*col, "-", "tier/PASS@(k,T) None 列は '-' 表現");
+        // 末尾 10 列 (tier 6 + PASS@(k,T) 2 + frontier 2) は全て "-"
+        for col in &data_cols[15..25] {
+            assert_eq!(*col, "-", "tier/PASS@(k,T)/frontier None 列は '-' 表現");
         }
     }
 
@@ -1082,5 +1143,58 @@ mod tests {
         assert_eq!(results[0].pass_at_k_t_steps.len(), 2);
         assert_eq!(results[0].pass_at_k_t_seconds.len(), 1);
         assert!((results[0].pass_at_k_t_seconds[0].0 - 60.0).abs() < 1e-6);
+    }
+
+    /// SQLite V16: frontier_bucket_scores / frontier_inject_scores 列に JSON encode で保存
+    /// → recent_experiments で decode、roundtrip 整合性を検証。
+    #[test]
+    fn t_experiment_db_roundtrip_with_frontier_v16() {
+        let conn = setup_test_db();
+        let mut exp = sample_experiment("e_frontier", 0.03);
+        exp.frontier_bucket_scores = vec![(0, 0.85), (1, 0.72), (2, 0.55), (3, 0.30)];
+        exp.frontier_inject_scores = vec![(0, 0.90), (4, 0.78), (8, 0.61), (16, 0.42)];
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let results = ExperimentLog::recent_experiments(&conn, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].frontier_bucket_scores.len(), 4);
+        assert_eq!(results[0].frontier_inject_scores.len(), 4);
+        assert_eq!(results[0].frontier_bucket_scores[0], (0, 0.85));
+        assert_eq!(results[0].frontier_inject_scores[3], (16, 0.42));
+    }
+
+    /// V16 列に NULL (旧 row、frontier 未設定セッション) が入っているケース → 空 Vec で返却。
+    #[test]
+    fn t_frontier_v16_null_roundtrip_returns_empty_vec() {
+        let conn = setup_test_db();
+        let exp = sample_experiment("e_frontier_null", 0.01);
+        // empty Vec で save → JSON `"[]"` が保存される (NULL ではない)
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let results = ExperimentLog::recent_experiments(&conn, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].frontier_bucket_scores.is_empty());
+        assert!(results[0].frontier_inject_scores.is_empty());
+    }
+
+    /// serde: V16 field が無い旧 JSON でも `#[serde(default)]` で空 Vec として load できる。
+    #[test]
+    fn t_frontier_serde_backward_compat_old_json_loads_empty() {
+        // V16 field 不在の旧 JSON (PASS@(k,T) 追加直後の形式を模倣)
+        let old_json = r#"{
+            "experiment_id": "old",
+            "mutation_type": "PromptRule",
+            "mutation_detail": "old",
+            "baseline_score": 0.5,
+            "experiment_score": 0.55,
+            "delta": 0.05,
+            "accepted": true,
+            "duration_secs": 10.0,
+            "config_snapshot": {},
+            "pass_at_k": null,
+            "pass_consecutive_k": null,
+            "score_variance": null
+        }"#;
+        let exp: Experiment = serde_json::from_str(old_json).expect("legacy JSON load");
+        assert!(exp.frontier_bucket_scores.is_empty());
+        assert!(exp.frontier_inject_scores.is_empty());
     }
 }
