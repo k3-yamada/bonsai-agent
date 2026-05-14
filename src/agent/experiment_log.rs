@@ -296,9 +296,16 @@ impl Experiment {
             tier_t6: tiers.and_then(|t| t[5]),
             pass_at_k_t_steps,
             pass_at_k_t_seconds,
-            // Sub-Phase 2C で `experiment.composite_frontier_bucket_scores()` などから populate 予定。
-            // 本 Sub-Phase 2B では struct field の persistence 配線が scope のため Vec::new() で固定。
-            frontier_bucket_scores: Vec::new(),
+            // Sub-Phase 2C: env opt-in (`BONSAI_FRONTIER_ENABLED=1`) のときのみ populate。
+            // 未指定セッションでは空 Vec で skip_serializing_if 経路 (JSON/TSV ともに不在)。
+            // frontier_inject_scores は Sub-Phase 2E (T6 filler context inject) で populate 予定、
+            // Sub-Phase 2C 時点では常に空 Vec。
+            frontier_bucket_scores: if crate::agent::frontier::is_frontier_enabled() {
+                let boundaries = crate::agent::frontier::parse_frontier_buckets_env();
+                experiment.composite_frontier_bucket_scores(&boundaries)
+            } else {
+                Vec::new()
+            },
             frontier_inject_scores: Vec::new(),
         }
     }

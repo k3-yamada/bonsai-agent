@@ -457,7 +457,26 @@ pub struct MultiRunTaskScore {
     /// 空 Vec で既存挙動を維持する。
     #[serde(default)]
     pub pass_at_k_t_seconds: Vec<(f64, f64)>,
+    /// Frontier benchmark (`frontier-benchmark-impl.md`、antirez/ds4 ds4-bench inspired):
+    /// k 回 run の平均 iteration を context-token proxy として換算した推定値
+    /// (`iter_mean × TOKENS_PER_ITERATION_ESTIMATE`)。bucket 振り分けの軸として
+    /// [`MultiRunBenchmarkResult::composite_frontier_bucket_scores`] が使用する。
+    /// run_k で populate されない経路 (legacy fixture / Phase 4 G-4a 等) では `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_context_tokens: Option<usize>,
 }
+
+/// `MultiRunTaskScore::final_context_tokens` 推定用、1 iteration あたりの平均 token 数。
+///
+/// 実測値は llama-server の `n_tokens` API から取得できるが Phase 2C 時点では HTTP backend
+/// に signature 追加を行わない (Sub-Phase 2C scope を絞る)。本定数は roughly:
+///
+/// - system prompt + tool schema (Deferred): ~600 token
+/// - 1 step あたり LLM 入力 (history) + 出力 (think + tool_call/answer): ~500 token
+/// - 1 step あたり tool 実行結果: ~200-1000 token (file ops で変動大)
+///
+/// 平均化して 1024 を採用 (項目 167 llama-server backend、`-c 16384` 16K context window)。
+const TOKENS_PER_ITERATION_ESTIMATE: usize = 1024;
 
 impl MultiRunTaskScore {
     /// 個別スコア列からMultiRunTaskScoreを計算
@@ -477,6 +496,7 @@ impl MultiRunTaskScore {
                 graceful_degradation: 1.0,
                 pass_at_k_t_steps: Vec::new(),
                 pass_at_k_t_seconds: Vec::new(),
+                final_context_tokens: None,
             };
         }
 
@@ -519,6 +539,9 @@ impl MultiRunTaskScore {
             // 項目 225: PASS@(k,T) は v2 経路 (from_scores_with_metrics_v2) のみで設定。
             pass_at_k_t_steps: Vec::new(),
             pass_at_k_t_seconds: Vec::new(),
+            // Sub-Phase 2C: final_context_tokens は from_scores 経路では None (iteration 情報なし)。
+            // run_k 経路では with_final_context_tokens(...) で後付け populate される。
+            final_context_tokens: None,
         }
     }
 
@@ -802,6 +825,29 @@ impl MultiRunBenchmarkResult {
 
         acc.into_iter()
             .map(|(threshold, (sum, count))| (threshold, sum / count as f64))
+            .collect()
+    }
+
+    /// Frontier benchmark (Sub-Phase 2C、`frontier-benchmark-impl.md`、antirez/ds4 inspired):
+    /// 各タスクの `final_context_tokens` を bucket に振り分け、bucket 別 mean score を集計する。
+    /// `boundaries` は [`crate::agent::frontier::parse_frontier_buckets_env`] と同 contract
+    /// (昇順 sort 済 / 重複なし)。`final_context_tokens` が `None` のタスクは集計対象外。
+    /// 戻り値: `Vec<(bucket_index, mean_score)>` (bucket index 昇順)、空 boundaries / 全 task が
+    /// `None` 経路で空 Vec。
+    pub fn composite_frontier_bucket_scores(&self, boundaries: &[usize]) -> Vec<(usize, f64)> {
+        if boundaries.is_empty() || self.task_scores.is_empty() {
+            return Vec::new();
+        }
+        let pairs: Vec<(usize, f64)> = self
+            .task_scores
+            .iter()
+            .filter_map(|s| s.final_context_tokens.map(|t| (t, s.mean_score)))
+            .collect();
+        if pairs.is_empty() {
+            return Vec::new();
+        }
+        crate::agent::frontier::compute_frontier_bucket_scores(&pairs, boundaries)
+            .into_iter()
             .collect()
     }
 
@@ -1926,6 +1972,18 @@ impl BenchmarkSuite {
                 scores.push(score);
             }
 
+            // Sub-Phase 2C (frontier benchmark): final_context_tokens 推定値を
+            // iterations の平均 × TOKENS_PER_ITERATION_ESTIMATE で計算、from_scores へ move 前に
+            // borrow して mean を取得する (clone 不要)。失敗 run の iter = max_iterations が
+            // push されている (line 1920 の `iterations_per_run.push(task.max_iterations)` 経路)
+            // ため、mean は実際の context 規模を上振れで反映する (失敗ほど context が長い)。
+            let mean_iter = if iterations_per_run.is_empty() {
+                0.0
+            } else {
+                iterations_per_run.iter().sum::<usize>() as f64 / iterations_per_run.len() as f64
+            };
+            let est_context_tokens = (mean_iter * TOKENS_PER_ITERATION_ESTIMATE as f64) as usize;
+
             // 項目 200 + 225: from_scores_with_metrics_v2 で RDC/GDS/PASS@(k,T) を一括計算
             let mut task_score = MultiRunTaskScore::from_scores_with_metrics_v2(
                 task.id.clone(),
@@ -1937,6 +1995,10 @@ impl BenchmarkSuite {
                 &t_steps_thresholds,
                 &t_seconds_thresholds,
             );
+            // Sub-Phase 2C: frontier bucket 振り分けの軸となる context token 推定値を後付け populate。
+            // env opt-in (`BONSAI_FRONTIER_ENABLED`) のチェックは Experiment::from_results 側で行い、
+            // run_k は常に populate する (cost は加算 1 ops のみで観察コスト無視可能)。
+            task_score.final_context_tokens = Some(est_context_tokens);
             if let Some((response, trajectory)) = last_run_capture {
                 task_score = task_score.with_last_run(response, trajectory);
             }
@@ -3819,5 +3881,84 @@ mod tests {
     ) -> Result<MultiRunBenchmarkResult> {
         // Option A 後の呼び出し形 (`&store` を直接渡す、`Some(..)` 不要)
         suite.run_k(cfg, backend, tools, path_guard, cancel, multi, 0.5, store)
+    }
+
+    // ── Sub-Phase 2C: frontier benchmark composite + run_k populate tests ──
+
+    #[test]
+    fn t_multirun_task_score_final_context_tokens_default_none() {
+        // from_scores 経路 (legacy / fixture) では final_context_tokens は None で初期化される。
+        // run_k 経路でのみ populate されることを契約として固定。
+        let mrt = MultiRunTaskScore::from_scores("t1".into(), vec![0.5, 0.6, 0.7], 0.5);
+        assert!(mrt.final_context_tokens.is_none());
+        // 空入力経路 (k=0) も None で初期化
+        let mrt_empty = MultiRunTaskScore::from_scores("t1".into(), vec![], 0.5);
+        assert!(mrt_empty.final_context_tokens.is_none());
+    }
+
+    #[test]
+    fn t_composite_frontier_bucket_scores_aggregates_tasks() {
+        // 4 task が異なる final_context_tokens を持つとき、bucket 別 mean score を返す。
+        // boundaries=[2048, 4096, 8192] (4 bucket = [0,2K) / [2K,4K) / [4K,8K) / [8K,∞))
+        let mut t1 = MultiRunTaskScore::from_scores("t1".into(), vec![0.8], 0.5);
+        t1.final_context_tokens = Some(1500); // bucket 0
+        let mut t2 = MultiRunTaskScore::from_scores("t2".into(), vec![0.5], 0.5);
+        t2.final_context_tokens = Some(3000); // bucket 1
+        let mut t3 = MultiRunTaskScore::from_scores("t3".into(), vec![0.4], 0.5);
+        t3.final_context_tokens = Some(5000); // bucket 2
+        let mut t4 = MultiRunTaskScore::from_scores("t4".into(), vec![0.2], 0.5);
+        t4.final_context_tokens = Some(12000); // bucket 3 (unbounded)
+
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![t1, t2, t3, t4],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        let composite = result.composite_frontier_bucket_scores(&[2048, 4096, 8192]);
+        assert_eq!(composite.len(), 4);
+        // 各 bucket は 1 task のみで mean = single task の mean_score (== single score)
+        assert!((composite[0].1 - 0.8).abs() < 1e-9, "bucket 0 mean = 0.8");
+        assert!((composite[1].1 - 0.5).abs() < 1e-9, "bucket 1 mean = 0.5");
+        assert!((composite[2].1 - 0.4).abs() < 1e-9, "bucket 2 mean = 0.4");
+        assert!((composite[3].1 - 0.2).abs() < 1e-9, "bucket 3 mean = 0.2");
+    }
+
+    #[test]
+    fn t_composite_frontier_bucket_scores_empty_when_no_tokens() {
+        // 全 task の final_context_tokens が None なら空 Vec を返す (env unset セッション互換)。
+        let t1 = MultiRunTaskScore::from_scores("t1".into(), vec![0.8], 0.5);
+        let t2 = MultiRunTaskScore::from_scores("t2".into(), vec![0.5], 0.5);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![t1, t2],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        assert!(
+            result
+                .composite_frontier_bucket_scores(&[2048, 4096, 8192])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn t_composite_frontier_bucket_scores_empty_boundaries() {
+        // boundaries 空 → 空 Vec (frontier 機構未利用の経路)
+        let mut t1 = MultiRunTaskScore::from_scores("t1".into(), vec![0.8], 0.5);
+        t1.final_context_tokens = Some(1500);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![t1],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        assert!(result.composite_frontier_bucket_scores(&[]).is_empty());
     }
 }
