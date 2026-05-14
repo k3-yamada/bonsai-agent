@@ -28,19 +28,47 @@ pub fn is_frontier_enabled() -> bool {
 /// 未指定 / parse 失敗 / 空 / 非単調増加で [`DEFAULT_FRONTIER_BUCKETS`] を返す。
 /// 返り値は **昇順に sort 済** で重複なし、最低 1 要素を保証。
 pub fn parse_frontier_buckets_env() -> Vec<usize> {
-    let _ = (); // todo!() を後段で
-    todo!("Phase 2 Green で実装")
+    let Ok(raw) = std::env::var("BONSAI_FRONTIER_BUCKETS") else {
+        return DEFAULT_FRONTIER_BUCKETS.to_vec();
+    };
+    if raw.trim().is_empty() {
+        return DEFAULT_FRONTIER_BUCKETS.to_vec();
+    }
+    let parsed: Option<Vec<usize>> = raw
+        .split(',')
+        .map(|s| s.trim().parse::<usize>().ok())
+        .collect();
+    let Some(values) = parsed else {
+        return DEFAULT_FRONTIER_BUCKETS.to_vec();
+    };
+    if values.is_empty() {
+        return DEFAULT_FRONTIER_BUCKETS.to_vec();
+    }
+    // 厳格な単調増加 (重複も拒否) を要求、違反したら default fallback。
+    // 「caller の意図不明な順序を sort して救う」よりも「invalid input は明示的に reject」が
+    // observable な debug 体験を生む (env 値が想定と違うことに早く気付ける)。
+    let is_strictly_increasing = values.windows(2).all(|w| w[0] < w[1]);
+    if !is_strictly_increasing {
+        return DEFAULT_FRONTIER_BUCKETS.to_vec();
+    }
+    values
 }
 
 /// 累積 token 数 (`token_count`) を bucket index (0-based) に振り分ける。
 /// `boundaries` は昇順 sort 済 / 重複なしを前提 (`parse_frontier_buckets_env` の返り値を渡す)。
-/// 戻り値: `Some(N)` = bucket N に該当、`None` = 振り分け不能 (boundaries 空 / token_count 異常値)。
+/// 戻り値: `Some(N)` = bucket N に該当、`None` = 振り分け不能 (boundaries 空)。
 ///
 /// 例: boundaries=[2048, 4096, 8192]、token_count=1500 → Some(0)、token_count=3000 → Some(1)、
 /// token_count=5000 → Some(2)、token_count=10000 → Some(3) (末尾 unbounded bucket)。
 pub fn frontier_bucket_for(token_count: usize, boundaries: &[usize]) -> Option<usize> {
-    let _ = (token_count, boundaries);
-    todo!("Phase 2 Green で実装")
+    if boundaries.is_empty() {
+        return None;
+    }
+    // 半開区間 [boundaries[i-1], boundaries[i]) で bucket i-1 を表現。
+    // boundaries[0]=2048 → bucket 0 = [0, 2048)、bucket 1 = [2048, 4096) etc.
+    // 末尾 unbounded bucket index = boundaries.len()。
+    let bucket = boundaries.iter().position(|&b| token_count < b);
+    Some(bucket.unwrap_or(boundaries.len()))
 }
 
 /// task ごとの (累積 token, score) ペアを受け取り、bucket 別の mean score を集計する。
@@ -53,8 +81,21 @@ pub fn compute_frontier_bucket_scores(
     task_results: &[(usize, f64)],
     boundaries: &[usize],
 ) -> BTreeMap<usize, f64> {
-    let _ = (task_results, boundaries);
-    todo!("Phase 2 Green で実装")
+    if task_results.is_empty() || boundaries.is_empty() {
+        return BTreeMap::new();
+    }
+    // bucket → (sum, count) で集計後、最後に mean を計算。
+    let mut acc: BTreeMap<usize, (f64, usize)> = BTreeMap::new();
+    for (tokens, score) in task_results {
+        if let Some(bucket) = frontier_bucket_for(*tokens, boundaries) {
+            let entry = acc.entry(bucket).or_insert((0.0, 0));
+            entry.0 += score;
+            entry.1 += 1;
+        }
+    }
+    acc.into_iter()
+        .map(|(bucket, (sum, count))| (bucket, sum / count as f64))
+        .collect()
 }
 
 #[cfg(test)]
@@ -173,7 +214,10 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert!(result.contains_key(&0));
         assert!(result.contains_key(&1));
-        assert!(!result.contains_key(&2), "bucket 2 にサンプルなしなら key 不在");
+        assert!(
+            !result.contains_key(&2),
+            "bucket 2 にサンプルなしなら key 不在"
+        );
         assert!(result.contains_key(&3));
     }
 
