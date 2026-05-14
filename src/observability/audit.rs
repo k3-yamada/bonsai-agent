@@ -88,6 +88,26 @@ pub enum AuditAction {
         response_len: usize,
         duration_ms: u64,
     },
+    /// Plan A (KG-Grounded Hallucination Check、項目 230 候補): Lab post-hoc factcheck pass。
+    ///
+    /// Lab cycle 末尾の AgentHER hook 直前で `run_factcheck_pass` が 1 回発火し、
+    /// 失敗 trajectory 由来テキストの triple 検証結果を本 audit に記録する
+    /// (production agent_loop は env unset で短絡)。
+    /// duration_ms は regex extraction + KG SELECT の合計 (1bit prefix overhead 計測用)。
+    FactCheck {
+        /// 抽出された triple 総数 (regex match 数の集約)
+        total: usize,
+        /// KG 内に exact match path が見つかった triple 数
+        matched: usize,
+        /// subject/object 未登録で判定保留 (false positive 回避)
+        unknown: usize,
+        /// subject + predicate 同一だが object 不一致 = fabricate 疑い
+        conflicting: usize,
+        /// matched triple の平均 path_len (matched=0 のとき 0.0)
+        mean_path_len: f64,
+        /// pass 全体所要時間 (ms、regex + KG SELECT 合計)
+        duration_ms: u64,
+    },
     // 項目 193 (2026-05-06d): F3SizeGuard variant 削除。
     // F3 RequestSizeGuard を削除したため、対応する audit variant も不要化。
     // 既存 audit_log table 内の action_type='f3_size_guard' row は残存 (data loss なし)。
@@ -116,6 +136,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::MultiFileNudge { .. } => "multi_file_nudge",
             AuditAction::AdvisorSkip { .. } => "advisor_skip",
             AuditAction::CriticCall { .. } => "critic_call",
+            AuditAction::FactCheck { .. } => "factcheck",
         };
         let action_data = serde_json::to_string(action)?;
 

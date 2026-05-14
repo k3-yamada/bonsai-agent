@@ -13,6 +13,9 @@ fizzbuzz/
 /main.rs
 FizzBuzz.rs
 bubble_sort.rs
+# BenchmarkTask file_write_simple (benchmark.rs:693) の expected artifact、
+# Lab cycle 毎に再生成 (handoff 05-13b §5 (e) で用途確定)
+hello.txt
 # Python キャッシュ (scripts/lab_v17_*.py 等)
 __pycache__/
 *.pyc

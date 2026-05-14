@@ -14,11 +14,14 @@ use crate::agent::judge::{HttpAdvisorJudge, LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::experience::{ExperienceStore, SubgoalJudgeMethod, extract_hindsight_relabels};
+use crate::memory::factcheck::{self, FactCheckSummary};
+use crate::memory::graph::KnowledgeGraph;
 use crate::memory::heuristics::{
     HeuristicStore, HeuristicSummary, extract_reflection_full, is_erl_enabled,
 };
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
+use crate::observability::audit::{AuditAction, AuditLog};
 use crate::runtime::inference::LlmBackend;
 use crate::tools::ToolRegistry;
 
@@ -1450,6 +1453,29 @@ pub fn run_experiment_loop(
         }
     );
 
+    // Plan A FactCheck post-Lab pass (項目 230 候補、AgentHER 直前 / plan §3 Phase 2 遵守)
+    // non-fatal: env unset (`BONSAI_KG_FACTCHECK_ENABLED` 未設定) で短絡、default OFF。
+    // KG 状態は AgentHER pass で touch されないため順序差は観測上ゼロだが、plan 通り
+    // AgentHER の前に配置 (将来 AgentHER が KG 更新へ拡張された場合の安全側設計)。
+    if factcheck::is_factcheck_enabled() {
+        match run_factcheck_pass_lab(store, lab_start_event_id) {
+            Ok(s) => log_event(
+                LogLevel::Info,
+                "lab.factcheck",
+                &format!(
+                    "FactCheck post-Lab: total={} matched={} unknown={} conflicting={} \
+                     mean_path_len={:.2}",
+                    s.total, s.matched, s.unknown, s.conflicting, s.mean_path_len,
+                ),
+            ),
+            Err(e) => log_event(
+                LogLevel::Warn,
+                "lab.factcheck",
+                &format!("FactCheck post-Lab pass failed (non-fatal): {e}"),
+            ),
+        }
+    }
+
     // AgentHER post-Lab pass: 失敗 trajectory の HSL relabel + 成功軌跡の symmetric promotion
     // (handoff 05-07e TODO #1、項目 161/201 dead-code 解消)
     // non-fatal: エラーは Warn log のみで握り潰し、Lab 結果は通常通り返す
@@ -1549,6 +1575,60 @@ fn run_hindsight_pass(store: &MemoryStore, since_event_id: i64) -> Result<Hindsi
             summary.skills_promoted += 1;
         }
     }
+
+    Ok(summary)
+}
+
+/// Plan A (KG-Grounded Hallucination Check、項目 230 候補) post-Lab pass。
+///
+/// 失敗 trajectory (`extract_failed_trajectories_since_id` 経由) の `AssistantMessage`
+/// event_data から content を抽出し、`factcheck::run_factcheck_pass` で triple 検証。
+/// 結果を `AuditAction::FactCheck` で audit_log に persist、summary を return。
+///
+/// non-fatal: 任意のエラーは呼出側で `Warn` log にして握り潰す (Lab 結果を破壊しない)。
+/// `since_event_id` は `run_hindsight_pass` と共有 = 同じ Lab cycle 開始時 snapshot。
+fn run_factcheck_pass_lab(store: &MemoryStore, since_event_id: i64) -> Result<FactCheckSummary> {
+    let started = std::time::Instant::now();
+    let conn = store.conn();
+    let event_store = EventStore::new(conn);
+    let graph = KnowledgeGraph::new(conn);
+
+    // failed trajectory から AssistantMessage event_data の content text を収集
+    let failed = event_store.extract_failed_trajectories_since_id(since_event_id, 0.8, 2)?;
+    let mut texts: Vec<String> = Vec::new();
+    for candidate in &failed {
+        let events = event_store.replay(&candidate.session_id)?;
+        for ev in events {
+            if ev.event_type == "assistant_message" {
+                // event_data JSON で `{"content": "..."}` 形式が典型。parse 失敗時は
+                // raw string を fall back 採用 (false positive 起こさない高 precision regex)。
+                let text = serde_json::from_str::<serde_json::Value>(&ev.event_data)
+                    .ok()
+                    .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                    .unwrap_or(ev.event_data);
+                if !text.is_empty() {
+                    texts.push(text);
+                }
+            }
+        }
+    }
+
+    let summary = factcheck::run_factcheck_pass(&texts, &graph);
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    // audit emit (non-fatal、persist 失敗は summary 返却を阻害しない)
+    let audit = AuditLog::new(conn);
+    let _ = audit.log(
+        None,
+        &AuditAction::FactCheck {
+            total: summary.total,
+            matched: summary.matched,
+            unknown: summary.unknown,
+            conflicting: summary.conflicting,
+            mean_path_len: summary.mean_path_len,
+            duration_ms,
+        },
+    );
 
     Ok(summary)
 }
