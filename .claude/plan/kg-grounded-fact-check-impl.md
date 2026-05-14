@@ -1,7 +1,47 @@
 # KG-Grounded Hallucination Check (Knowledge Graph 事実検証層)
 
-**状態**: planning-only (未起票)、推奨度 ★★★ (項目 228 3-stream RRF graph fusion 完遂後の自然な拡張)
-**推定工数**: ~6-8h (TDD strict 5 phase、SCHEMA migration 不要、純 additive)
+**状態**: **Phase 1-4 wiring 完遂** (2026-05-15、項目 230 候補)、Phase 4 Smoke + Phase 5 Lab v20 effectiveness は別 session で実施
+**推奨度**: ★★★、推定工数: ~6-8h (TDD strict 5 phase、SCHEMA migration 不要、純 additive)
+
+## §0. 実装完遂状態 (2026-05-15 追記)
+
+### Phase 1-4 wiring 完遂 (本 plan + 派生 5 commits)
+
+| Phase | 状態 | commit | 詳細 |
+|---|---|---|---|
+| **Phase 1 (Red)** | ✅ 完遂 | `ec29e4d` | factcheck.rs 新規 + 6 `should_panic` test (Phase 1 6 件、`todo!()` panic で Red 確証) |
+| **Phase 2 (Green)** | ✅ 完遂 | `ec29e4d` | regex 2 pattern (`"X is the Y of Z"` / `"X is a Y"`) + verify_triple_in_kg + env opt-in 実装、6 test PASS |
+| **Phase 3 (Refactor)** | ✅ 完遂 | `ec29e4d` | FactCheckSummary 集約 struct + run_factcheck_pass + test 2 件追加 = 8 件 |
+| **Phase 3+ (Edge case test)** | ✅ 完遂 (本 plan §3 計画 +4) | `a0bf921` | precision/recall 確証強化、test 8 → **12** (+4: lowercase reject / Pattern 2 独立動作 / Pattern overlap なし / subject 既知 + object 未知 = Unknown) |
+| **Phase 4 wiring** | ✅ 完遂 (Lab v19 期間中の先取り) | `78990f1` | experiment.rs AgentHER hook 直前に `run_factcheck_pass_lab` 配線 + AuditAction::FactCheck variant + use 3 件追加 |
+| **Phase 4 Smoke (G-4a/b/c)** | ⏳ pending | — | Lab v19 完走後 (~12-15h)、`cargo build --release` で binary 再 build 必須 |
+| **Phase 5 (Lab v20 effectiveness)** | 別 plan | `lab-v20-kg-factcheck-effectiveness.md` | Pearson r ≥ 0.3 paired t-test、~10-15h wall |
+
+### 派生 plan / TODO (本 plan 完遂後の経路)
+
+| 関連 plan | 状態 | 役割 |
+|---|---|---|
+| `.claude/plan/lab-v20-kg-factcheck-effectiveness.md` | 起票済 (2026-05-15) | Phase 5 effectiveness 検証、Pearson r 自前実装 |
+| `.claude/plan/hallucination-inducing-benchmark-task.md` | 起票済 (2026-05-15) | Phase 4 G-4c の前提タスク (benchmark.rs に 3 task + factcheck.rs に seed 関数追加) |
+
+### 計画 vs 実装 差分メモ
+
+- **test 数**: 計画 6 件 (Phase 1) + 2 件 (Phase 3) = **8 件** → 実装 **12 件** (+4 = edge case test 追加で precision/recall 確証強化)
+- **API 追加**: 計画通り (Triple / FactCheckResult / 3 fn) + `FactCheckSummary` + `run_factcheck_pass` (Phase 3 追加分)、+ `graph.rs` に `contains_triple` / `find_conflicting_edges` 2 method
+- **配線**: 計画 §3 Phase 2 「AgentHER hook 直前」を遵守 (experiment.rs:1457 直前に env-gated block)
+- **AuditAction::FactCheck variant**: 計画 §3 Phase 2 で言及済、Phase 4 wiring 先取り (commit `78990f1`) で実装完遂
+- **Phase 4 G-4c の hallucination-inducing task**: 別 plan `hallucination-inducing-benchmark-task.md` (~2-3h) で defer、Lab v20 起動前に実装必要
+
+### 次セッション ★ 優先順位 (Lab v19 完走後)
+
+1. ★★★ **Phase 4 Smoke G-4a/b** (env unset 互換 + factcheck ON で log emit、~50 min)
+2. ★★ **hallucination-inducing task 実装** (`hallucination-inducing-benchmark-task.md` plan 経由、~2-3h)
+3. ★★ **Phase 4 Smoke G-4c** (`conflicting + unknown >= 1` 確証、~25 min)
+4. ★★★ **Lab v20 起動** (`lab-v20-kg-factcheck-effectiveness.md` plan、~10-15h wall)
+5. ★ CLAUDE.md 項目 230 を実機数値で正式追記
+
+---
+
 **起点**:
 - Zenn 記事「LLM の隣にファクトチェック係を置く ナレッジグラフ×LLM の実践ユースケース 7 選」(井本 賢、2026-05-06) usecase #7 ハルシネーション検出
 - Zenn 記事「知識グラフを AI エージェントに与えるという挑戦 — EidoGraph で学んだこと」(edom18、2026-05-09) の confidence/weight 二軸分離

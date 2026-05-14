@@ -95,4 +95,34 @@ if [[ -f "${LOG_DIR}/test_on_1.log" ]]; then
 fi
 
 echo
+
+# 5) 完走検出 + 次ステップ案内 (Lab v19 完走後の自動指示)
+if [[ $COMPLETED -ge 10 ]]; then
+    echo "## ✅ Lab v19 完走 (10/10 cycle)"
+    echo "  次ステップ (Phase 4 Smoke + 2 軸解析):"
+    echo "    # 軸 1 (score 軸 paired t-test)"
+    echo "    python3 scripts/lab_v19_paired_ttest.py ./lab-v19-logs"
+    echo "    # 軸 2 (bucket variance、frontier-analysis plan 実装後)"
+    echo "    python3 scripts/lab_v19_bucket_variance.py ./lab-v19-logs"
+    echo "    # Plan A Phase 4 Smoke (要 cargo build --release)"
+    echo "    cargo build --release && BONSAI_LAB_SMOKE=1 BONSAI_KG_FACTCHECK_ENABLED=1 \\"
+    echo "      ./target/release/bonsai --lab --lab-experiments 0 2>&1 | tee /tmp/halluc_g4b.log"
+
+    # macOS desktop notification (env `BONSAI_MONITOR_NOTIFY=1` で ON)
+    if [[ "${BONSAI_MONITOR_NOTIFY:-0}" == "1" ]]; then
+        if command -v osascript &>/dev/null; then
+            osascript -e 'display notification "Lab v19 全 10 cycle 完走、Phase 4 Smoke 起動可" with title "Bonsai Lab v19 Complete" sound name "Glass"' 2>/dev/null || true
+        fi
+    fi
+elif [[ -z "$BONSAI_PIDS" ]] && [[ $COMPLETED -lt 10 ]]; then
+    echo "## ⚠️ bonsai プロセス不在 + 未完走 ($COMPLETED/10) = crash 疑い"
+    echo "  /tmp/lab_v19_run.log を tail で確認推奨:"
+    echo "    tail -50 /tmp/lab_v19_run.log"
+    if [[ "${BONSAI_MONITOR_NOTIFY:-0}" == "1" ]]; then
+        if command -v osascript &>/dev/null; then
+            osascript -e "display notification \"Lab v19 crash 疑い ($COMPLETED/10 cycle で停止)\" with title \"Bonsai Lab v19 Alert\" sound name \"Basso\"" 2>/dev/null || true
+        fi
+    fi
+fi
+
 echo "=== End of snapshot ==="
