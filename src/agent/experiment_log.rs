@@ -1182,6 +1182,129 @@ mod tests {
         assert!(results[0].frontier_inject_scores.is_empty());
     }
 
+    // Sub-Phase 2D E2E: env mutex (項目 226 CRITIC_TEST_LOCK / 項目 225 PASS_K_T_TEST_LOCK 同 pattern)
+    static FRONTIER_E2E_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// helper: 単一 task の MultiRunBenchmarkResult を frontier 軸付きで構築。
+    /// `final_context_tokens` を設定済の task を返す (run_k populate path を模倣)。
+    fn build_mrb_with_frontier(
+        task_id: &str,
+        scores: Vec<f64>,
+        tokens: usize,
+    ) -> crate::agent::benchmark::MultiRunBenchmarkResult {
+        use crate::agent::benchmark::{MultiRunBenchmarkResult, MultiRunTaskScore};
+        let mut ts = MultiRunTaskScore::from_scores(task_id.into(), scores, 0.5);
+        ts.final_context_tokens = Some(tokens);
+        MultiRunBenchmarkResult {
+            task_scores: vec![ts],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        }
+    }
+
+    /// E2E: env enabled で from_multi_results → save_to_db → recent_experiments の経路で
+    /// frontier_bucket_scores が roundtrip すること。
+    #[test]
+    fn t_frontier_e2e_env_enabled_populates_and_persists() {
+        let _guard = FRONTIER_E2E_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("BONSAI_FRONTIER_ENABLED", "1") };
+        // boundaries default = [2048, 4096, 8192]
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_BUCKETS") };
+
+        let baseline = build_mrb_with_frontier("t1_base", vec![0.6, 0.6, 0.6], 1500);
+        let experiment = build_mrb_with_frontier("t1_exp", vec![0.7, 0.7, 0.7], 5000);
+        let exp = Experiment::from_multi_results(
+            "e_frontier_e2e".into(),
+            MutationType::PromptRule,
+            "frontier E2E".into(),
+            &baseline,
+            &experiment,
+            HashMap::new(),
+        );
+        // env enabled かつ token=5000 → bucket 2 ([4096, 8192) 半開区間)、mean_score=0.7
+        assert_eq!(
+            exp.frontier_bucket_scores.len(),
+            1,
+            "1 task → 1 bucket entry"
+        );
+        assert_eq!(exp.frontier_bucket_scores[0].0, 2, "5000 token → bucket 2");
+        assert!((exp.frontier_bucket_scores[0].1 - 0.7).abs() < 1e-9);
+
+        // DB roundtrip
+        let conn = setup_test_db();
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let results = ExperimentLog::recent_experiments(&conn, 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].frontier_bucket_scores.len(), 1);
+        assert_eq!(results[0].frontier_bucket_scores[0].0, 2);
+        assert!((results[0].frontier_bucket_scores[0].1 - 0.7).abs() < 1e-9);
+
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_ENABLED") };
+    }
+
+    /// E2E: env unset では from_multi_results は frontier_bucket_scores 空を返す
+    /// (default OFF / 既存挙動完全互換確証)。
+    #[test]
+    fn t_frontier_e2e_env_unset_leaves_empty() {
+        let _guard = FRONTIER_E2E_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_ENABLED") };
+
+        let baseline = build_mrb_with_frontier("t1_base", vec![0.6, 0.6, 0.6], 1500);
+        let experiment = build_mrb_with_frontier("t1_exp", vec![0.7, 0.7, 0.7], 5000);
+        let exp = Experiment::from_multi_results(
+            "e_frontier_unset".into(),
+            MutationType::PromptRule,
+            "frontier env unset".into(),
+            &baseline,
+            &experiment,
+            HashMap::new(),
+        );
+        // env unset → frontier_bucket_scores は populate されない (Vec::new() 経路)
+        assert!(
+            exp.frontier_bucket_scores.is_empty(),
+            "env unset で frontier_bucket_scores は空のまま"
+        );
+    }
+
+    /// E2E: env enabled かつ custom boundaries で正しい bucket index に振り分けされること。
+    #[test]
+    fn t_frontier_e2e_custom_boundaries_change_bucket() {
+        let _guard = FRONTIER_E2E_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("BONSAI_FRONTIER_ENABLED", "1") };
+        // custom boundaries: [1000, 3000] (3 bucket = [0,1000) / [1000,3000) / [3000,∞))
+        unsafe { std::env::set_var("BONSAI_FRONTIER_BUCKETS", "1000,3000") };
+
+        let baseline = build_mrb_with_frontier("t1_base", vec![0.5], 500);
+        // 5000 token → custom boundaries=[1000, 3000] では bucket 2 (unbounded)
+        let experiment = build_mrb_with_frontier("t1_exp", vec![0.8], 5000);
+        let exp = Experiment::from_multi_results(
+            "e_frontier_custom".into(),
+            MutationType::PromptRule,
+            "custom boundaries".into(),
+            &baseline,
+            &experiment,
+            HashMap::new(),
+        );
+        assert_eq!(exp.frontier_bucket_scores.len(), 1);
+        assert_eq!(
+            exp.frontier_bucket_scores[0].0, 2,
+            "5000 token → bucket 2 (unbounded for [1000, 3000])"
+        );
+        assert!((exp.frontier_bucket_scores[0].1 - 0.8).abs() < 1e-9);
+
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_ENABLED") };
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_BUCKETS") };
+    }
+
     /// serde: V16 field が無い旧 JSON でも `#[serde(default)]` で空 Vec として load できる。
     #[test]
     fn t_frontier_serde_backward_compat_old_json_loads_empty() {
