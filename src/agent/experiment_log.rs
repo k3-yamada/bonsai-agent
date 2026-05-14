@@ -298,15 +298,19 @@ impl Experiment {
             pass_at_k_t_seconds,
             // Sub-Phase 2C: env opt-in (`BONSAI_FRONTIER_ENABLED=1`) のときのみ populate。
             // 未指定セッションでは空 Vec で skip_serializing_if 経路 (JSON/TSV ともに不在)。
-            // frontier_inject_scores は Sub-Phase 2E (T6 filler context inject) で populate 予定、
-            // Sub-Phase 2C 時点では常に空 Vec。
             frontier_bucket_scores: if crate::agent::frontier::is_frontier_enabled() {
                 let boundaries = crate::agent::frontier::parse_frontier_buckets_env();
                 experiment.composite_frontier_bucket_scores(&boundaries)
             } else {
                 Vec::new()
             },
-            frontier_inject_scores: Vec::new(),
+            // Sub-Phase 2F: env opt-in (`BONSAI_FRONTIER_INJECT_ENABLED=1`) のときのみ populate。
+            // T6-LongHorizon タスク以外は run_k 内で空 Vec のまま、composite 集約は空。
+            frontier_inject_scores: if crate::agent::frontier::is_frontier_inject_enabled() {
+                experiment.composite_frontier_inject_scores()
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -1270,6 +1274,92 @@ mod tests {
         assert!(
             exp.frontier_bucket_scores.is_empty(),
             "env unset で frontier_bucket_scores は空のまま"
+        );
+    }
+
+    /// E2E (Sub-Phase 2F): env enabled で `BONSAI_FRONTIER_INJECT_ENABLED=1` のとき、
+    /// `Experiment.frontier_inject_scores` が `composite_frontier_inject_scores` 経由で populate される。
+    /// MultiRunBenchmarkResult に inject 済 task が含まれるシナリオを simulate。
+    #[test]
+    fn t_frontier_inject_e2e_env_enabled_populates() {
+        let _guard = FRONTIER_E2E_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("BONSAI_FRONTIER_INJECT_ENABLED", "1") };
+
+        // T6 task simulation: frontier_inject_scores を手動で populate (run_k 実機を模倣)
+        use crate::agent::benchmark::{MultiRunBenchmarkResult, MultiRunTaskScore};
+        let build = |scores: Vec<(usize, f64)>| -> MultiRunBenchmarkResult {
+            let mut t = MultiRunTaskScore::from_scores("t6".into(), vec![0.5], 0.5);
+            t.frontier_inject_scores = scores;
+            MultiRunBenchmarkResult {
+                task_scores: vec![t],
+                duration_secs: 1.0,
+                core_avg_score: None,
+                extended_avg_score: None,
+                tier_avg_scores: None,
+                critic_stats: None,
+            }
+        };
+        let baseline = build(vec![(0, 0.6), (4, 0.5), (8, 0.4), (16, 0.3)]);
+        let experiment = build(vec![(0, 0.7), (4, 0.6), (8, 0.5), (16, 0.4)]);
+
+        let exp = Experiment::from_multi_results(
+            "e_inject_e2e".into(),
+            MutationType::PromptRule,
+            "T6 inject E2E".into(),
+            &baseline,
+            &experiment,
+            HashMap::new(),
+        );
+
+        assert_eq!(exp.frontier_inject_scores.len(), 4, "4 size all populated");
+        assert_eq!(exp.frontier_inject_scores[0].0, 0);
+        assert!((exp.frontier_inject_scores[0].1 - 0.7).abs() < 1e-9);
+        assert_eq!(exp.frontier_inject_scores[3].0, 16);
+        assert!((exp.frontier_inject_scores[3].1 - 0.4).abs() < 1e-9);
+
+        // DB roundtrip
+        let conn = setup_test_db();
+        ExperimentLog::save_to_db(&conn, &exp).unwrap();
+        let results = ExperimentLog::recent_experiments(&conn, 1).unwrap();
+        assert_eq!(results[0].frontier_inject_scores.len(), 4);
+        assert_eq!(results[0].frontier_inject_scores[3], (16, 0.4));
+
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_INJECT_ENABLED") };
+    }
+
+    /// E2E (Sub-Phase 2F): env unset では `frontier_inject_scores` 空のまま (default OFF 完全互換)。
+    #[test]
+    fn t_frontier_inject_e2e_env_unset_leaves_empty() {
+        let _guard = FRONTIER_E2E_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("BONSAI_FRONTIER_INJECT_ENABLED") };
+
+        use crate::agent::benchmark::{MultiRunBenchmarkResult, MultiRunTaskScore};
+        // task 側に inject data があっても env unset なら from_multi_results は無視する
+        let mut t = MultiRunTaskScore::from_scores("t6".into(), vec![0.5], 0.5);
+        t.frontier_inject_scores = vec![(0, 0.7), (4, 0.5)];
+        let mrb = MultiRunBenchmarkResult {
+            task_scores: vec![t],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        let exp = Experiment::from_multi_results(
+            "e_inject_unset".into(),
+            MutationType::PromptRule,
+            "T6 inject env unset".into(),
+            &mrb,
+            &mrb,
+            HashMap::new(),
+        );
+        assert!(
+            exp.frontier_inject_scores.is_empty(),
+            "env unset で inject_scores は populate されない (task data があっても)"
         );
     }
 

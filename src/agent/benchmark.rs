@@ -464,6 +464,11 @@ pub struct MultiRunTaskScore {
     /// run_k で populate されない経路 (legacy fixture / Phase 4 G-4a 等) では `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_context_tokens: Option<usize>,
+    /// Sub-Phase 2F: T6-LongHorizon に filler context を inject した variant の (size_kb, mean_score) 列。
+    /// `BONSAI_FRONTIER_INJECT_ENABLED=1` AND `capability_tier == LongHorizonPlanning` のとき
+    /// run_k が populate する。非 T6 / env 未設定 / 非 LongHorizon タスクでは空 Vec のまま。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontier_inject_scores: Vec<(usize, f64)>,
 }
 
 /// `MultiRunTaskScore::final_context_tokens` 推定用、1 iteration あたりの平均 token 数。
@@ -497,6 +502,7 @@ impl MultiRunTaskScore {
                 pass_at_k_t_steps: Vec::new(),
                 pass_at_k_t_seconds: Vec::new(),
                 final_context_tokens: None,
+                frontier_inject_scores: Vec::new(),
             };
         }
 
@@ -542,6 +548,9 @@ impl MultiRunTaskScore {
             // Sub-Phase 2C: final_context_tokens は from_scores 経路では None (iteration 情報なし)。
             // run_k 経路では with_final_context_tokens(...) で後付け populate される。
             final_context_tokens: None,
+            // Sub-Phase 2F: frontier_inject_scores は from_scores 経路では空。
+            // run_k 経路で T6 task + env enabled のとき populate される。
+            frontier_inject_scores: Vec::new(),
         }
     }
 
@@ -825,6 +834,28 @@ impl MultiRunBenchmarkResult {
 
         acc.into_iter()
             .map(|(threshold, (sum, count))| (threshold, sum / count as f64))
+            .collect()
+    }
+
+    /// Frontier benchmark (Sub-Phase 2F): T6-LongHorizon inject variant の (size_kb, mean_score) 列を
+    /// 全 T6 タスクで集約。`PASS@(k, T_steps)` と同 pattern で `BTreeMap` 経由 deterministic 順序。
+    /// run_k で populate されていない (env unset / 非 T6) タスクは集計対象外。
+    /// 戻り値: `Vec<(size_kb, mean_score)>` (size_kb 昇順)、全 task が空なら空 Vec。
+    pub fn composite_frontier_inject_scores(&self) -> Vec<(usize, f64)> {
+        if self.task_scores.is_empty() {
+            return Vec::new();
+        }
+        let mut acc: std::collections::BTreeMap<usize, (f64, usize)> =
+            std::collections::BTreeMap::new();
+        for task_score in &self.task_scores {
+            for &(size_kb, mean) in &task_score.frontier_inject_scores {
+                let entry = acc.entry(size_kb).or_insert((0.0, 0));
+                entry.0 += mean;
+                entry.1 += 1;
+            }
+        }
+        acc.into_iter()
+            .map(|(size_kb, (sum, count))| (size_kb, sum / count as f64))
             .collect()
     }
 
@@ -1999,6 +2030,78 @@ impl BenchmarkSuite {
             // env opt-in (`BONSAI_FRONTIER_ENABLED`) のチェックは Experiment::from_results 側で行い、
             // run_k は常に populate する (cost は加算 1 ops のみで観察コスト無視可能)。
             task_score.final_context_tokens = Some(est_context_tokens);
+
+            // Sub-Phase 2F: T6-LongHorizon inject variant runs (案 C 2nd pillar)。
+            // env `BONSAI_FRONTIER_INJECT_ENABLED=1` AND task が LongHorizonPlanning のときのみ
+            // 4 size (default 0/4/8/16 KB) × k runs = 4k 追加 run を実行、(size_kb, mean) を
+            // `frontier_inject_scores` に push する。production default OFF で観察コストゼロ。
+            if crate::agent::frontier::is_frontier_inject_enabled()
+                && task.capability_tier == CapabilityTier::LongHorizonPlanning
+            {
+                let inject_sizes = crate::agent::frontier::parse_frontier_inject_sizes_env();
+                let mut inject_scores: Vec<(usize, f64)> = Vec::new();
+                for &size_kb in &inject_sizes {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let injected_input =
+                        crate::agent::frontier::inject_filler_context(&task.input, size_kb);
+                    let mut size_scores = Vec::new();
+                    for inject_run_idx in 0..multi.k {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        store.reset_session_data_for_lab()?;
+                        let system_prompt = if multi.jitter_seed {
+                            format!(
+                                "{}\n<!-- run:inject:{size_kb}kb:{inject_run_idx} -->",
+                                config.system_prompt
+                            )
+                        } else {
+                            config.system_prompt.clone()
+                        };
+                        let inject_config = AgentConfig {
+                            max_iterations: task.max_iterations,
+                            max_retries: config.max_retries,
+                            max_tools_selected: config.max_tools_selected,
+                            system_prompt,
+                            advisor: AdvisorConfig {
+                                max_uses: 0,
+                                ..config.advisor.clone()
+                            },
+                            auto_checkpoint: false,
+                            max_tool_output_chars: config.max_tool_output_chars,
+                            max_tools_in_context: config.max_tools_in_context,
+                            max_mcp_tools_in_context: config.max_mcp_tools_in_context,
+                            base_inference: config.base_inference.clone(),
+                            task_timeout: config.task_timeout,
+                            soul_path: config.soul_path.clone(),
+                            n_ctx_budget: config.n_ctx_budget,
+                            memory_blocks: config.memory_blocks.clone(),
+                        };
+                        let inject_result = run_agent_loop(
+                            &injected_input,
+                            backend,
+                            tools,
+                            path_guard,
+                            &inject_config,
+                            cancel,
+                            Some(store),
+                        );
+                        let s = match inject_result {
+                            Ok(ref lr) => evaluate_task_response(task, lr).score(),
+                            Err(_) => 0.0,
+                        };
+                        size_scores.push(s);
+                    }
+                    if !size_scores.is_empty() {
+                        let mean = size_scores.iter().sum::<f64>() / size_scores.len() as f64;
+                        inject_scores.push((size_kb, mean));
+                    }
+                }
+                task_score.frontier_inject_scores = inject_scores;
+            }
+
             if let Some((response, trajectory)) = last_run_capture {
                 task_score = task_score.with_last_run(response, trajectory);
             }
@@ -3960,5 +4063,71 @@ mod tests {
             critic_stats: None,
         };
         assert!(result.composite_frontier_bucket_scores(&[]).is_empty());
+    }
+
+    // ── Sub-Phase 2F: composite_frontier_inject_scores tests ──
+
+    #[test]
+    fn t_composite_frontier_inject_scores_aggregates_t6_tasks() {
+        // 2 T6 task が同じ 4 size の inject_scores を持つとき、size 別 mean を返す。
+        let mut t1 = MultiRunTaskScore::from_scores("t6_a".into(), vec![0.6], 0.5);
+        t1.frontier_inject_scores = vec![(0, 0.80), (4, 0.70), (8, 0.55), (16, 0.30)];
+        let mut t2 = MultiRunTaskScore::from_scores("t6_b".into(), vec![0.5], 0.5);
+        t2.frontier_inject_scores = vec![(0, 0.70), (4, 0.60), (8, 0.45), (16, 0.20)];
+
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![t1, t2],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        let composite = result.composite_frontier_inject_scores();
+        // 4 size × mean (t1 + t2)/2 = [(0, 0.75), (4, 0.65), (8, 0.50), (16, 0.25)]
+        assert_eq!(composite.len(), 4);
+        assert_eq!(composite[0].0, 0);
+        assert!((composite[0].1 - 0.75).abs() < 1e-9);
+        assert_eq!(composite[1].0, 4);
+        assert!((composite[1].1 - 0.65).abs() < 1e-9);
+        assert_eq!(composite[2].0, 8);
+        assert!((composite[2].1 - 0.50).abs() < 1e-9);
+        assert_eq!(composite[3].0, 16);
+        assert!((composite[3].1 - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_composite_frontier_inject_scores_empty_when_no_data() {
+        // 全 task の frontier_inject_scores が空 → 空 Vec を返す (env unset セッション互換)。
+        let t1 = MultiRunTaskScore::from_scores("t1".into(), vec![0.8], 0.5);
+        let t2 = MultiRunTaskScore::from_scores("t2".into(), vec![0.5], 0.5);
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![t1, t2],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        assert!(result.composite_frontier_inject_scores().is_empty());
+    }
+
+    #[test]
+    fn t_composite_frontier_inject_scores_size_ascending_order() {
+        // 単一 task で size が逆順に格納されていても composite は size 昇順で出力する
+        // (BTreeMap 経由の deterministic 順序保証)。
+        let mut t1 = MultiRunTaskScore::from_scores("t6".into(), vec![0.5], 0.5);
+        t1.frontier_inject_scores = vec![(16, 0.2), (4, 0.6), (8, 0.4), (0, 0.8)];
+        let result = MultiRunBenchmarkResult {
+            task_scores: vec![t1],
+            duration_secs: 1.0,
+            core_avg_score: None,
+            extended_avg_score: None,
+            tier_avg_scores: None,
+            critic_stats: None,
+        };
+        let composite = result.composite_frontier_inject_scores();
+        let sizes: Vec<usize> = composite.iter().map(|(s, _)| *s).collect();
+        assert_eq!(sizes, vec![0, 4, 8, 16], "size 昇順");
     }
 }
