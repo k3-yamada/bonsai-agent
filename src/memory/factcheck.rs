@@ -300,6 +300,66 @@ mod tests {
         assert_eq!(summary, FactCheckSummary::default());
     }
 
+    /// Phase 3 Refactor — regex precision: 小文字始まり subject は match しない。
+    /// 期待: rule-based pattern が高 precision (低 recall) を維持、false positive 回避。
+    /// "alice is the parent of bob" → 空 Vec (大文字始まりが pattern 要件)
+    #[test]
+    fn t_extract_triples_rejects_lowercase_subject() {
+        let triples = extract_triples_from_text("alice is the parent of bob");
+        assert!(
+            triples.is_empty(),
+            "小文字始まり subject は extract されないべき (高 precision 保証)"
+        );
+    }
+
+    /// Phase 3 Refactor — Pattern 2 ("X is a Y") の独立動作検証。
+    /// 期待: "Bonsai-8B is a model" → Triple { Bonsai-8B, is_a, model, confidence: 0.80 }
+    #[test]
+    fn t_extract_triples_pattern_2_is_a_basic() {
+        let triples = extract_triples_from_text("Bonsai-8B is a model");
+        assert_eq!(triples.len(), 1, "Pattern 2 で 1 件 extract されるべき");
+        assert_eq!(triples[0].subject, "Bonsai-8B");
+        assert_eq!(triples[0].predicate, "is_a");
+        assert_eq!(triples[0].object, "model");
+        assert!((triples[0].confidence - 0.80).abs() < f64::EPSILON);
+    }
+
+    /// Phase 3 Refactor — Pattern 1 のみ登録 / Pattern 2 重複なし。
+    /// 期待: "Alice is the parent of Bob" は Pattern 1 のみで 1 件 (Pattern 2 "is a" は match しない)
+    #[test]
+    fn t_extract_triples_no_pattern_overlap() {
+        let triples = extract_triples_from_text("Alice is the parent of Bob");
+        assert_eq!(
+            triples.len(),
+            1,
+            "Pattern 1 単独 match、Pattern 2 二重 extract なし"
+        );
+        assert_eq!(triples[0].predicate, "parent_of");
+    }
+
+    /// Phase 3 Refactor — subject 既登録 + object 未登録 → Unknown。
+    /// 期待: graph に Alice のみ登録、Bob 未登録 → KG path 不在 + conflicting edge 不在 = Unknown
+    /// (false positive 回避: object 未登録の場合に Conflict 判定を出さない設計)
+    #[test]
+    fn t_verify_triple_in_kg_subject_known_object_unknown() {
+        let store = setup_db();
+        let graph = KnowledgeGraph::new(store.conn());
+        let _ = graph.add_node("entity", "Alice").unwrap(); // object 未登録
+
+        let triple = Triple {
+            subject: "Alice".into(),
+            predicate: "knows".into(),
+            object: "UnknownPerson".into(),
+            confidence: 1.0,
+        };
+        let result = verify_triple_in_kg(&triple, &graph);
+        assert_eq!(
+            result,
+            FactCheckResult::Unknown,
+            "subject 登録 + predicate 未関連 = Unknown (Conflict ではない)"
+        );
+    }
+
     /// Phase 1 Red — env opt-in default OFF。
     /// 期待: 未設定で false (Cerememory 三本柱と同 pattern、項目 217-219)
     #[test]
