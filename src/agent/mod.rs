@@ -15,6 +15,7 @@ pub mod event_store;
 pub mod middleware;
 
 pub mod context_inject;
+pub mod frontier;
 pub mod subagent;
 pub mod tool_exec;
 pub mod tool_selection_bench;
