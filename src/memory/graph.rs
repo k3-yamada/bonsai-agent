@@ -148,6 +148,76 @@ impl<'a> KnowledgeGraph<'a> {
         Ok(())
     }
 
+    /// triple `(subject, predicate, object)` が KG 内に存在するか判定。
+    ///
+    /// 戻り値 = `Some(path_len)`: subject 起点から object へ向かう `predicate` edge を
+    /// 1 ホップで検出した場合の hop 数 (常に 1、将来の multi-hop 用に Option 返却)。
+    /// `None`: subject / object どちらかが KG 未登録、または subject→object の
+    /// 直接 `predicate` edge が存在しない。
+    ///
+    /// Plan A (KG-Grounded Hallucination Check、項目 230 候補) の `Match` 判定に使用。
+    /// neighbors() の双方向探索とは異なり、ここでは出方向のみ確認する (triple は有向)。
+    pub fn contains_triple(&self, subj: &str, pred: &str, obj: &str) -> Option<usize> {
+        let subj_id: i64 = self
+            .conn
+            .query_row(
+                "SELECT id FROM knowledge_nodes WHERE name = ?1",
+                params![subj],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let obj_id: i64 = self
+            .conn
+            .query_row(
+                "SELECT id FROM knowledge_nodes WHERE name = ?1",
+                params![obj],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let exists: Result<i64, _> = self.conn.query_row(
+            "SELECT 1 FROM knowledge_edges \
+             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+            params![subj_id, obj_id, pred],
+            |row| row.get(0),
+        );
+        exists.ok().map(|_| 1)
+    }
+
+    /// `(subject, predicate)` 同一だが `object` が異なる edge を列挙。
+    ///
+    /// 戻り値: `Vec<(existing_object_name, relation)>` (relation は引数 `pred` と同値、
+    /// 確認用に重複返却)。空 Vec = 対立なし。
+    ///
+    /// Plan A の `Conflict` 判定に使用: KG が `(Alice, parent_of, Bob)` を持つとき、
+    /// `find_conflicting_edges("Alice", "parent_of")` は `[("Bob", "parent_of")]` を返す。
+    /// caller 側で「LLM 出力 triple の object と一致しない場合 = Conflict」と判断する。
+    pub fn find_conflicting_edges(&self, subj: &str, pred: &str) -> Vec<(String, String)> {
+        let subj_id: i64 = match self.conn.query_row(
+            "SELECT id FROM knowledge_nodes WHERE name = ?1",
+            params![subj],
+            |row| row.get(0),
+        ) {
+            Ok(id) => id,
+            Err(_) => return Vec::new(),
+        };
+        let mut stmt = match self.conn.prepare(
+            "SELECT kn.name, ke.relation \
+             FROM knowledge_edges ke \
+             JOIN knowledge_nodes kn ON kn.id = ke.target_id \
+             WHERE ke.source_id = ?1 AND ke.relation = ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = match stmt.query_map(params![subj_id, pred], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(_) => return Vec::new(),
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
     /// エラー→ファイル→ツール関係を記録（エラー発生時に呼ぶ）
     pub fn record_error_pattern(
         &self,
