@@ -898,6 +898,69 @@ fn emit_tier_map_log(result: &MultiRunBenchmarkResult, cycle_label: &str) {
     }
 }
 
+/// Frontier benchmark の bucket / inject scores をログ出力する
+/// (`frontier-benchmark-impl.md` Sub-Phase 2F、antirez/ds4 ds4-bench inspired)。
+///
+/// `BONSAI_FRONTIER_ENABLED` / `BONSAI_FRONTIER_INJECT_ENABLED` のどちらか有効時に
+/// `[INFO][lab.frontier]` チャンネルで context-length axis を追跡できる。
+/// 両方 OFF / データなしの場合は no-op。
+fn emit_frontier_log(result: &MultiRunBenchmarkResult, cycle_label: &str) {
+    let bucket_enabled = crate::agent::frontier::is_frontier_enabled();
+    let inject_enabled = crate::agent::frontier::is_frontier_inject_enabled();
+    if !bucket_enabled && !inject_enabled {
+        return;
+    }
+    log_event(
+        LogLevel::Info,
+        "lab.frontier",
+        &format!("Frontier metric ({cycle_label}):"),
+    );
+    if bucket_enabled {
+        let boundaries = crate::agent::frontier::parse_frontier_buckets_env();
+        let buckets = result.composite_frontier_bucket_scores(&boundaries);
+        if buckets.is_empty() {
+            log_event(
+                LogLevel::Info,
+                "lab.frontier",
+                "  bucket: (no final_context_tokens populated)",
+            );
+        } else {
+            for (idx, score) in &buckets {
+                let range = if *idx == 0 {
+                    format!("[0, {})", boundaries[0])
+                } else if *idx < boundaries.len() {
+                    format!("[{}, {})", boundaries[idx - 1], boundaries[*idx])
+                } else {
+                    format!("[{}, ∞)", boundaries[boundaries.len() - 1])
+                };
+                log_event(
+                    LogLevel::Info,
+                    "lab.frontier",
+                    &format!("  bucket {idx} {range}: {score:.4}"),
+                );
+            }
+        }
+    }
+    if inject_enabled {
+        let inject = result.composite_frontier_inject_scores();
+        if inject.is_empty() {
+            log_event(
+                LogLevel::Info,
+                "lab.frontier",
+                "  inject: (no T6 tasks populated)",
+            );
+        } else {
+            for (size_kb, mean) in &inject {
+                log_event(
+                    LogLevel::Info,
+                    "lab.frontier",
+                    &format!("  inject {size_kb:>3} KB: {mean:.4}"),
+                );
+            }
+        }
+    }
+}
+
 /// pre-screen REJECT 経路で `Experiment` を構築する private helper (項目 224)。
 ///
 /// G-4c v3 PARTIAL PASS で発覚: pre-screen REJECT は full run 未実行のため
@@ -1071,6 +1134,7 @@ pub fn run_experiment_loop(
     );
     // AgentFloor tier map ログ出力 (plan §4.5: baseline 計測直後)
     emit_tier_map_log(&baseline, "baseline");
+    emit_frontier_log(&baseline, "baseline");
 
     // メタ変異生成器の初期化（過去のACCEPTアーカイブから）
     let mut meta_gen = MetaMutationGenerator::from_db(store.conn())
@@ -1207,6 +1271,7 @@ pub fn run_experiment_loop(
         let snapshot = config_snapshot(&modified_config);
         // AgentFloor tier map ログ出力 (plan §4.6: 各実験計測直後)
         emit_tier_map_log(&result, &format!("exp_{experiment_count}"));
+        emit_frontier_log(&result, &format!("exp_{experiment_count}"));
 
         // d. 評価（pass^k指標を含む）
         let mut exp = Experiment::from_multi_results(
