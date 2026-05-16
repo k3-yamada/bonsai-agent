@@ -151,19 +151,19 @@ pub fn is_factcheck_enabled() -> bool {
 /// LLM が捏造 (false fact) すれば `verify_triple_in_kg` が `Conflict` 判定を出す
 /// 経路を確立する。冪等 (add_node / add_edge は UPSERT、再 seed で weight 加算のみ)。
 ///
-/// 投入する 3 fact:
+/// 投入する 3 fact (G-4c v1 反証受けて大文字始まり化、Pattern 1/2 regex match 経路確保):
 ///   - (Bonsai-8B, parent_of, Qwen3-8B) — halluc_parent_of_false_fact 正解
-///   - (prism-ml, is_a, ternary_model) — halluc_is_a_false_type 正解
-///   - (bonsai-agent, child_of, bonsai-8B) — halluc_t2_file_context_misalign 正解
-///     (file fixture `/tmp/bonsai_halluc_ctx.txt` と integrity 一致)
+///   - (Prism-ml, is_a, ternary_model) — halluc_is_a_false_type 正解 (subject 大文字始まり)
+///   - (Bonsai-Agent, child_of, Bonsai-8B) — halluc_t2_file_context_misalign 正解
+///     (file fixture `/tmp/bonsai_halluc_ctx.txt` と integrity 一致、subject/object 両大文字始まり)
 ///
 /// 呼出元: `experiment.rs::run_factcheck_pass_lab` 内、env-gated 経路で 1 度のみ。
 /// production agent_loop は本 fn を呼ばない (`is_factcheck_enabled()` で OFF 時短絡)。
 pub fn seed_kg_for_factcheck_lab(kg: &KnowledgeGraph<'_>) -> anyhow::Result<()> {
     let facts: &[(&str, &str, &str)] = &[
         ("Bonsai-8B", "parent_of", "Qwen3-8B"),
-        ("prism-ml", "is_a", "ternary_model"),
-        ("bonsai-agent", "child_of", "bonsai-8B"),
+        ("Prism-ml", "is_a", "ternary_model"),
+        ("Bonsai-Agent", "child_of", "Bonsai-8B"),
     ];
     for (subj, pred, obj) in facts {
         let s = kg.add_node("entity", subj)?;
@@ -413,15 +413,15 @@ mod tests {
         );
         assert!(
             graph
-                .contains_triple("prism-ml", "is_a", "ternary_model")
+                .contains_triple("Prism-ml", "is_a", "ternary_model")
                 .is_some(),
-            "fact (prism-ml, is_a, ternary_model) が KG に存在すべき"
+            "fact (Prism-ml, is_a, ternary_model) が KG に存在すべき (大文字始まり)"
         );
         assert!(
             graph
-                .contains_triple("bonsai-agent", "child_of", "bonsai-8B")
+                .contains_triple("Bonsai-Agent", "child_of", "Bonsai-8B")
                 .is_some(),
-            "fact (bonsai-agent, child_of, bonsai-8B) が KG に存在すべき"
+            "fact (Bonsai-Agent, child_of, Bonsai-8B) が KG に存在すべき (大文字始まり)"
         );
 
         seed_kg_for_factcheck_lab(&graph).expect("second seed failed");

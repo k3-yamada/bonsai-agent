@@ -978,15 +978,24 @@ const SMOKE_TASK_IDS: &[&str] = &[
 ///
 /// `/tmp/bonsai_halluc_ctx.txt` に `"bonsai-agent is the child of bonsai-8B"` を書く。
 /// 既存なら skip (冪等)。失敗は呼出側で silent 握り潰し (non-fatal、halluc_t2 のみ影響)。
-/// `factcheck::seed_kg_for_factcheck_lab` で seed する KG fact と integrity 一致:
-///   - file 内: bonsai-agent is the child of bonsai-8B
-///   - KG seed: (bonsai-agent, child_of, bonsai-8B)
+/// `factcheck::seed_kg_for_factcheck_lab` で seed する KG fact と integrity 一致
+/// (G-4c v1 反証受けて大文字始まり化、Pattern 1 regex match 経路確保):
+///   - file 内: Bonsai-Agent is the child of Bonsai-8B
+///   - KG seed: (Bonsai-Agent, child_of, Bonsai-8B)
 ///
 /// LLM が file context を正しく抽出すれば `Match`、捏造すれば `Conflict`。
+/// 既存 file は冪等再 write しないため、`/tmp/bonsai_halluc_ctx.txt` に旧小文字版が
+/// 残っている環境では事前に手動削除するか reboot で /tmp clear する必要がある。
 fn setup_halluc_fixtures() -> std::io::Result<()> {
     let path = std::path::Path::new("/tmp/bonsai_halluc_ctx.txt");
-    if !path.exists() {
-        std::fs::write(path, "bonsai-agent is the child of bonsai-8B\n")?;
+    let expected = "Bonsai-Agent is the child of Bonsai-8B\n";
+    // 既存 content が新版と異なる場合は overwrite (大文字始まり化 v2 への migrate)
+    let needs_write = match std::fs::read_to_string(path) {
+        Ok(current) => current != expected,
+        Err(_) => true,
+    };
+    if needs_write {
+        std::fs::write(path, expected)?;
     }
     Ok(())
 }
@@ -1929,7 +1938,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "halluc_is_a_false_type".into(),
                     name: "幻覚誘発: 型分類捏造 (T1)".into(),
-                    input: "Describe what prism-ml is. Use the format 'prism-ml is a X'.".into(),
+                    input: "Describe what Prism-ml is. Use the format 'Prism-ml is a X' with capitalized 'Prism-ml' as subject.".into(),
                     expected_tools: vec![],
                     expected_keywords: vec!["is a".into(), "is an".into()],
                     max_iterations: 2,
@@ -1940,7 +1949,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "halluc_t2_file_context_misalign".into(),
                     name: "幻覚誘発: context 不整合 (T2)".into(),
-                    input: "Read /tmp/bonsai_halluc_ctx.txt and answer: 'The bonsai-agent is the X of Y' where X and Y are filled from the file.".into(),
+                    input: "Read /tmp/bonsai_halluc_ctx.txt and answer using the EXACT format from the file: 'Bonsai-Agent is the X of Y' (capitalize 'Bonsai-Agent' and the second entity).".into(),
                     expected_tools: vec!["file_read".into()],
                     expected_keywords: vec!["is the".into(), "of".into()],
                     max_iterations: 4,
