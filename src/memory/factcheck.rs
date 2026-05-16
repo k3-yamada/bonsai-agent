@@ -23,8 +23,10 @@ use std::sync::LazyLock;
 /// 起源: 項目 236 G-5b + 項目 237 G-6b 副次 finding = hallucination task の dash entity
 /// ("Bonsai-8B" 等) が旧 regex で reject されて extraction recall を不当に下げていた。
 static RE_IS_THE_OF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Z][A-Za-z0-9_\-]*)\s+is\s+the\s+([a-z][a-z_]*)\s+of\s+([A-Z][A-Za-z0-9_\-]*)")
-        .expect("static regex must compile")
+    Regex::new(
+        r"\b([A-Z][A-Za-z0-9_\-]*)\s+is\s+the\s+([a-z][a-z_]*)\s+of\s+([A-Z][A-Za-z0-9_\-]*)",
+    )
+    .expect("static regex must compile")
 });
 
 /// "X is a Y" pattern (e.g., "Bonsai-8B is a model")。
@@ -378,7 +380,11 @@ mod tests {
     #[test]
     fn t_extract_triples_pattern_1_subject_with_dash() {
         let triples = extract_triples_from_text("Bonsai-8B is the parent of Llama");
-        assert_eq!(triples.len(), 1, "dash subject Pattern 1 で 1 件 extract されるべき");
+        assert_eq!(
+            triples.len(),
+            1,
+            "dash subject Pattern 1 で 1 件 extract されるべき"
+        );
         assert_eq!(triples[0].subject, "Bonsai-8B");
         assert_eq!(triples[0].predicate, "parent_of");
         assert_eq!(triples[0].object, "Llama");
@@ -390,7 +396,11 @@ mod tests {
     #[test]
     fn t_extract_triples_pattern_1_object_with_dash() {
         let triples = extract_triples_from_text("Alice is the parent of Bob-Junior");
-        assert_eq!(triples.len(), 1, "dash object Pattern 1 で 1 件 extract されるべき");
+        assert_eq!(
+            triples.len(),
+            1,
+            "dash object Pattern 1 で 1 件 extract されるべき"
+        );
         assert_eq!(triples[0].subject, "Alice");
         assert_eq!(triples[0].predicate, "parent_of");
         assert_eq!(triples[0].object, "Bob-Junior");
@@ -401,7 +411,11 @@ mod tests {
     #[test]
     fn t_extract_triples_pattern_1_both_with_dash() {
         let triples = extract_triples_from_text("Bonsai-8B is the parent of Llama-3");
-        assert_eq!(triples.len(), 1, "両側 dash Pattern 1 で 1 件 extract されるべき");
+        assert_eq!(
+            triples.len(),
+            1,
+            "両側 dash Pattern 1 で 1 件 extract されるべき"
+        );
         assert_eq!(triples[0].subject, "Bonsai-8B");
         assert_eq!(triples[0].predicate, "parent_of");
         assert_eq!(triples[0].object, "Llama-3");
