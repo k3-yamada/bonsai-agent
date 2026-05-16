@@ -16,11 +16,14 @@ use crate::memory::graph::KnowledgeGraph;
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// "X is the Y of Z" pattern (e.g., "Alice is the parent of Bob")。
+/// "X is the Y of Z" pattern (e.g., "Alice is the parent of Bob", "Bonsai-8B is the parent of Llama-3")。
 /// 大文字始まり英単語の subject/object、小文字 predicate を要件とする保守的 pattern。
 /// LLM 出力の典型的英語表現に focus、日本語混在は Phase 5 別 plan。
+/// 項目 239 (Pattern 1 regex dash 対応): subject/object に dash (`-`) を許容、Pattern 2 (`RE_IS_A`) と統一。
+/// 起源: 項目 236 G-5b + 項目 237 G-6b 副次 finding = hallucination task の dash entity
+/// ("Bonsai-8B" 等) が旧 regex で reject されて extraction recall を不当に下げていた。
 static RE_IS_THE_OF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b([A-Z][A-Za-z0-9_]*)\s+is\s+the\s+([a-z][a-z_]*)\s+of\s+([A-Z][A-Za-z0-9_]*)")
+    Regex::new(r"\b([A-Z][A-Za-z0-9_\-]*)\s+is\s+the\s+([a-z][a-z_]*)\s+of\s+([A-Z][A-Za-z0-9_\-]*)")
         .expect("static regex must compile")
 });
 
@@ -365,6 +368,43 @@ mod tests {
             triples.is_empty(),
             "小文字始まり subject は extract されないべき (高 precision 保証)"
         );
+    }
+
+    /// 項目 239 候補 (Pattern 1 regex dash 対応) — subject に dash 含む場合の Pattern 1 抽出。
+    /// 期待: "Bonsai-8B is the parent of Llama" → Triple { Bonsai-8B, parent_of, Llama, 0.85 }
+    /// 起源: 項目 236 G-5b + 項目 237 G-6b で hallucination task の dash entity ("Bonsai-8B" 等) が
+    /// Pattern 1 (`RE_IS_THE_OF` `[A-Z][A-Za-z0-9_]*`) で reject される問題 (Pattern 2 `RE_IS_A` は
+    /// `[A-Za-z0-9_\-]*` で dash 許容済)、本 fix で extraction recall 向上を Lab v20+ で計測。
+    #[test]
+    fn t_extract_triples_pattern_1_subject_with_dash() {
+        let triples = extract_triples_from_text("Bonsai-8B is the parent of Llama");
+        assert_eq!(triples.len(), 1, "dash subject Pattern 1 で 1 件 extract されるべき");
+        assert_eq!(triples[0].subject, "Bonsai-8B");
+        assert_eq!(triples[0].predicate, "parent_of");
+        assert_eq!(triples[0].object, "Llama");
+        assert!((triples[0].confidence - 0.85).abs() < f64::EPSILON);
+    }
+
+    /// 項目 239 候補 (Pattern 1 regex dash 対応) — object に dash 含む場合の Pattern 1 抽出。
+    /// 期待: "Alice is the parent of Bob-Junior" → Triple { Alice, parent_of, Bob-Junior, 0.85 }
+    #[test]
+    fn t_extract_triples_pattern_1_object_with_dash() {
+        let triples = extract_triples_from_text("Alice is the parent of Bob-Junior");
+        assert_eq!(triples.len(), 1, "dash object Pattern 1 で 1 件 extract されるべき");
+        assert_eq!(triples[0].subject, "Alice");
+        assert_eq!(triples[0].predicate, "parent_of");
+        assert_eq!(triples[0].object, "Bob-Junior");
+    }
+
+    /// 項目 239 候補 (Pattern 1 regex dash 対応) — subject + object 両方 dash の Pattern 1 抽出。
+    /// 期待: "Bonsai-8B is the parent of Llama-3" → Triple { Bonsai-8B, parent_of, Llama-3, 0.85 }
+    #[test]
+    fn t_extract_triples_pattern_1_both_with_dash() {
+        let triples = extract_triples_from_text("Bonsai-8B is the parent of Llama-3");
+        assert_eq!(triples.len(), 1, "両側 dash Pattern 1 で 1 件 extract されるべき");
+        assert_eq!(triples[0].subject, "Bonsai-8B");
+        assert_eq!(triples[0].predicate, "parent_of");
+        assert_eq!(triples[0].object, "Llama-3");
     }
 
     /// Phase 3 Refactor — Pattern 2 ("X is a Y") の独立動作検証。
