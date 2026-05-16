@@ -1620,6 +1620,10 @@ fn run_hindsight_pass(store: &MemoryStore, since_event_id: i64) -> Result<Hindsi
 ///
 /// non-fatal: 任意のエラーは呼出側で `Warn` log にして握り潰す (Lab 結果を破壊しない)。
 /// `since_event_id` は `run_hindsight_pass` と共有 = 同じ Lab cycle 開始時 snapshot。
+///
+/// 項目 235 拡張: `BONSAI_FACTCHECK_ALL_TRAJECTORIES=1` で failed + successful trajectory を
+/// chain で集計 + min_steps=0 に緩和し halluc task (tool_success_rate=1.0 / 0-1 tool call)
+/// の `AssistantMessage` も検証対象に含める。env unset で従来挙動 100% 互換 (Plan §3 §6)。
 fn run_factcheck_pass_lab(store: &MemoryStore, since_event_id: i64) -> Result<FactCheckSummary> {
     let started = std::time::Instant::now();
     let conn = store.conn();
@@ -1637,10 +1641,28 @@ fn run_factcheck_pass_lab(store: &MemoryStore, since_event_id: i64) -> Result<Fa
         );
     }
 
-    // failed trajectory から AssistantMessage event_data の content text を収集
-    let failed = event_store.extract_failed_trajectories_since_id(since_event_id, 0.8, 2)?;
+    // 項目 235: env opt-in で trajectory selection を拡張 (halluc SUCCESS-by-design 対応)。
+    // env unset (default) → 従来 failed-only / min_steps=2 完全互換 (G-4c v1/v2 と同経路)。
+    // env=1 → failed + successful chain + min_steps=0 で halluc 0/1-tool session も対象化
+    // (`.claude/plan/factcheck-trajectory-scope-expansion.md` §2.1 案 A + §1.3 min_steps 補完)。
+    let all_trajectories = factcheck::is_all_trajectories_enabled();
+    let min_steps = if all_trajectories { 0 } else { 2 };
+    let mut candidates = event_store.extract_failed_trajectories_since_id(
+        since_event_id,
+        0.8, // max_tool_success_rate (failed-side cap、env opt-in でも保持)
+        min_steps,
+    )?;
+    if all_trajectories {
+        let successful = event_store.extract_successful_trajectories_since_id(
+            since_event_id,
+            0.8, // min_tool_success_rate (successful-side floor、failed と互いに排他)
+            min_steps,
+        )?;
+        candidates.extend(successful);
+    }
+
     let mut texts: Vec<String> = Vec::new();
-    for candidate in &failed {
+    for candidate in &candidates {
         let events = event_store.replay(&candidate.session_id)?;
         for ev in events {
             if ev.event_type == "assistant_message" {
@@ -3109,6 +3131,194 @@ mod tests {
             summary.skills_promoted <= 3,
             "max_promote=3 cap で skills_promoted={} <= 3",
             summary.skills_promoted
+        );
+    }
+
+    // ===== 項目 235: factcheck trajectory scope expansion tests =====
+    // (`.claude/plan/factcheck-trajectory-scope-expansion.md` Phase 1 Red + Phase 2 Green atomic)
+    //
+    // Plan A G-4c v1/v2 反証 (項目 234) で確定した halluc task の SUCCESS-by-design 構造的排除を
+    // env opt-in (`BONSAI_FACTCHECK_ALL_TRAJECTORIES=1`) で解消。env unset で従来 failed-only +
+    // min_steps=2 完全互換、env=1 で failed + successful chain + min_steps=0 拡張。
+    // env mutation race 回避は `factcheck::FACTCHECK_ALL_ENV_TEST_LOCK` (cross-file shared) で
+    // serialize (FRONTIER_TEST_LOCK / SMOKE_TEST_LOCK が file-local 単独なのと異なり、本 env は
+    // factcheck.rs/experiment.rs 両 file の test が触るため crate-level shared mutex 必須)。
+
+    fn reset_factcheck_all_env() {
+        unsafe { std::env::remove_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES") };
+    }
+
+    /// 1 session 分の events を append する factcheck test helper。
+    /// `seed_session_events` (tool 専用) と異なり AssistantMessage event も追加できる。
+    fn seed_session_with_assistant(
+        es: &EventStore,
+        session_id: &str,
+        user_content: &str,
+        tool_results: &[(&str, bool)],
+        assistant_messages: &[&str],
+    ) {
+        es.append(
+            session_id,
+            &crate::agent::event_store::EventType::SessionStart,
+            "{}",
+            None,
+        )
+        .unwrap();
+        let user_payload = format!(r#"{{"content":"{}"}}"#, user_content);
+        es.append(
+            session_id,
+            &crate::agent::event_store::EventType::UserMessage,
+            &user_payload,
+            Some(0),
+        )
+        .unwrap();
+        for (i, (tool, success)) in tool_results.iter().enumerate() {
+            let start = format!(r#"{{"tool":"{}"}}"#, tool);
+            es.append(
+                session_id,
+                &crate::agent::event_store::EventType::ToolCallStart,
+                &start,
+                Some(i),
+            )
+            .unwrap();
+            let end = format!(r#"{{"tool":"{}","success":{}}}"#, tool, success);
+            es.append(
+                session_id,
+                &crate::agent::event_store::EventType::ToolCallEnd,
+                &end,
+                Some(i),
+            )
+            .unwrap();
+        }
+        for (i, msg) in assistant_messages.iter().enumerate() {
+            let payload = serde_json::json!({ "content": msg }).to_string();
+            es.append(
+                session_id,
+                &crate::agent::event_store::EventType::AssistantMessage,
+                &payload,
+                Some(i),
+            )
+            .unwrap();
+        }
+        es.append(
+            session_id,
+            &crate::agent::event_store::EventType::SessionEnd,
+            "{}",
+            None,
+        )
+        .unwrap();
+    }
+
+    /// (Phase 1+2 atomic) env unset で従来 failed-only 完全互換。
+    /// 期待: success_rate=1.0 + 1 tool call の SUCCESS session は trajectory から
+    /// 除外され、AssistantMessage に triple 含有でも factcheck total=0。
+    /// (= G-4c v1/v2 と同経路、項目 234 反証の再現)。
+    ///
+    /// 注: regex `RE_IS_A` のみ subject/object に dash を許容するため、KG seed の
+    /// `(Prism-ml, is_a, ternary_model)` を使う Pattern 2 経路で検証 (Pattern 1
+    /// `RE_IS_THE_OF` の dash 対応は本 plan scope 外、§9 別 plan)。
+    #[test]
+    fn t_factcheck_default_failed_only_backwards_compat() {
+        let _guard = crate::memory::factcheck::FACTCHECK_ALL_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_factcheck_all_env();
+
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        seed_session_with_assistant(
+            &es,
+            "halluc_like_success",
+            "halluc-like task",
+            &[("file_read", true)], // 1 tool, success_rate=1.0 → halluc_t2 と同型
+            &["Prism-ml is a ternary_model."], // KG seed と一致 (Pattern 2)
+        );
+        let summary = run_factcheck_pass_lab(&store, 0).unwrap();
+        // env unset → min_steps=2 で 1-tool session 排除、AssistantMessage 未走査で total=0。
+        assert_eq!(
+            summary.total, 0,
+            "env unset で halluc-like SUCCESS session は trajectory に入らないべき (項目 234 反証再現)"
+        );
+    }
+
+    /// (Phase 1+2 atomic) env=1 で SUCCESS task の AssistantMessage から triple 抽出 + Match 検証。
+    /// 期待: success_rate=1.0 + 1 tool call の SUCCESS session でも、AssistantMessage に
+    /// (Prism-ml, is_a, ternary_model) 含む文があれば factcheck pass が triple 抽出 + KG seed
+    /// (`seed_kg_for_factcheck_lab` が自動投入する 3 fact) と Match 判定。
+    /// Pattern 2 `RE_IS_A` 経由 (dash 対応)。
+    #[test]
+    fn t_factcheck_all_trajectories_extracts_from_success_assistant_message() {
+        let _guard = crate::memory::factcheck::FACTCHECK_ALL_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_factcheck_all_env();
+        unsafe { std::env::set_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES", "1") };
+
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        // halluc_is_a_false_type と同型の SUCCESS session (1 file_read OK)
+        seed_session_with_assistant(
+            &es,
+            "halluc_t2_like_success",
+            "halluc t2-like",
+            &[("file_read", true)],
+            &["Prism-ml is a ternary_model."],
+        );
+        let summary = run_factcheck_pass_lab(&store, 0).unwrap();
+        reset_factcheck_all_env();
+
+        // KG は `seed_kg_for_factcheck_lab` で seed 済 = (Prism-ml, is_a, ternary_model) Match 期待。
+        assert!(
+            summary.total >= 1,
+            "env=1 で SUCCESS session の AssistantMessage から triple 抽出されるべき (total={})",
+            summary.total
+        );
+        assert!(
+            summary.matched >= 1,
+            "KG seed と一致する triple は Match 判定されるべき (matched={})",
+            summary.matched
+        );
+    }
+
+    /// (Phase 1+2 atomic) env=1 で halluc 0-tool session も対象化 (min_steps=0 緩和の確証)。
+    /// 期待: tool 0 件 (`tool_success_rate=0.0`) の session でも、AssistantMessage に
+    /// triple 含有なら factcheck pass が抽出 + Conflict 判定。
+    /// (Prism-ml, is_a, language_model) は KG seed (Prism-ml, is_a, ternary_model) と
+    /// subject+predicate 同一 + object 不一致で Conflict 発火 = G-4c effectiveness 経路。
+    ///
+    /// 注: tool 0 件 → `build_trajectory_from_events` で `tool_success_rate=0.0`
+    /// (event_store.rs:328-332) → `extract_failed_trajectories_since_id` の
+    /// `< 0.8` filter を通過 (env=1 で min_steps=0 拡張)。
+    #[test]
+    fn t_factcheck_all_trajectories_detects_conflict_in_zero_tool_session() {
+        let _guard = crate::memory::factcheck::FACTCHECK_ALL_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_factcheck_all_env();
+        unsafe { std::env::set_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES", "1") };
+
+        let store = MemoryStore::in_memory().unwrap();
+        let es = EventStore::new(store.conn());
+        // halluc_is_a_false_type と同型: tool 0 件 session、AssistantMessage に矛盾 fact
+        seed_session_with_assistant(
+            &es,
+            "halluc_zero_tool_success",
+            "halluc zero-tool",
+            &[], // tool 0 件 → total_steps=0、min_steps=0 で extract される (env=1)
+            &["Prism-ml is a language_model."], // KG seed (is_a, ternary_model) と矛盾 → Conflict
+        );
+        let summary = run_factcheck_pass_lab(&store, 0).unwrap();
+        reset_factcheck_all_env();
+
+        assert!(
+            summary.total >= 1,
+            "env=1 + min_steps=0 で 0-tool session の AssistantMessage が走査されるべき (total={})",
+            summary.total
+        );
+        assert!(
+            summary.conflicting >= 1,
+            "KG seed (is_a, ternary_model) と矛盾する (is_a, language_model) は Conflict 判定 (conflicting={})",
+            summary.conflicting
         );
     }
 

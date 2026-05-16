@@ -145,6 +145,33 @@ pub fn is_factcheck_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// 項目 235 候補: 全 trajectory 拡張モードの env opt-in 判定
+/// (`BONSAI_FACTCHECK_ALL_TRAJECTORIES=1`、default OFF)。
+///
+/// Plan A G-4c v1/v2 反証 finding (項目 234) = halluc task は SUCCESS-by-design
+/// (tool_success_rate=1.0 + total_steps<2) で `extract_failed_trajectories_since_id`
+/// から構造的排除される問題への対応。本 env ON 時、`run_factcheck_pass_lab` は
+/// failed + successful trajectory を chain で集計 + min_steps=0 で halluc 0-tool
+/// session も対象化する (`.claude/plan/factcheck-trajectory-scope-expansion.md` §2.1)。
+///
+/// production default OFF (env unset で従来 failed-only / min_steps=2 完全互換)、
+/// Lab v20 effectiveness 検証 (Pearson r ≥ 0.3 paired t-test) の起動前提として
+/// ON 化、production agent_loop は本 path に到達しない。
+pub fn is_all_trajectories_enabled() -> bool {
+    std::env::var("BONSAI_FACTCHECK_ALL_TRAJECTORIES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// テスト用 env mutex (`BONSAI_FACTCHECK_ALL_TRAJECTORIES` 操作の cross-file 排他)。
+///
+/// factcheck.rs `t_factcheck_all_trajectories_env_opt_in_default_off` と
+/// experiment.rs `t_factcheck_*` 系 test の両方が同 env を mutate するため、
+/// crate-level の単一 mutex で serialize する。
+/// 同 pattern: 項目 226 CRITIC_TEST_LOCK / 項目 229 FRONTIER_TEST_LOCK (file-local 単独)。
+#[cfg(test)]
+pub(crate) static FACTCHECK_ALL_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Plan A G-4c 用に KG に 3 fact を投入する seed 関数 (Lab cycle 開始時のみ呼出)。
 ///
 /// halluc benchmark task 3 件 (benchmark.rs:halluc_*) の正解 fact を KG に登録し、
@@ -446,5 +473,34 @@ mod tests {
         assert!(is_factcheck_enabled());
 
         unsafe { std::env::remove_var("BONSAI_KG_FACTCHECK_ENABLED") };
+    }
+
+    /// 項目 235 — `BONSAI_FACTCHECK_ALL_TRAJECTORIES` env opt-in default OFF。
+    /// 期待: 未設定で false、`"1"` / `"true"` (case-insensitive) で true。
+    /// Cerememory 三本柱 (217-219) + 既存 `t_factcheck_env_opt_in_default_off` と同 pattern。
+    ///
+    /// 注: experiment.rs `t_factcheck_*` 系 test と同 env を共有するため
+    /// `FACTCHECK_ALL_ENV_TEST_LOCK` で cross-file serialize。
+    #[test]
+    fn t_factcheck_all_trajectories_env_opt_in_default_off() {
+        let _g = FACTCHECK_ALL_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES") };
+        assert!(!is_all_trajectories_enabled(), "未設定で false");
+
+        unsafe { std::env::set_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES", "1") };
+        assert!(is_all_trajectories_enabled(), "\"1\" で true");
+
+        unsafe { std::env::set_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES", "TRUE") };
+        assert!(
+            is_all_trajectories_enabled(),
+            "case-insensitive \"TRUE\" で true"
+        );
+
+        unsafe { std::env::set_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES", "0") };
+        assert!(!is_all_trajectories_enabled(), "\"0\" で false");
+
+        unsafe { std::env::remove_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES") };
     }
 }
