@@ -10,6 +10,7 @@ use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, MultiFileEditCycleDetector, ParseErrorDetail,
     RecoveryAction, decide_recovery,
 };
+use crate::agent::event_store::EventType;
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::validate::{Severity, validate_tool_call};
@@ -17,6 +18,7 @@ use crate::tools::ToolResultCache;
 use crate::tools::detect_task_type;
 
 use super::config::inference_for_task;
+use super::core::emit_event;
 use super::state::{StepContext, StepOutcome};
 use super::support::build_answer;
 
@@ -109,12 +111,31 @@ pub fn execute_step(
     if parsed.tool_calls.is_empty() {
         let answer = build_answer(&parsed);
         session.add_message(Message::assistant(&answer));
+        // 項目 236: AssistantMessage event 発行 — Plan A KG factcheck (項目 230) +
+        // trajectory scope expansion (項目 235) の 3 段配線最終層。event_data 形式は
+        // advisor_inject.rs:524-525 test fixture と同型 `{"content": "..."}`。
+        emit_event(
+            ctx.store,
+            &session.id,
+            &EventType::AssistantMessage,
+            &serde_json::json!({ "content": &answer }).to_string(),
+            Some(attempt),
+        );
         return Ok(StepOutcome::FinalAnswer(answer));
     }
 
     // 5. ツール呼び出し実行（並列対応）
     let assistant_text = result.text.clone();
     session.add_message(Message::assistant(&assistant_text));
+    // 項目 236: AssistantMessage event 発行 — tool call 含む turn でも LLM の自然言語
+    // 応答 (factcheck の triple extract 対象) を event flow に保存する。
+    emit_event(
+        ctx.store,
+        &session.id,
+        &EventType::AssistantMessage,
+        &serde_json::json!({ "content": &assistant_text }).to_string(),
+        Some(attempt),
+    );
 
     let known = ctx.tools.known_names();
     let mut validated: Vec<ValidatedCall<'_>> = Vec::new();

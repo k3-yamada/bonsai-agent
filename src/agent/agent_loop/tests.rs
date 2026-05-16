@@ -1491,3 +1491,178 @@ fn test_run_agent_loop_emits_events() {
         "成功率100% (失敗なし)"
     );
 }
+
+// ===== 項目 236: AssistantMessage event emit (factcheck Plan A 第 2 層 fix) =====
+//
+// production agent_loop は SessionStart / UserMessage / ToolCallStart / ToolCallEnd /
+// SessionEnd を emit するが LLM 応答 (AssistantMessage event) だけ event flow に
+// 不在で、Plan A KG factcheck (項目 230) + trajectory scope expansion (項目 235)
+// の効力をゼロにしていた (G-5b 実機 evidence、項目 236 真因)。
+// 本テスト群は production agent_loop で AssistantMessage event が emit されることを
+// 検証 (TDD strict Phase 1 Red、Phase 2 Green で step.rs に emit hook 追加)。
+
+/// 項目 236 P1 Red 1: direct answer (tool 不要) で AssistantMessage event が 1 件以上 emit
+#[test]
+fn test_run_agent_loop_emits_assistant_message_event_after_direct_answer() {
+    use crate::agent::event_store::EventStore;
+
+    let store = MemoryStore::in_memory().expect("in-memory store");
+    let mock = MockLlmBackend::single("東京の天気は晴れです。");
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let _result = run_agent_loop(
+        "天気は？",
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        Some(&store),
+    )
+    .expect("agent_loop");
+
+    let es = EventStore::new(store.conn());
+    let sessions = es.list_sessions().expect("list_sessions");
+    assert_eq!(sessions.len(), 1, "1セッション");
+    let events = es.replay(&sessions[0]).expect("replay");
+    let assistant_count = events
+        .iter()
+        .filter(|e| e.event_type == "assistant_message")
+        .count();
+    assert!(
+        assistant_count >= 1,
+        "AssistantMessage event >= 1 件 emit 必須 (項目 236 Plan A 前提)、実際={assistant_count}"
+    );
+}
+
+/// 項目 236 P1 Red 2: tool 呼出 + 最終回答 (2 LLM turn) で AssistantMessage event 2 件
+#[test]
+fn test_run_agent_loop_emits_assistant_message_event_with_tool_calls() {
+    use crate::agent::event_store::EventStore;
+
+    let store = MemoryStore::in_memory().expect("in-memory store");
+    let mock = MockLlmBackend::new(vec![
+        r#"<tool_call>{"name":"echo","arguments":{"text":"hello"}}</tool_call>"#.to_string(),
+        "ツール結果: hello".to_string(),
+    ]);
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let _result = run_agent_loop(
+        "echo test",
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        Some(&store),
+    )
+    .expect("agent_loop");
+
+    let es = EventStore::new(store.conn());
+    let sessions = es.list_sessions().expect("list_sessions");
+    let events = es.replay(&sessions[0]).expect("replay");
+    let assistant_count = events
+        .iter()
+        .filter(|e| e.event_type == "assistant_message")
+        .count();
+    assert_eq!(
+        assistant_count, 2,
+        "2 LLM turn (tool 呼出 + 最終回答) で AssistantMessage event 2 件 emit 必須、実際={assistant_count}"
+    );
+}
+
+/// 項目 236 P1 Red 3: event_data が JSON `{"content": "..."}` schema (test fixture と同型)
+#[test]
+fn test_assistant_message_event_data_contains_content_field() {
+    use crate::agent::event_store::EventStore;
+
+    let store = MemoryStore::in_memory().expect("in-memory store");
+    let mock = MockLlmBackend::single("こんにちは、今日は晴れです。");
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let _result = run_agent_loop(
+        "挨拶して",
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        Some(&store),
+    )
+    .expect("agent_loop");
+
+    let es = EventStore::new(store.conn());
+    let sessions = es.list_sessions().expect("list_sessions");
+    let events = es.replay(&sessions[0]).expect("replay");
+    let asst_event = events
+        .iter()
+        .find(|e| e.event_type == "assistant_message")
+        .expect("AssistantMessage event 必須");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&asst_event.event_data).expect("event_data は valid JSON");
+    let content = parsed
+        .get("content")
+        .and_then(|v| v.as_str())
+        .expect("event_data.content field 必須 (advisor_inject.rs:525 test fixture と同型)");
+    assert!(
+        content.contains("晴れ"),
+        "content に LLM 応答テキストが含まれる、実際={content}"
+    );
+}
+
+/// 項目 236 P1 Red 4: event の step_index が iteration と一致 (event 順序保証)
+#[test]
+fn test_assistant_message_event_step_index_matches_iteration() {
+    use crate::agent::event_store::EventStore;
+
+    let store = MemoryStore::in_memory().expect("in-memory store");
+    let mock = MockLlmBackend::new(vec![
+        r#"<tool_call>{"name":"echo","arguments":{"text":"step0"}}</tool_call>"#.to_string(),
+        "完了".to_string(),
+    ]);
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let _result = run_agent_loop(
+        "echo step",
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        Some(&store),
+    )
+    .expect("agent_loop");
+
+    let es = EventStore::new(store.conn());
+    let sessions = es.list_sessions().expect("list_sessions");
+    let events = es.replay(&sessions[0]).expect("replay");
+    let asst_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.event_type == "assistant_message")
+        .collect();
+    assert_eq!(asst_events.len(), 2, "2 turn = 2 event");
+    assert_eq!(
+        asst_events[0].step_index,
+        Some(0),
+        "1st turn step_index=0、実際={:?}",
+        asst_events[0].step_index
+    );
+    assert_eq!(
+        asst_events[1].step_index,
+        Some(1),
+        "2nd turn step_index=1、実際={:?}",
+        asst_events[1].step_index
+    );
+}
