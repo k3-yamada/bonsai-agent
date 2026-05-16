@@ -145,6 +145,34 @@ pub fn is_factcheck_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Plan A G-4c 用に KG に 3 fact を投入する seed 関数 (Lab cycle 開始時のみ呼出)。
+///
+/// halluc benchmark task 3 件 (benchmark.rs:halluc_*) の正解 fact を KG に登録し、
+/// LLM が捏造 (false fact) すれば `verify_triple_in_kg` が `Conflict` 判定を出す
+/// 経路を確立する。冪等 (add_node / add_edge は UPSERT、再 seed で weight 加算のみ)。
+///
+/// 投入する 3 fact:
+///   - (Bonsai-8B, parent_of, Qwen3-8B) — halluc_parent_of_false_fact 正解
+///   - (prism-ml, is_a, ternary_model) — halluc_is_a_false_type 正解
+///   - (bonsai-agent, child_of, bonsai-8B) — halluc_t2_file_context_misalign 正解
+///     (file fixture `/tmp/bonsai_halluc_ctx.txt` と integrity 一致)
+///
+/// 呼出元: `experiment.rs::run_factcheck_pass_lab` 内、env-gated 経路で 1 度のみ。
+/// production agent_loop は本 fn を呼ばない (`is_factcheck_enabled()` で OFF 時短絡)。
+pub fn seed_kg_for_factcheck_lab(kg: &KnowledgeGraph<'_>) -> anyhow::Result<()> {
+    let facts: &[(&str, &str, &str)] = &[
+        ("Bonsai-8B", "parent_of", "Qwen3-8B"),
+        ("prism-ml", "is_a", "ternary_model"),
+        ("bonsai-agent", "child_of", "bonsai-8B"),
+    ];
+    for (subj, pred, obj) in facts {
+        let s = kg.add_node("entity", subj)?;
+        let o = kg.add_node("entity", obj)?;
+        kg.add_edge(s, o, pred, 1.0)?;
+    }
+    Ok(())
+}
+
 /// 複数テキストに対し triple 抽出 + KG 検証を一括実行し、集約 summary を返す。
 ///
 /// Lab cycle 末尾の AgentHER hook 直前で `failed_trajectories` 由来テキストを渡す想定
@@ -357,6 +385,51 @@ mod tests {
             result,
             FactCheckResult::Unknown,
             "subject 登録 + predicate 未関連 = Unknown (Conflict ではない)"
+        );
+    }
+
+    /// Phase 1 Red (Plan A G-4c) — `seed_kg_for_factcheck_lab` で 3 fact が冪等に
+    /// KG に投入される。
+    /// 起点: `.claude/plan/hallucination-inducing-benchmark-task.md` §4.1
+    /// 期待:
+    ///   - (Bonsai-8B, parent_of, Qwen3-8B)
+    ///   - (prism-ml, is_a, ternary_model)
+    ///   - (bonsai-agent, child_of, bonsai-8B)
+    ///
+    /// 2 回呼出で重複 add_edge が weight 加算で冪等 (UPSERT 仕様)、行数増えない。
+    /// Phase 2 Green で `pub fn seed_kg_for_factcheck_lab` 実装後 PASS。
+    #[test]
+    fn t_seed_kg_for_halluc_tasks_populates_three_facts() {
+        let store = setup_db();
+        let graph = KnowledgeGraph::new(store.conn());
+
+        seed_kg_for_factcheck_lab(&graph).expect("seed failed");
+
+        assert!(
+            graph
+                .contains_triple("Bonsai-8B", "parent_of", "Qwen3-8B")
+                .is_some(),
+            "fact (Bonsai-8B, parent_of, Qwen3-8B) が KG に存在すべき"
+        );
+        assert!(
+            graph
+                .contains_triple("prism-ml", "is_a", "ternary_model")
+                .is_some(),
+            "fact (prism-ml, is_a, ternary_model) が KG に存在すべき"
+        );
+        assert!(
+            graph
+                .contains_triple("bonsai-agent", "child_of", "bonsai-8B")
+                .is_some(),
+            "fact (bonsai-agent, child_of, bonsai-8B) が KG に存在すべき"
+        );
+
+        seed_kg_for_factcheck_lab(&graph).expect("second seed failed");
+        assert!(
+            graph
+                .contains_triple("Bonsai-8B", "parent_of", "Qwen3-8B")
+                .is_some(),
+            "2 回 seed しても fact 検証可能 (冪等)"
         );
     }
 

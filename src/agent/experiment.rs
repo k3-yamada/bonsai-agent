@@ -1593,6 +1593,17 @@ fn run_factcheck_pass_lab(store: &MemoryStore, since_event_id: i64) -> Result<Fa
     let event_store = EventStore::new(conn);
     let graph = KnowledgeGraph::new(conn);
 
+    // Plan A G-4c: halluc benchmark task 3 件の正解 fact を KG に seed (冪等 UPSERT)。
+    // 失敗は warn log のみで Lab を継続 (non-fatal、`run_factcheck_pass` の検証は KG が
+    // 空でも `Unknown` 分類で意味ある metric を出すため、seed 失敗で短絡しない)。
+    if let Err(e) = factcheck::seed_kg_for_factcheck_lab(&graph) {
+        log_event(
+            LogLevel::Warn,
+            "lab.factcheck",
+            &format!("KG seed failed (non-fatal): {e}"),
+        );
+    }
+
     // failed trajectory から AssistantMessage event_data の content text を収集
     let failed = event_store.extract_failed_trajectories_since_id(since_event_id, 0.8, 2)?;
     let mut texts: Vec<String> = Vec::new();

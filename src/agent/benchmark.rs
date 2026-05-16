@@ -962,17 +962,37 @@ pub struct BenchmarkSuite {
 /// `smoke_tasks()` でこの ID に一致するタスクのみを返し、Lab 中の dev iteration
 /// を 1/8 に短縮する（k=3 で 15 ラン vs 120 ラン）。
 const SMOKE_TASK_IDS: &[&str] = &[
-    "file_read_simple",            // ToolUse: 単純ファイル読み取り
-    "multi_step_write_read",       // MultiStep: 書込→読込
-    "error_recovery",              // ErrorRecovery: エラー後の代替試行
-    "tool_selection_git",          // ToolSelection: 適切なツール選択
-    "code_gen_fizzbuzz",           // CodeGeneration: コード生成
+    "file_read_simple",                // ToolUse: 単純ファイル読み取り
+    "multi_step_write_read",           // MultiStep: 書込→読込
+    "error_recovery",                  // ErrorRecovery: エラー後の代替試行
+    "tool_selection_git",              // ToolSelection: 適切なツール選択
+    "code_gen_fizzbuzz",               // CodeGeneration: コード生成
     "smoke_failure_chain_pair", // ErrorRecovery (handoff 05-07g Phase 5 Phase 4): 2 step + 全 fail で AgentHER failed パス検証
     "smoke_partial_success_chain", // ErrorRecovery (handoff 05-07h 後継): 1 success + 1 fail = HSL relabel 候補 (relabels>=1 実証用)
+    "halluc_parent_of_false_fact", // Plan A G-4c (T1): KG seed と矛盾する parent_of 出力で Conflict 発火
+    "halluc_is_a_false_type",      // Plan A G-4c (T1): is_a 型分類で Conflict 発火
+    "halluc_t2_file_context_misalign", // Plan A G-4c (T2): file context vs LLM 出力の不整合検出
 ];
 
+/// halluc_t2_file_context_misalign task 用の file fixture を準備 (Plan A G-4c)。
+///
+/// `/tmp/bonsai_halluc_ctx.txt` に `"bonsai-agent is the child of bonsai-8B"` を書く。
+/// 既存なら skip (冪等)。失敗は呼出側で silent 握り潰し (non-fatal、halluc_t2 のみ影響)。
+/// `factcheck::seed_kg_for_factcheck_lab` で seed する KG fact と integrity 一致:
+///   - file 内: bonsai-agent is the child of bonsai-8B
+///   - KG seed: (bonsai-agent, child_of, bonsai-8B)
+///
+/// LLM が file context を正しく抽出すれば `Match`、捏造すれば `Conflict`。
+fn setup_halluc_fixtures() -> std::io::Result<()> {
+    let path = std::path::Path::new("/tmp/bonsai_halluc_ctx.txt");
+    if !path.exists() {
+        std::fs::write(path, "bonsai-agent is the child of bonsai-8B\n")?;
+    }
+    Ok(())
+}
+
 impl BenchmarkSuite {
-    /// 開発時用の smoke タスクセット（5 タスク）。
+    /// 開発時用の smoke タスクセット（10 タスク、Plan A G-4c で 7→10 拡張）。
     ///
     /// `default_tasks()` のうち `SMOKE_TASK_IDS` に一致するものだけを抽出。
     /// CI/Lab 本番では `default_tasks()`（40 タスク）を使い、開発時の高速確認に
@@ -1378,8 +1398,14 @@ impl BenchmarkSuite {
         }
     }
 
-    /// デフォルトのベンチマークタスクセット（40タスク）
+    /// デフォルトのベンチマークタスクセット (Plan A G-4c で 42→45 task に拡張)。
+    ///
+    /// `halluc_t2_file_context_misalign` task は `/tmp/bonsai_halluc_ctx.txt` に依存。
+    /// `setup_halluc_fixtures()` が冪等に file fixture を準備する。
     pub fn default_tasks() -> Self {
+        // halluc_t2_file_context_misalign 用 fixture (idempotent、failure は silent
+        // = halluc_t2 task が file_read で失敗するだけで他 task に影響なし)。
+        let _ = setup_halluc_fixtures();
         Self {
             tasks: vec![
                 BenchmarkTask {
@@ -1885,6 +1911,42 @@ impl BenchmarkSuite {
                     category: TaskCategory::ToolUse,
                     tier: TaskTier::Extended,
                     capability_tier: CapabilityTier::ToolSelection, // T3: 複数ツール候補から選択
+                },
+                // ── Plan A G-4c: hallucination-inducing task 3 件 (項目 230 後続) ──
+                // KG seed (`factcheck::seed_kg_for_factcheck_lab`) と組で `Conflict`
+                // 経路を実機で発火させる。Lab v20 paired t-test の前提タスク。
+                BenchmarkTask {
+                    id: "halluc_parent_of_false_fact".into(),
+                    name: "幻覚誘発: 親モデル捏造 (T1)".into(),
+                    input: "Bonsai-8B is the parent model of which AI system? Answer in one sentence using the format 'X is the parent of Y'.".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["parent".into(), "of".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+                BenchmarkTask {
+                    id: "halluc_is_a_false_type".into(),
+                    name: "幻覚誘発: 型分類捏造 (T1)".into(),
+                    input: "Describe what prism-ml is. Use the format 'prism-ml is a X'.".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["is a".into(), "is an".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+                BenchmarkTask {
+                    id: "halluc_t2_file_context_misalign".into(),
+                    name: "幻覚誘発: context 不整合 (T2)".into(),
+                    input: "Read /tmp/bonsai_halluc_ctx.txt and answer: 'The bonsai-agent is the X of Y' where X and Y are filled from the file.".into(),
+                    expected_tools: vec!["file_read".into()],
+                    expected_keywords: vec!["is the".into(), "of".into()],
+                    max_iterations: 4,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::SingleToolUse,
                 },
             ],
         }
@@ -2413,8 +2475,8 @@ mod tests {
         let suite = BenchmarkSuite::default_tasks();
         assert_eq!(
             suite.tasks.len(),
-            42,
-            "default = 42 (handoff 05-07h 後継で smoke_partial_success_chain 追加)"
+            45,
+            "default = 45 (Plan A G-4c で 42→45、halluc 3 task 追加)"
         );
     }
 
@@ -2436,8 +2498,8 @@ mod tests {
         let suite = BenchmarkSuite::core_tasks();
         assert_eq!(
             suite.tasks.len(),
-            24,
-            "core tier は 24 タスク (handoff 05-07h 後継で smoke_partial_success_chain 追加、tier=Core)"
+            27,
+            "core tier は 27 タスク (Plan A G-4c で 24→27、halluc 3 task 全 Core)"
         );
     }
 
@@ -2456,11 +2518,11 @@ mod tests {
         let all = BenchmarkSuite::default_tasks();
         assert_eq!(
             all.tasks.len(),
-            42,
-            "default は core(24) + extended(18) = 42"
+            45,
+            "default は core(27) + extended(18) = 45 (Plan A G-4c で halluc 3 追加)"
         );
         let ids: std::collections::HashSet<_> = all.tasks.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(ids.len(), 42, "重複なし");
+        assert_eq!(ids.len(), 45, "重複なし");
     }
 
     #[test]
@@ -2522,8 +2584,8 @@ mod tests {
         let default = BenchmarkSuite::default_tasks();
         assert_eq!(
             smoke.tasks.len(),
-            7,
-            "smoke は 7 タスク (handoff 05-07h 後継で smoke_partial_success_chain 追加)"
+            10,
+            "smoke は 10 タスク (Plan A G-4c で 7→10、halluc 3 task 追加)"
         );
         assert!(smoke.tasks.len() < default.tasks.len(), "smoke ⊂ default");
         // すべての smoke ID は default に含まれる
@@ -2536,6 +2598,101 @@ mod tests {
                 t.id
             );
         }
+    }
+
+    // --- Plan A G-4c Phase 1 Red: hallucination-inducing task 3 件 ---
+    // 起点: `.claude/plan/hallucination-inducing-benchmark-task.md` §4.1
+    // halluc_parent_of_false_fact (T1) / halluc_is_a_false_type (T1) /
+    // halluc_t2_file_context_misalign (T2) を default_tasks() に追加することで
+    // Plan A factcheck の `Conflict` 経路を実機で発火させる。
+    // Phase 2 Green で 3 task 実装、Phase 3 で既存 count assertion を更新。
+
+    /// Phase 1 Red — 3 halluc task が `default_tasks()` に存在する。
+    /// Phase 2 Green まで Red、3 task 未実装で `iter().any()` が false で FAIL。
+    #[test]
+    fn t_halluc_tasks_exist_in_default() {
+        let suite = BenchmarkSuite::default_tasks();
+        let halluc_ids = [
+            "halluc_parent_of_false_fact",
+            "halluc_is_a_false_type",
+            "halluc_t2_file_context_misalign",
+        ];
+        for id in &halluc_ids {
+            assert!(
+                suite.tasks.iter().any(|t| t.id == *id),
+                "halluc task '{id}' が default_tasks() に存在すべき (Plan A G-4c)"
+            );
+        }
+    }
+
+    /// Phase 1 Red — 3 halluc task は全て `TaskCategory::Reasoning`。
+    #[test]
+    fn t_halluc_tasks_use_reasoning_category() {
+        let suite = BenchmarkSuite::default_tasks();
+        let halluc_ids = [
+            "halluc_parent_of_false_fact",
+            "halluc_is_a_false_type",
+            "halluc_t2_file_context_misalign",
+        ];
+        for id in &halluc_ids {
+            let t = suite
+                .tasks
+                .iter()
+                .find(|t| t.id == *id)
+                .unwrap_or_else(|| panic!("halluc task '{id}' 未登録 (Phase 2 Green 待ち)"));
+            assert_eq!(
+                t.category,
+                TaskCategory::Reasoning,
+                "halluc task '{id}' は Reasoning category であるべき"
+            );
+        }
+    }
+
+    /// Phase 1 Red — 3 halluc task は全て `TaskTier::Core` (Lab v20 paired 対象)。
+    #[test]
+    fn t_halluc_tasks_tier_core() {
+        let suite = BenchmarkSuite::default_tasks();
+        let halluc_ids = [
+            "halluc_parent_of_false_fact",
+            "halluc_is_a_false_type",
+            "halluc_t2_file_context_misalign",
+        ];
+        for id in &halluc_ids {
+            let t = suite
+                .tasks
+                .iter()
+                .find(|t| t.id == *id)
+                .unwrap_or_else(|| panic!("halluc task '{id}' 未登録 (Phase 2 Green 待ち)"));
+            assert_eq!(
+                t.tier,
+                TaskTier::Core,
+                "halluc task '{id}' は Core tier であるべき (Lab v20 paired `BONSAI_BENCH_TIER=core` で hit)"
+            );
+        }
+    }
+
+    /// Phase 1 Red — halluc 3 task 追加で default count 42→45。
+    /// 既存 `test_expanded_tasks_count` / `test_default_equals_core_plus_extended` は
+    /// Phase 3 Refactor で 45 に更新する。
+    #[test]
+    fn t_halluc_task_count_default_is_45() {
+        let suite = BenchmarkSuite::default_tasks();
+        assert_eq!(
+            suite.tasks.len(),
+            45,
+            "default は 42 + 3 halluc = 45 task (Plan A G-4c)"
+        );
+    }
+
+    /// Phase 1 Red — halluc 3 task が全て Core tier なので core count 24→27。
+    #[test]
+    fn t_halluc_task_count_core_is_27() {
+        let suite = BenchmarkSuite::core_tasks();
+        assert_eq!(
+            suite.tasks.len(),
+            27,
+            "core は 24 + 3 halluc = 27 task (全 halluc Core tier、Lab v20 paired 対象)"
+        );
     }
 
     #[test]
@@ -3383,8 +3540,13 @@ mod tests {
         // 22→40タスクへの拡張を検証（Phase C: +18タスク）
         // handoff 05-07g Phase 5: smoke_failure_chain_pair 追加で 41
         // handoff 05-07h 後継: smoke_partial_success_chain 追加で 42
+        // Plan A G-4c (項目 230 後続): halluc 3 task 追加で 45
         let suite = BenchmarkSuite::default_tasks();
-        assert_eq!(suite.tasks.len(), 42, "タスク数は 42 であるべき");
+        assert_eq!(
+            suite.tasks.len(),
+            45,
+            "タスク数は 45 であるべき (Plan A G-4c)"
+        );
     }
 
     #[test]
