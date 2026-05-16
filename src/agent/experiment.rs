@@ -972,16 +972,39 @@ fn emit_frontier_log(result: &MultiRunBenchmarkResult, cycle_label: &str) {
 /// `from_multi_results` の `and_then(|t| t[N])` pattern と同形)。
 ///
 /// `baseline_tier_avg_scores=None` 時 (LADDER mode 未使用) は全 tier None で後方互換。
+///
+/// 項目 234 候補 (frontier-prescreen-carryover-fix) で 7→9 引数に拡張、9/7 clippy
+/// `too_many_arguments` を許容: pre-screen REJECT 行に対して baseline の段階的 carry-over
+/// (tier / frontier_bucket / frontier_inject) を select 可能化する設計選択
+/// (struct 集約 refactor は別 plan、`MultiRunBenchmarkResult` から都度取り出す既存
+/// pattern を維持する方が caller 1 箇所の変更で済み diff 最小)。
+#[allow(clippy::too_many_arguments)]
 fn build_prescreen_reject_experiment(
     experiment_id: String,
     mutation_type: MutationType,
     mutation_detail: String,
     baseline_score: f64,
     baseline_tier_avg_scores: Option<[Option<f64>; 6]>,
+    baseline_frontier_bucket_scores: &[(usize, f64)],
+    baseline_frontier_inject_scores: &[(usize, f64)],
     estimated_delta: f64,
     snapshot: HashMap<String, String>,
 ) -> Experiment {
     let tiers = baseline_tier_avg_scores;
+    // 項目 234 候補 (frontier-prescreen-carryover-fix): env-gated baseline carry-over。
+    // env unset で空 Vec = 後方互換 100% (項目 229 当初実装と同等)。
+    // env ON で baseline.frontier_* を carry-over = "no improvement" 仮定で
+    // pre-screen REJECT 行の Lab v19 解析 sample size を +20-30% 拡張する。
+    let frontier_bucket = if crate::agent::frontier::is_frontier_enabled() {
+        baseline_frontier_bucket_scores.to_vec()
+    } else {
+        Vec::new()
+    };
+    let frontier_inject = if crate::agent::frontier::is_frontier_inject_enabled() {
+        baseline_frontier_inject_scores.to_vec()
+    } else {
+        Vec::new()
+    };
     Experiment {
         experiment_id,
         mutation_type,
@@ -1012,11 +1035,12 @@ fn build_prescreen_reject_experiment(
         // efficiency を測る軸であり baseline 値の流用は誤情報)。空 Vec で保持する。
         pass_at_k_t_steps: Vec::new(),
         pass_at_k_t_seconds: Vec::new(),
-        // V16 (frontier benchmark) も同じ理由で pre-screen REJECT 経路では計測なし。
-        // frontier_bucket は task ごとの累積 token を要し、frontier_inject は inject variant 実行を要する
-        // = どちらも experiment 自身の full execution が前提のため、空 Vec で保持。
-        frontier_bucket_scores: Vec::new(),
-        frontier_inject_scores: Vec::new(),
+        // V16 (frontier benchmark): env-gated baseline carry-over (項目 234 候補)。
+        // BONSAI_FRONTIER_ENABLED=1 で baseline.frontier_bucket_scores を carry-over、
+        // BONSAI_FRONTIER_INJECT_ENABLED=1 で baseline.frontier_inject_scores を carry-over。
+        // 両 env unset (default) で空 Vec = 項目 229 の "no measurement" 後方互換挙動。
+        frontier_bucket_scores: frontier_bucket,
+        frontier_inject_scores: frontier_inject,
     }
 }
 
@@ -1236,13 +1260,22 @@ pub fn run_experiment_loop(
                     mutation.detail, estimated_delta
                 );
                 let snapshot = config_snapshot(&modified_config);
-                // 項目 224: baseline tier carry-over (G-4c v3 PARTIAL PASS で SQLite tier NULL 発覚の修正)。
+                // 項目 224: baseline tier carry-over。
+                // 項目 234 候補: baseline frontier carry-over (env-gated、default OFF で後方互換)。
+                // baseline.frontier_* は composite method 経由で取得 (フィールド直 access はなく
+                // run_k 完走後に lazy 計算する API、env OFF 時は空 Vec で安全)。
+                let frontier_boundaries = crate::agent::frontier::parse_frontier_buckets_env();
+                let baseline_frontier_buckets =
+                    baseline.composite_frontier_bucket_scores(&frontier_boundaries);
+                let baseline_frontier_inject = baseline.composite_frontier_inject_scores();
                 let exp = build_prescreen_reject_experiment(
                     experiment_id.clone(),
                     mutation.mutation_type,
                     mutation.detail,
                     baseline.composite_score(),
                     baseline.tier_avg_scores,
+                    &baseline_frontier_buckets,
+                    &baseline_frontier_inject,
                     estimated_delta,
                     snapshot,
                 );
@@ -2131,6 +2164,8 @@ mod tests {
             "test_mutation".to_string(),
             0.6, // baseline_score
             baseline_tiers,
+            &[],     // baseline_frontier_bucket_scores (env OFF で carry-over 不要)
+            &[],     // baseline_frontier_inject_scores
             -0.1583, // estimated_delta
             HashMap::new(),
         );
@@ -2155,6 +2190,8 @@ mod tests {
             "test_mutation".to_string(),
             0.5, // baseline_score
             None,
+            &[],   // baseline_frontier_bucket_scores
+            &[],   // baseline_frontier_inject_scores
             -0.05, // estimated_delta
             HashMap::new(),
         );
@@ -2177,6 +2214,8 @@ mod tests {
             "test_mutation".to_string(),
             0.6,
             baseline_tiers,
+            &[], // baseline_frontier_bucket_scores
+            &[], // baseline_frontier_inject_scores
             -0.02,
             HashMap::new(),
         );
@@ -2186,6 +2225,154 @@ mod tests {
         assert_eq!(exp.tier_t4, None);
         assert_eq!(exp.tier_t5, Some(0.70));
         assert_eq!(exp.tier_t6, None);
+    }
+
+    // --- 項目 234 候補 (frontier-prescreen-carryover-fix): pre-screen REJECT で baseline frontier を
+    // env-gated carry-over する 4 件。BONSAI_FRONTIER_ENABLED=1 / BONSAI_FRONTIER_INJECT_ENABLED=1 で
+    // baseline.frontier_*_scores を Vec::clone()、env unset で空 Vec 維持 (項目 229 後方互換)。
+    // env mutation race 回避は SMOKE_TEST_LOCK と同 pattern (serial_test 不採用)。
+
+    static FRONTIER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_frontier_env() {
+        unsafe {
+            std::env::remove_var("BONSAI_FRONTIER_ENABLED");
+            std::env::remove_var("BONSAI_FRONTIER_INJECT_ENABLED");
+        }
+    }
+
+    /// (Phase 1+2 atomic) BONSAI_FRONTIER_ENABLED=1 で baseline_frontier_bucket_scores を carry-over。
+    /// 期待: 渡した `[(1, 0.6313), (2, 0.45)]` が出力に保存され、inject は env OFF で空 Vec。
+    #[test]
+    fn t_prescreen_reject_carries_baseline_frontier_when_bucket_enabled() {
+        use std::collections::HashMap;
+        let _guard = FRONTIER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_frontier_env();
+        unsafe { std::env::set_var("BONSAI_FRONTIER_ENABLED", "1") };
+
+        let baseline_buckets = vec![(1, 0.6313), (2, 0.45)];
+        let exp = build_prescreen_reject_experiment(
+            "exp_test_carry_bucket".to_string(),
+            MutationType::PromptRule,
+            "test_mutation".to_string(),
+            0.5,
+            None,
+            &baseline_buckets,
+            &[],
+            -0.05,
+            HashMap::new(),
+        );
+
+        assert_eq!(
+            exp.frontier_bucket_scores,
+            vec![(1, 0.6313), (2, 0.45)],
+            "BONSAI_FRONTIER_ENABLED=1 で baseline bucket carry-over されるべき"
+        );
+        assert!(
+            exp.frontier_inject_scores.is_empty(),
+            "inject env OFF で空 Vec 維持"
+        );
+
+        reset_frontier_env();
+    }
+
+    /// (Phase 1+2 atomic) BONSAI_FRONTIER_INJECT_ENABLED=1 で baseline_frontier_inject_scores を carry-over。
+    /// bucket env OFF で bucket 側は空 Vec 維持 = 2 軸独立性確認。
+    #[test]
+    fn t_prescreen_reject_carries_baseline_frontier_when_inject_enabled() {
+        use std::collections::HashMap;
+        let _guard = FRONTIER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_frontier_env();
+        unsafe { std::env::set_var("BONSAI_FRONTIER_INJECT_ENABLED", "1") };
+
+        let baseline_inject = vec![(0, 0.85), (4, 0.72)];
+        let exp = build_prescreen_reject_experiment(
+            "exp_test_carry_inject".to_string(),
+            MutationType::AgentParam,
+            "test_mutation".to_string(),
+            0.5,
+            None,
+            &[(99, 0.99)], // bucket env OFF で carry-over されないことを確証
+            &baseline_inject,
+            -0.03,
+            HashMap::new(),
+        );
+
+        assert_eq!(
+            exp.frontier_inject_scores,
+            vec![(0, 0.85), (4, 0.72)],
+            "BONSAI_FRONTIER_INJECT_ENABLED=1 で baseline inject carry-over"
+        );
+        assert!(
+            exp.frontier_bucket_scores.is_empty(),
+            "bucket env OFF で空 Vec 維持 (2 軸独立)"
+        );
+
+        reset_frontier_env();
+    }
+
+    /// (Phase 1+2 atomic) 両 env unset で frontier_* 全て空 Vec = 後方互換 100%。
+    /// 項目 229 当初実装 (`Vec::new()` ハードコード) と完全に等価な挙動を確証する回帰防止。
+    #[test]
+    fn t_prescreen_reject_frontier_empty_when_env_off() {
+        use std::collections::HashMap;
+        let _guard = FRONTIER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_frontier_env();
+
+        // baseline が空でない場合でも env unset で carry-over されないこと
+        let exp = build_prescreen_reject_experiment(
+            "exp_test_env_off".to_string(),
+            MutationType::PromptRule,
+            "test_mutation".to_string(),
+            0.5,
+            None,
+            &[(1, 0.7), (2, 0.5)],
+            &[(0, 0.8), (4, 0.6)],
+            -0.05,
+            HashMap::new(),
+        );
+
+        assert!(
+            exp.frontier_bucket_scores.is_empty(),
+            "env unset で bucket 空 (項目 229 後方互換)"
+        );
+        assert!(
+            exp.frontier_inject_scores.is_empty(),
+            "env unset で inject 空 (項目 229 後方互換)"
+        );
+    }
+
+    /// (Phase 1+2 atomic) env ON でも baseline が空なら出力も空 = preserve 動作確認。
+    /// SMOKE 7 task で T6 task ゼロのため frontier_inject_scores が空のケース等を再現。
+    #[test]
+    fn t_prescreen_reject_frontier_empty_when_baseline_empty() {
+        use std::collections::HashMap;
+        let _guard = FRONTIER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_frontier_env();
+        unsafe {
+            std::env::set_var("BONSAI_FRONTIER_ENABLED", "1");
+            std::env::set_var("BONSAI_FRONTIER_INJECT_ENABLED", "1");
+        }
+
+        let exp = build_prescreen_reject_experiment(
+            "exp_test_baseline_empty".to_string(),
+            MutationType::PromptHint,
+            "test_mutation".to_string(),
+            0.5,
+            None,
+            &[], // baseline 空 = LADDER 未使用、または bucket emit ゼロ
+            &[],
+            -0.04,
+            HashMap::new(),
+        );
+
+        assert!(
+            exp.frontier_bucket_scores.is_empty(),
+            "env ON でも baseline 空なら出力空 (.to_vec() は空 slice を空 Vec で preserve)"
+        );
+        assert!(exp.frontier_inject_scores.is_empty());
+
+        reset_frontier_env();
     }
 
     // --- smoke 補正係数テスト (項目 184 由来、Lab smoke→core 42% retention) ---
