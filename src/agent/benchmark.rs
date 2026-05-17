@@ -1957,6 +1957,68 @@ impl BenchmarkSuite {
                     tier: TaskTier::Core,
                     capability_tier: CapabilityTier::SingleToolUse,
                 },
+                // ── 項目 242 Lab v21: success_fact task 5 件 (KG seed 拡張で matched>0 シナリオ生成) ──
+                // 起点: `.claude/plan/lab-v21-kg-seed-expansion.md` §2.1 (案 A)
+                // halluc 3 task と対をなす「LLM が正解を述べる」shape の task。
+                // 期待: LLM 出力が KG seed (`seed_kg_for_factcheck_lab` の 5 success fact) と
+                // match → matched>0 cycle 出現 → Pearson r 計算可能化 (Lab v20 structural finding 解消)。
+                // 全 task は context (Hint) を入力に含めるため、Bonsai-8B 1bit でも正解確率が
+                // halluc task より高い (R1 mitigation: G-7b smoke で matched>=1 確証)。
+                BenchmarkTask {
+                    id: "success_bonsai_is_a_rust_project".into(),
+                    name: "正解誘導: 言語ラベル (Pattern 2 is_a)".into(),
+                    input: "Bonsai-Agent is implemented in Rust. Restate this in one sentence using the EXACT format 'Bonsai-Agent is a rust_project' (use rust_project as a single token).".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["is a".into(), "rust_project".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+                BenchmarkTask {
+                    id: "success_llama_runtime_of_bonsai".into(),
+                    name: "正解誘導: runtime 関係 (Pattern 1 runtime_of)".into(),
+                    input: "Llama-server is the inference runtime that Bonsai-Agent uses. Restate this in one sentence using the EXACT format 'Llama-server is the runtime of Bonsai-Agent' (capitalize both 'Llama-server' and 'Bonsai-Agent').".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["is the runtime of".into(), "Bonsai-Agent".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+                BenchmarkTask {
+                    id: "success_sqlite_storage_of_bonsai".into(),
+                    name: "正解誘導: storage 関係 (Pattern 1 storage_of)".into(),
+                    input: "Sqlite is the storage backend used by Bonsai-Agent. Restate this in one sentence using the EXACT format 'Sqlite is the storage of Bonsai-Agent' (capitalize 'Sqlite' and 'Bonsai-Agent').".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["is the storage of".into(), "Bonsai-Agent".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+                BenchmarkTask {
+                    id: "success_reflexion_loop_of_bonsai".into(),
+                    name: "正解誘導: loop 関係 (Pattern 1 loop_of)".into(),
+                    input: "Reflexion is the main loop pattern of Bonsai-Agent. Restate this in one sentence using the EXACT format 'Reflexion is the loop of Bonsai-Agent' (capitalize 'Reflexion' and 'Bonsai-Agent').".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["is the loop of".into(), "Bonsai-Agent".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
+                BenchmarkTask {
+                    id: "success_pathguard_sandbox_of_bonsai".into(),
+                    name: "正解誘導: sandbox 関係 (Pattern 1 sandbox_of、dash subject)".into(),
+                    input: "Path-Guard is the sandbox mechanism of Bonsai-Agent. Restate this in one sentence using the EXACT format 'Path-Guard is the sandbox of Bonsai-Agent' (capitalize 'Path-Guard' and 'Bonsai-Agent', keep the dash).".into(),
+                    expected_tools: vec![],
+                    expected_keywords: vec!["is the sandbox of".into(), "Bonsai-Agent".into()],
+                    max_iterations: 2,
+                    category: TaskCategory::Reasoning,
+                    tier: TaskTier::Core,
+                    capability_tier: CapabilityTier::InstructionFollowing,
+                },
             ],
         }
     }
@@ -2484,8 +2546,8 @@ mod tests {
         let suite = BenchmarkSuite::default_tasks();
         assert_eq!(
             suite.tasks.len(),
-            45,
-            "default = 45 (Plan A G-4c で 42→45、halluc 3 task 追加)"
+            50,
+            "default = 50 (Plan A G-4c 42→45 + 項目 242 Lab v21 success_fact 5 task で 45→50)"
         );
     }
 
@@ -2507,8 +2569,8 @@ mod tests {
         let suite = BenchmarkSuite::core_tasks();
         assert_eq!(
             suite.tasks.len(),
-            27,
-            "core tier は 27 タスク (Plan A G-4c で 24→27、halluc 3 task 全 Core)"
+            32,
+            "core tier は 32 タスク (項目 242 Lab v21 で 27→32、success_fact 5 task 全 Core)"
         );
     }
 
@@ -2527,11 +2589,11 @@ mod tests {
         let all = BenchmarkSuite::default_tasks();
         assert_eq!(
             all.tasks.len(),
-            45,
-            "default は core(27) + extended(18) = 45 (Plan A G-4c で halluc 3 追加)"
+            50,
+            "default は core(32) + extended(18) = 50 (項目 242 Lab v21 で success_fact 5 追加)"
         );
         let ids: std::collections::HashSet<_> = all.tasks.iter().map(|t| t.id.clone()).collect();
-        assert_eq!(ids.len(), 45, "重複なし");
+        assert_eq!(ids.len(), 50, "重複なし");
     }
 
     #[test]
@@ -2680,27 +2742,128 @@ mod tests {
         }
     }
 
-    /// Phase 1 Red — halluc 3 task 追加で default count 42→45。
-    /// 既存 `test_expanded_tasks_count` / `test_default_equals_core_plus_extended` は
-    /// Phase 3 Refactor で 45 に更新する。
+    /// halluc 3 task 追加で default count 42→45 (Plan A G-4c)、
+    /// 項目 242 success_fact 5 task 追加で 45→50 (Lab v21、Phase 3 で count 値更新済)。
     #[test]
     fn t_halluc_task_count_default_is_45() {
         let suite = BenchmarkSuite::default_tasks();
         assert_eq!(
             suite.tasks.len(),
-            45,
-            "default は 42 + 3 halluc = 45 task (Plan A G-4c)"
+            50,
+            "default は 42 + 3 halluc + 5 success_fact = 50 task (Plan A G-4c + 項目 242 Lab v21)"
         );
     }
 
-    /// Phase 1 Red — halluc 3 task が全て Core tier なので core count 24→27。
+    /// halluc 3 task が全て Core tier なので core count 24→27 (Plan A G-4c)、
+    /// 項目 242 success_fact 5 task で 27→32 (全 Core tier、Phase 3 で count 値更新済)。
     #[test]
     fn t_halluc_task_count_core_is_27() {
         let suite = BenchmarkSuite::core_tasks();
         assert_eq!(
             suite.tasks.len(),
-            27,
-            "core は 24 + 3 halluc = 27 task (全 halluc Core tier、Lab v20 paired 対象)"
+            32,
+            "core は 24 + 3 halluc + 5 success_fact = 32 task (全 Core tier、Lab v20/v21 paired 対象)"
+        );
+    }
+
+    // --- 項目 242 Phase 1 Red: success_fact task 5 件 (Lab v21 KG seed 拡張) ---
+    // 起点: `.claude/plan/lab-v21-kg-seed-expansion.md` §2.1 (案 A)
+    // Lab v20 structural finding (`(conf+unk)/total = 1.0` deterministic、matched=0
+    // で variance ゼロ → Pearson r=0.0 計算不可能) 解消のため、LLM が「正解」を
+    // 述べる shape の task 5 件 + 対応 KG seed 5 fact を追加。
+    // 期待: matched>0 cycle 出現で Pearson r 計算可能化 (Lab v21 paired 起動前提)。
+
+    /// 項目 242 Phase 1 Red — 5 success_fact task が `default_tasks()` に存在する。
+    /// Phase 2 Green まで Red、5 task 未実装で `iter().any()` が false で FAIL。
+    #[test]
+    fn t_success_fact_tasks_exist_in_default() {
+        let suite = BenchmarkSuite::default_tasks();
+        let success_ids = [
+            "success_bonsai_is_a_rust_project",
+            "success_llama_runtime_of_bonsai",
+            "success_sqlite_storage_of_bonsai",
+            "success_reflexion_loop_of_bonsai",
+            "success_pathguard_sandbox_of_bonsai",
+        ];
+        for id in &success_ids {
+            assert!(
+                suite.tasks.iter().any(|t| t.id == *id),
+                "success_fact task '{id}' が default_tasks() に存在すべき (項目 242 Phase 2 Green 待ち)"
+            );
+        }
+    }
+
+    /// 項目 242 Phase 1 Red — 5 success_fact task は全て `TaskCategory::Reasoning`。
+    /// halluc 3 task と同 category で hindsight relabel / factcheck の対象軌跡として揃える。
+    #[test]
+    fn t_success_fact_tasks_use_reasoning_category() {
+        let suite = BenchmarkSuite::default_tasks();
+        let success_ids = [
+            "success_bonsai_is_a_rust_project",
+            "success_llama_runtime_of_bonsai",
+            "success_sqlite_storage_of_bonsai",
+            "success_reflexion_loop_of_bonsai",
+            "success_pathguard_sandbox_of_bonsai",
+        ];
+        for id in &success_ids {
+            let t =
+                suite.tasks.iter().find(|t| t.id == *id).unwrap_or_else(|| {
+                    panic!("success_fact task '{id}' 未登録 (Phase 2 Green 待ち)")
+                });
+            assert_eq!(
+                t.category,
+                TaskCategory::Reasoning,
+                "success_fact task '{id}' は Reasoning category であるべき"
+            );
+        }
+    }
+
+    /// 項目 242 Phase 1 Red — 5 success_fact task は全て `TaskTier::Core` (Lab v21 paired 対象)。
+    /// Lab v21 paired smoke で `BONSAI_BENCH_TIER=core` 起動時に hit する設計。
+    #[test]
+    fn t_success_fact_tasks_tier_core() {
+        let suite = BenchmarkSuite::default_tasks();
+        let success_ids = [
+            "success_bonsai_is_a_rust_project",
+            "success_llama_runtime_of_bonsai",
+            "success_sqlite_storage_of_bonsai",
+            "success_reflexion_loop_of_bonsai",
+            "success_pathguard_sandbox_of_bonsai",
+        ];
+        for id in &success_ids {
+            let t =
+                suite.tasks.iter().find(|t| t.id == *id).unwrap_or_else(|| {
+                    panic!("success_fact task '{id}' 未登録 (Phase 2 Green 待ち)")
+                });
+            assert_eq!(
+                t.tier,
+                TaskTier::Core,
+                "success_fact task '{id}' は Core tier であるべき (Lab v21 paired `BONSAI_BENCH_TIER=core` で hit)"
+            );
+        }
+    }
+
+    /// 項目 242 Phase 1 Red — success_fact 5 task 追加で default count 45→50。
+    /// 既存 `test_default_equals_core_plus_extended` / `t_halluc_task_count_default_is_45`
+    /// は Phase 3 Refactor で 50 に更新する (本 test は Phase 2 Green 後 PASS)。
+    #[test]
+    fn t_success_fact_task_count_default_is_50() {
+        let suite = BenchmarkSuite::default_tasks();
+        assert_eq!(
+            suite.tasks.len(),
+            50,
+            "default は 45 + 5 success_fact = 50 task (項目 242 Lab v21 前提)"
+        );
+    }
+
+    /// 項目 242 Phase 1 Red — success_fact 5 task が全て Core tier なので core count 27→32。
+    #[test]
+    fn t_success_fact_task_count_core_is_32() {
+        let suite = BenchmarkSuite::core_tasks();
+        assert_eq!(
+            suite.tasks.len(),
+            32,
+            "core は 27 + 5 success_fact = 32 task (全 success_fact Core tier、Lab v21 paired 対象)"
         );
     }
 
@@ -3550,11 +3713,12 @@ mod tests {
         // handoff 05-07g Phase 5: smoke_failure_chain_pair 追加で 41
         // handoff 05-07h 後継: smoke_partial_success_chain 追加で 42
         // Plan A G-4c (項目 230 後続): halluc 3 task 追加で 45
+        // 項目 242 Lab v21: success_fact 5 task 追加で 50
         let suite = BenchmarkSuite::default_tasks();
         assert_eq!(
             suite.tasks.len(),
-            45,
-            "タスク数は 45 であるべき (Plan A G-4c)"
+            50,
+            "タスク数は 50 であるべき (Plan A G-4c + 項目 242 Lab v21)"
         );
     }
 

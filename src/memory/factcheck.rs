@@ -177,25 +177,45 @@ pub fn is_all_trajectories_enabled() -> bool {
 #[cfg(test)]
 pub(crate) static FACTCHECK_ALL_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Plan A G-4c 用に KG に 3 fact を投入する seed 関数 (Lab cycle 開始時のみ呼出)。
+/// Plan A G-4c + 項目 242 Lab v21 用に KG に 8 fact を投入する seed 関数
+/// (Lab cycle 開始時のみ呼出)。
 ///
-/// halluc benchmark task 3 件 (benchmark.rs:halluc_*) の正解 fact を KG に登録し、
+/// 構成 (8 fact = 3 halluc + 5 success):
+///
+/// 【halluc 3 fact】benchmark.rs:halluc_* task 3 件の正解 fact。
 /// LLM が捏造 (false fact) すれば `verify_triple_in_kg` が `Conflict` 判定を出す
-/// 経路を確立する。冪等 (add_node / add_edge は UPSERT、再 seed で weight 加算のみ)。
-///
-/// 投入する 3 fact (G-4c v1 反証受けて大文字始まり化、Pattern 1/2 regex match 経路確保):
+/// 経路を確立 (Lab v20 で conf=3 deterministic 確証済)。
 ///   - (Bonsai-8B, parent_of, Qwen3-8B) — halluc_parent_of_false_fact 正解
-///   - (Prism-ml, is_a, ternary_model) — halluc_is_a_false_type 正解 (subject 大文字始まり)
+///   - (Prism-ml, is_a, ternary_model) — halluc_is_a_false_type 正解
 ///   - (Bonsai-Agent, child_of, Bonsai-8B) — halluc_t2_file_context_misalign 正解
-///     (file fixture `/tmp/bonsai_halluc_ctx.txt` と integrity 一致、subject/object 両大文字始まり)
+///     (file fixture `/tmp/bonsai_halluc_ctx.txt` と integrity 一致)
+///
+/// 【success_fact 5 fact】benchmark.rs:success_* task 5 件の正解 fact (項目 242)。
+/// LLM が正しく答えれば `Match` 判定 = matched>0 で `(conf+unk)/total < 1.0` の
+/// variance 復活 → Pearson r 計算可能化 (Lab v20 structural finding 解消)。
+///   - (Bonsai-Agent, is_a, rust_project) — Pattern 2 (is a)
+///   - (Llama-server, runtime_of, Bonsai-Agent) — Pattern 1 (is the X of Y)
+///   - (Sqlite, storage_of, Bonsai-Agent) — Pattern 1
+///   - (Reflexion, loop_of, Bonsai-Agent) — Pattern 1
+///   - (Path-Guard, sandbox_of, Bonsai-Agent) — Pattern 1 (dash subject)
+///
+/// 冪等 (add_node / add_edge は UPSERT、再 seed で weight 加算のみ、行数増えない)。
+/// 全 subject/object は大文字始まり (Pattern 1/2 regex match 経路確保、項目 239 dash 対応済)。
 ///
 /// 呼出元: `experiment.rs::run_factcheck_pass_lab` 内、env-gated 経路で 1 度のみ。
 /// production agent_loop は本 fn を呼ばない (`is_factcheck_enabled()` で OFF 時短絡)。
 pub fn seed_kg_for_factcheck_lab(kg: &KnowledgeGraph<'_>) -> anyhow::Result<()> {
     let facts: &[(&str, &str, &str)] = &[
+        // halluc seed (Plan A G-4c)
         ("Bonsai-8B", "parent_of", "Qwen3-8B"),
         ("Prism-ml", "is_a", "ternary_model"),
         ("Bonsai-Agent", "child_of", "Bonsai-8B"),
+        // success_fact seed (項目 242 Lab v21)
+        ("Bonsai-Agent", "is_a", "rust_project"),
+        ("Llama-server", "runtime_of", "Bonsai-Agent"),
+        ("Sqlite", "storage_of", "Bonsai-Agent"),
+        ("Reflexion", "loop_of", "Bonsai-Agent"),
+        ("Path-Guard", "sandbox_of", "Bonsai-Agent"),
     ];
     for (subj, pred, obj) in facts {
         let s = kg.add_node("entity", subj)?;
@@ -527,6 +547,87 @@ mod tests {
         assert!(is_factcheck_enabled());
 
         unsafe { std::env::remove_var("BONSAI_KG_FACTCHECK_ENABLED") };
+    }
+
+    /// 項目 242 Phase 1 Red (Lab v21 KG seed 拡張) — `seed_kg_for_factcheck_lab` で
+    /// success_fact task 用 5 fact が追加される。Phase 2 Green まで Red。
+    /// 起点: `.claude/plan/lab-v21-kg-seed-expansion.md` §2.1 (案 A)
+    /// 期待: 既存 3 halluc fact に加え、以下 5 fact が KG に存在:
+    ///   - (Bonsai-Agent, is_a, rust_project)            ← Pattern 2 (is a)
+    ///   - (Llama-server, runtime_of, Bonsai-Agent)      ← Pattern 1 (is the X of Y)
+    ///   - (Sqlite, storage_of, Bonsai-Agent)            ← Pattern 1
+    ///   - (Reflexion, loop_of, Bonsai-Agent)            ← Pattern 1
+    ///   - (Path-Guard, sandbox_of, Bonsai-Agent)        ← Pattern 1 (dash subject)
+    #[test]
+    fn t_seed_kg_for_factcheck_lab_contains_5_success_facts() {
+        let store = setup_db();
+        let graph = KnowledgeGraph::new(store.conn());
+
+        seed_kg_for_factcheck_lab(&graph).expect("seed failed");
+
+        let success_facts: &[(&str, &str, &str)] = &[
+            ("Bonsai-Agent", "is_a", "rust_project"),
+            ("Llama-server", "runtime_of", "Bonsai-Agent"),
+            ("Sqlite", "storage_of", "Bonsai-Agent"),
+            ("Reflexion", "loop_of", "Bonsai-Agent"),
+            ("Path-Guard", "sandbox_of", "Bonsai-Agent"),
+        ];
+        for (s, p, o) in success_facts {
+            assert!(
+                graph.contains_triple(s, p, o).is_some(),
+                "success_fact ({s}, {p}, {o}) が KG に存在すべき (項目 242 Phase 2 Green 待ち)"
+            );
+        }
+    }
+
+    /// 項目 242 Phase 1 Red — 既存 3 halluc fact が `seed_kg_for_factcheck_lab` で
+    /// 維持される (additive extension 不変、backward compat 保証)。
+    /// 既存 `t_seed_kg_for_halluc_tasks_populates_three_facts` と独立に halluc seed
+    /// 維持を検証 (success_fact 追加で halluc seed が消失しないことを保証)。
+    #[test]
+    fn t_seed_kg_for_factcheck_lab_preserves_3_halluc_facts() {
+        let store = setup_db();
+        let graph = KnowledgeGraph::new(store.conn());
+
+        seed_kg_for_factcheck_lab(&graph).expect("seed failed");
+
+        let halluc_facts: &[(&str, &str, &str)] = &[
+            ("Bonsai-8B", "parent_of", "Qwen3-8B"),
+            ("Prism-ml", "is_a", "ternary_model"),
+            ("Bonsai-Agent", "child_of", "Bonsai-8B"),
+        ];
+        for (s, p, o) in halluc_facts {
+            assert!(
+                graph.contains_triple(s, p, o).is_some(),
+                "halluc seed ({s}, {p}, {o}) は項目 242 後も維持されるべき"
+            );
+        }
+    }
+
+    /// 項目 242 Phase 1 Red — Pattern 2 (is a) と Pattern 1 (is the X of Y) の両軸を
+    /// success_fact seed が cover する (variance 確保条件)。
+    /// 期待: Pattern 2 fact >= 1 件、Pattern 1 fact >= 1 件 (両 regex 経路で matched 発火可能)。
+    #[test]
+    fn t_seed_kg_for_factcheck_lab_covers_both_regex_patterns() {
+        let store = setup_db();
+        let graph = KnowledgeGraph::new(store.conn());
+
+        seed_kg_for_factcheck_lab(&graph).expect("seed failed");
+
+        // Pattern 2 (is a) representative
+        assert!(
+            graph
+                .contains_triple("Bonsai-Agent", "is_a", "rust_project")
+                .is_some(),
+            "Pattern 2 (is_a) seed fact が必要 (項目 242 success_bonsai_is_a_rust_project task 対応)"
+        );
+        // Pattern 1 (is the X of Y) representative
+        assert!(
+            graph
+                .contains_triple("Llama-server", "runtime_of", "Bonsai-Agent")
+                .is_some(),
+            "Pattern 1 (runtime_of) seed fact が必要 (項目 242 success_llama_runtime_of_bonsai task 対応)"
+        );
     }
 
     /// 項目 235 — `BONSAI_FACTCHECK_ALL_TRAJECTORIES` env opt-in default OFF。
