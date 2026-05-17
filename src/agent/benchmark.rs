@@ -972,6 +972,14 @@ const SMOKE_TASK_IDS: &[&str] = &[
     "halluc_parent_of_false_fact", // Plan A G-4c (T1): KG seed と矛盾する parent_of 出力で Conflict 発火
     "halluc_is_a_false_type",      // Plan A G-4c (T1): is_a 型分類で Conflict 発火
     "halluc_t2_file_context_misalign", // Plan A G-4c (T2): file context vs LLM 出力の不整合検出
+    // 項目 242 Lab v21 補完 (Phase 4 G-7b smoke で matched>=1 確証用):
+    // success_fact 5 task は default_tasks に追加済だが、SMOKE_TASK_IDS にも含めることで
+    // BONSAI_LAB_SMOKE=1 smoke run でも seed_kg_for_factcheck_lab の match 経路を発火可能化。
+    "success_bonsai_is_a_rust_project", // Pattern 2 is_a (正解誘導)
+    "success_llama_runtime_of_bonsai",  // Pattern 1 runtime_of (正解誘導)
+    "success_sqlite_storage_of_bonsai", // Pattern 1 storage_of (正解誘導)
+    "success_reflexion_loop_of_bonsai", // Pattern 1 loop_of (正解誘導)
+    "success_pathguard_sandbox_of_bonsai", // Pattern 1 sandbox_of dash subject (正解誘導)
 ];
 
 /// halluc_t2_file_context_misalign task 用の file fixture を準備 (Plan A G-4c)。
@@ -2655,8 +2663,8 @@ mod tests {
         let default = BenchmarkSuite::default_tasks();
         assert_eq!(
             smoke.tasks.len(),
-            10,
-            "smoke は 10 タスク (Plan A G-4c で 7→10、halluc 3 task 追加)"
+            15,
+            "smoke は 15 タスク (項目 242 Lab v21 で 10→15、success_fact 5 task 追加)"
         );
         assert!(smoke.tasks.len() < default.tasks.len(), "smoke ⊂ default");
         // すべての smoke ID は default に含まれる
