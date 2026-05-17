@@ -1975,7 +1975,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "success_bonsai_is_a_rust_project".into(),
                     name: "正解誘導: 言語ラベル (Pattern 2 is_a)".into(),
-                    input: "Bonsai-Agent is implemented in Rust. Restate this in one sentence using the EXACT format 'Bonsai-Agent is a rust_project' (use rust_project as a single token).".into(),
+                    input: "Bonsai-Agent is implemented in Rust. Output one sentence in your reply using the EXACT format 'Bonsai-Agent is a rust_project' (use rust_project as a single token).".into(),
                     expected_tools: vec![],
                     expected_keywords: vec!["is a".into(), "rust_project".into()],
                     max_iterations: 2,
@@ -1986,7 +1986,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "success_llama_runtime_of_bonsai".into(),
                     name: "正解誘導: runtime 関係 (Pattern 1 runtime_of)".into(),
-                    input: "Llama-server is the inference runtime that Bonsai-Agent uses. Restate this in one sentence using the EXACT format 'Llama-server is the runtime of Bonsai-Agent' (capitalize both 'Llama-server' and 'Bonsai-Agent').".into(),
+                    input: "Llama-server is the inference runtime that Bonsai-Agent uses. Output one sentence in your reply using the EXACT format 'Llama-server is the runtime of Bonsai-Agent' (capitalize both 'Llama-server' and 'Bonsai-Agent').".into(),
                     expected_tools: vec![],
                     expected_keywords: vec!["is the runtime of".into(), "Bonsai-Agent".into()],
                     max_iterations: 2,
@@ -1997,7 +1997,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "success_sqlite_storage_of_bonsai".into(),
                     name: "正解誘導: storage 関係 (Pattern 1 storage_of)".into(),
-                    input: "Sqlite is the storage backend used by Bonsai-Agent. Restate this in one sentence using the EXACT format 'Sqlite is the storage of Bonsai-Agent' (capitalize 'Sqlite' and 'Bonsai-Agent').".into(),
+                    input: "Sqlite is the storage backend used by Bonsai-Agent. Output one sentence in your reply using the EXACT format 'Sqlite is the storage of Bonsai-Agent' (capitalize 'Sqlite' and 'Bonsai-Agent').".into(),
                     expected_tools: vec![],
                     expected_keywords: vec!["is the storage of".into(), "Bonsai-Agent".into()],
                     max_iterations: 2,
@@ -2008,7 +2008,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "success_reflexion_loop_of_bonsai".into(),
                     name: "正解誘導: loop 関係 (Pattern 1 loop_of)".into(),
-                    input: "Reflexion is the main loop pattern of Bonsai-Agent. Restate this in one sentence using the EXACT format 'Reflexion is the loop of Bonsai-Agent' (capitalize 'Reflexion' and 'Bonsai-Agent').".into(),
+                    input: "Reflexion is the main loop pattern of Bonsai-Agent. Output one sentence in your reply using the EXACT format 'Reflexion is the loop of Bonsai-Agent' (capitalize 'Reflexion' and 'Bonsai-Agent').".into(),
                     expected_tools: vec![],
                     expected_keywords: vec!["is the loop of".into(), "Bonsai-Agent".into()],
                     max_iterations: 2,
@@ -2019,7 +2019,7 @@ impl BenchmarkSuite {
                 BenchmarkTask {
                     id: "success_pathguard_sandbox_of_bonsai".into(),
                     name: "正解誘導: sandbox 関係 (Pattern 1 sandbox_of、dash subject)".into(),
-                    input: "Path-Guard is the sandbox mechanism of Bonsai-Agent. Restate this in one sentence using the EXACT format 'Path-Guard is the sandbox of Bonsai-Agent' (capitalize 'Path-Guard' and 'Bonsai-Agent', keep the dash).".into(),
+                    input: "Path-Guard is the sandbox mechanism of Bonsai-Agent. Output one sentence in your reply using the EXACT format 'Path-Guard is the sandbox of Bonsai-Agent' (capitalize 'Path-Guard' and 'Bonsai-Agent', keep the dash).".into(),
                     expected_tools: vec![],
                     expected_keywords: vec!["is the sandbox of".into(), "Bonsai-Agent".into()],
                     max_iterations: 2,
