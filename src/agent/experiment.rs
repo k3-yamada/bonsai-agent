@@ -1646,24 +1646,49 @@ fn run_factcheck_pass_lab(store: &MemoryStore, since_event_id: i64) -> Result<Fa
     // 4 軸 (矛盾/孤立/uncovered/case_variant) を check、clean ない時 warn_log で警告。
     // `BONSAI_KG_LINT_STRICT=1` 設定時のみ非 clean で abort (案 B 設計、plan §2.1)。
     // production agent_loop はこの path に到達しない (`is_factcheck_enabled()` で短絡)。
-    let seed_triples = factcheck::seed_triples_for_factcheck_lab();
-    let keyword_bundles: Vec<Vec<String>> = BenchmarkSuite::default_tasks()
-        .tasks
-        .iter()
-        .map(|t| t.expected_keywords.clone())
-        .collect();
-    let lint_report = factcheck::lint_kg_for_lab(&graph, &seed_triples, &keyword_bundles);
-    lint_report.warn_log();
-    if factcheck::is_kg_lint_strict() && !lint_report.is_clean() {
-        anyhow::bail!(
-            "KG lint NOT clean and BONSAI_KG_LINT_STRICT=1 (項目 244 strict gate): \
-             conflicting={} orphan={} uncovered={} case_variant={}. \
-             seed/benchmark の不整合を解消するか env を unset してください。",
-            lint_report.conflicting_triples.len(),
-            lint_report.orphan_nodes.len(),
-            lint_report.uncovered_seed_triples.len(),
-            lint_report.case_variant_nodes.len(),
-        );
+    //
+    // 設計上の重要 finding (G-8a 実機検証): lint pass は **ephemeral in-memory KG** で
+    // 実行する。production conn 直結だと過去 Lab 累積の無関係 entity (record_tool_usage /
+    // record_error_pattern 等) が all_conflicting_edge_pairs で false positive 連発し
+    // (G-8a で conflicting=1995 観測)、lint の signal-to-noise が破綻する。
+    // ephemeral KG = seed_kg_for_factcheck_lab の 8 fact のみで closed lint が成立。
+    match MemoryStore::in_memory() {
+        Ok(ephemeral_store) => {
+            let ephemeral_kg = KnowledgeGraph::new(ephemeral_store.conn());
+            if let Err(e) = factcheck::seed_kg_for_factcheck_lab(&ephemeral_kg) {
+                log_event(
+                    LogLevel::Warn,
+                    "lab.lint",
+                    &format!("ephemeral KG seed failed (lint skipped, non-fatal): {e}"),
+                );
+            } else {
+                let seed_triples = factcheck::seed_triples_for_factcheck_lab();
+                let keyword_bundles: Vec<Vec<String>> = BenchmarkSuite::default_tasks()
+                    .tasks
+                    .iter()
+                    .map(|t| t.expected_keywords.clone())
+                    .collect();
+                let lint_report =
+                    factcheck::lint_kg_for_lab(&ephemeral_kg, &seed_triples, &keyword_bundles);
+                lint_report.warn_log();
+                if factcheck::is_kg_lint_strict() && !lint_report.is_clean() {
+                    anyhow::bail!(
+                        "KG lint NOT clean and BONSAI_KG_LINT_STRICT=1 (項目 244 strict gate): \
+                         conflicting={} orphan={} uncovered={} case_variant={}. \
+                         seed/benchmark の不整合を解消するか env を unset してください。",
+                        lint_report.conflicting_triples.len(),
+                        lint_report.orphan_nodes.len(),
+                        lint_report.uncovered_seed_triples.len(),
+                        lint_report.case_variant_nodes.len(),
+                    );
+                }
+            }
+        }
+        Err(e) => log_event(
+            LogLevel::Warn,
+            "lab.lint",
+            &format!("ephemeral MemoryStore 作成失敗 (lint skipped、non-fatal): {e}"),
+        ),
     }
 
     // 項目 235: env opt-in で trajectory selection を拡張 (halluc SUCCESS-by-design 対応)。
