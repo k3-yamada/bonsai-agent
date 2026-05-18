@@ -658,4 +658,238 @@ mod tests {
 
         unsafe { std::env::remove_var("BONSAI_FACTCHECK_ALL_TRAJECTORIES") };
     }
+
+    // ── 項目 244 Phase 1 Red — KG Lint Coverage Check (LLM Wiki Lint パターン適用) ──
+    //
+    // 起点: .claude/plan/kg-lint-coverage-check.md §3 Phase 1 (Red) 6 failing tests
+    //
+    // 設計: `LintReport` 構造体 (conflicting_triples / orphan_nodes / uncovered_seed_triples
+    //       / case_variant_nodes 4 軸) + `lint_kg_for_lab(kg, seed_triples, keyword_bundles)`
+    //       で KG の整合性 lint pass。Phase 2 Green で実装、Phase 4 smoke G-8a/b/c で配線。
+    //
+    // 期待効果: Lab v20 structural finding (matched=0 deterministic) を <1 sec で事前検出、
+    //           19h 投下 blunder 防止。
+
+    /// Phase 1 Red — 矛盾 triple 検出。
+    /// KG に (A->B, A->C) 同一 predicate seed 後 lint で conflicting_triples.len() >= 1。
+    /// Phase 2 Green で `lint_kg_for_lab` 実装後 PASS 化。
+    #[test]
+    fn t_lint_kg_detects_conflicting_triples() {
+        let store = setup_db();
+        let kg = KnowledgeGraph::new(store.conn());
+        let alice = kg.add_node("entity", "Alice").unwrap();
+        let bob = kg.add_node("entity", "Bob").unwrap();
+        let charlie = kg.add_node("entity", "Charlie").unwrap();
+        kg.add_edge(alice, bob, "parent_of", 1.0).unwrap();
+        kg.add_edge(alice, charlie, "parent_of", 1.0).unwrap();
+
+        let report = lint_kg_for_lab(&kg, &[], &[]);
+        assert!(
+            !report.conflicting_triples.is_empty(),
+            "Alice→Bob と Alice→Charlie の parent_of 矛盾を検出すべき"
+        );
+    }
+
+    /// Phase 1 Red — orphan node 検出。
+    /// edge 持たない node を add_node 後 lint で orphan_nodes に含む。
+    /// Phase 2 Green で graph.rs::orphan_nodes() helper 追加 + lint 集約。
+    #[test]
+    fn t_lint_kg_detects_orphan_nodes() {
+        let store = setup_db();
+        let kg = KnowledgeGraph::new(store.conn());
+        let _orphan = kg.add_node("entity", "OrphanNode").unwrap();
+        let a = kg.add_node("entity", "EdgeA").unwrap();
+        let b = kg.add_node("entity", "EdgeB").unwrap();
+        kg.add_edge(a, b, "related_to", 1.0).unwrap();
+
+        let report = lint_kg_for_lab(&kg, &[], &[]);
+        assert!(
+            report.orphan_nodes.iter().any(|n| n == "OrphanNode"),
+            "OrphanNode は orphan_nodes に含まれるべき: got {:?}",
+            report.orphan_nodes
+        );
+    }
+
+    /// Phase 1 Red — uncovered seed triple 検出。
+    /// seed triple のうち benchmark task expected_keywords で hit しないものを検出。
+    /// 「hit する」= triple の subject/predicate/object のいずれかが keyword bundle に含む。
+    /// Phase 2 Green で word-level coverage check 実装。
+    #[test]
+    fn t_lint_kg_detects_uncovered_seed_triples() {
+        let store = setup_db();
+        let kg = KnowledgeGraph::new(store.conn());
+        let seed_triples = vec![
+            Triple {
+                subject: "Foo".into(),
+                predicate: "is_a".into(),
+                object: "Bar".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "OrphanFact".into(),
+                predicate: "covers".into(),
+                object: "Nothing".into(),
+                confidence: 1.0,
+            },
+        ];
+        // 1 つ目の triple は keyword "Foo" で hit、2 つ目は hit しない (uncovered)
+        let keyword_bundles = vec![vec!["Foo".to_string(), "is_a".to_string()]];
+
+        let report = lint_kg_for_lab(&kg, &seed_triples, &keyword_bundles);
+        assert!(
+            report
+                .uncovered_seed_triples
+                .iter()
+                .any(|t| t.subject == "OrphanFact"),
+            "OrphanFact triple は uncovered_seed_triples に含まれるべき"
+        );
+    }
+
+    /// Phase 1 Red — case variant 検出。
+    /// "Bonsai-Agent" と "bonsai-agent" 両方 KG に存在で variant pair 検出。
+    /// Phase 2 Green で graph.rs::case_variant_pairs() helper 追加。
+    #[test]
+    fn t_lint_kg_detects_case_variant_nodes() {
+        let store = setup_db();
+        let kg = KnowledgeGraph::new(store.conn());
+        kg.add_node("entity", "Bonsai-Agent").unwrap();
+        kg.add_node("entity", "bonsai-agent").unwrap();
+        kg.add_node("entity", "UniqueName").unwrap();
+
+        let report = lint_kg_for_lab(&kg, &[], &[]);
+        assert!(
+            !report.case_variant_nodes.is_empty(),
+            "Bonsai-Agent / bonsai-agent の case variant を検出すべき"
+        );
+    }
+
+    /// Phase 1 Red — empty KG は clean。
+    /// 空 KG + 空 seed + 空 keywords で is_clean()=true (false positive 防止)。
+    /// Phase 2 Green で全 4 軸の empty check 実装。
+    #[test]
+    fn t_lint_report_is_clean_returns_true_for_empty_kg() {
+        let store = setup_db();
+        let kg = KnowledgeGraph::new(store.conn());
+        let report = lint_kg_for_lab(&kg, &[], &[]);
+        assert!(
+            report.is_clean(),
+            "空 KG は clean であるべき: got conflicting={} orphan={} uncovered={} case_variant={}",
+            report.conflicting_triples.len(),
+            report.orphan_nodes.len(),
+            report.uncovered_seed_triples.len(),
+            report.case_variant_nodes.len()
+        );
+    }
+
+    /// Phase 1 Red — regression gate: seed_kg_for_factcheck_lab は clean を維持。
+    /// 現行 8 fact seed + smoke 15 task expected_keywords で clean=true 必須。
+    /// Lab v21 paired 起動前の sanity check として機能 (項目 244 推奨運用 protocol)。
+    /// Phase 2 Green で coverage logic 実装後 PASS、Phase 5 Lab v21+ で前提条件化。
+    #[test]
+    fn t_lint_seed_kg_for_factcheck_lab_is_clean_with_smoke_keywords() {
+        let store = setup_db();
+        let kg = KnowledgeGraph::new(store.conn());
+        seed_kg_for_factcheck_lab(&kg).expect("seed failed");
+
+        // smoke 15 task expected_keywords の subject/object 全 8 entity を cover
+        // (Pattern 1/2 regex match 経路と整合)。本 list は benchmark.rs::SMOKE_TASK_IDS
+        // 順序と対応、項目 242/243 の expected_keywords を mirror。
+        let seed_triples = vec![
+            Triple {
+                subject: "Bonsai-8B".into(),
+                predicate: "parent_of".into(),
+                object: "Qwen3-8B".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Prism-ml".into(),
+                predicate: "is_a".into(),
+                object: "ternary_model".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Bonsai-Agent".into(),
+                predicate: "child_of".into(),
+                object: "Bonsai-8B".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Bonsai-Agent".into(),
+                predicate: "is_a".into(),
+                object: "rust_project".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Llama-server".into(),
+                predicate: "runtime_of".into(),
+                object: "Bonsai-Agent".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Sqlite".into(),
+                predicate: "storage_of".into(),
+                object: "Bonsai-Agent".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Reflexion".into(),
+                predicate: "loop_of".into(),
+                object: "Bonsai-Agent".into(),
+                confidence: 1.0,
+            },
+            Triple {
+                subject: "Path-Guard".into(),
+                predicate: "sandbox_of".into(),
+                object: "Bonsai-Agent".into(),
+                confidence: 1.0,
+            },
+        ];
+        let keyword_bundles: Vec<Vec<String>> = vec![
+            // halluc 3 task
+            vec!["Bonsai-8B".into(), "parent_of".into(), "Qwen3-8B".into()],
+            vec!["Prism-ml".into(), "is_a".into(), "ternary_model".into()],
+            vec![
+                "Bonsai-Agent".into(),
+                "child_of".into(),
+                "Bonsai-8B".into(),
+            ],
+            // success_fact 5 task (項目 242)
+            vec![
+                "Bonsai-Agent".into(),
+                "is_a".into(),
+                "rust_project".into(),
+            ],
+            vec![
+                "Llama-server".into(),
+                "runtime_of".into(),
+                "Bonsai-Agent".into(),
+            ],
+            vec![
+                "Sqlite".into(),
+                "storage_of".into(),
+                "Bonsai-Agent".into(),
+            ],
+            vec![
+                "Reflexion".into(),
+                "loop_of".into(),
+                "Bonsai-Agent".into(),
+            ],
+            vec![
+                "Path-Guard".into(),
+                "sandbox_of".into(),
+                "Bonsai-Agent".into(),
+            ],
+        ];
+
+        let report = lint_kg_for_lab(&kg, &seed_triples, &keyword_bundles);
+        assert!(
+            report.is_clean(),
+            "現行 seed + smoke keywords は clean であるべき (Lab v21 paired 起動前 sanity gate): \
+             conflicting={} orphan={} uncovered={} case_variant={}",
+            report.conflicting_triples.len(),
+            report.orphan_nodes.len(),
+            report.uncovered_seed_triples.len(),
+            report.case_variant_nodes.len()
+        );
+    }
 }
