@@ -168,6 +168,22 @@ pub fn is_all_trajectories_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// 項目 244 Phase 3 Refactor — KG lint strict gate env 判定
+/// (`BONSAI_KG_LINT_STRICT=1`、default OFF)。
+///
+/// case B 設計 (plan §2.1): default は warn_log のみで Lab 続行、本 env ON 時のみ
+/// `LintReport::is_clean() == false` で abort (Phase 4 で `experiment.rs::run_factcheck_pass_lab`
+/// に配線予定)。Cerememory 三本柱と同 pattern (項目 217 decay / 218 review / 219 working_memory)
+/// + 項目 230/235 (factcheck) と同 env 命名規則 (`BONSAI_*`)。
+///
+/// Lab v21 paired 起動時の運用 protocol で `=1` 推奨 (structural finding 事前 abort)、
+/// 開発時 smoke では default OFF で warning のみ収集。
+pub fn is_kg_lint_strict() -> bool {
+    std::env::var("BONSAI_KG_LINT_STRICT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// テスト用 env mutex (`BONSAI_FACTCHECK_ALL_TRAJECTORIES` 操作の cross-file 排他)。
 ///
 /// factcheck.rs `t_factcheck_all_trajectories_env_opt_in_default_off` と
@@ -205,24 +221,76 @@ pub(crate) static FACTCHECK_ALL_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync:
 /// 呼出元: `experiment.rs::run_factcheck_pass_lab` 内、env-gated 経路で 1 度のみ。
 /// production agent_loop は本 fn を呼ばない (`is_factcheck_enabled()` で OFF 時短絡)。
 pub fn seed_kg_for_factcheck_lab(kg: &KnowledgeGraph<'_>) -> anyhow::Result<()> {
-    let facts: &[(&str, &str, &str)] = &[
-        // halluc seed (Plan A G-4c)
-        ("Bonsai-8B", "parent_of", "Qwen3-8B"),
-        ("Prism-ml", "is_a", "ternary_model"),
-        ("Bonsai-Agent", "child_of", "Bonsai-8B"),
-        // success_fact seed (項目 242 Lab v21)
-        ("Bonsai-Agent", "is_a", "rust_project"),
-        ("Llama-server", "runtime_of", "Bonsai-Agent"),
-        ("Sqlite", "storage_of", "Bonsai-Agent"),
-        ("Reflexion", "loop_of", "Bonsai-Agent"),
-        ("Path-Guard", "sandbox_of", "Bonsai-Agent"),
-    ];
-    for (subj, pred, obj) in facts {
-        let s = kg.add_node("entity", subj)?;
-        let o = kg.add_node("entity", obj)?;
-        kg.add_edge(s, o, pred, 1.0)?;
+    for triple in seed_triples_for_factcheck_lab() {
+        let s = kg.add_node("entity", &triple.subject)?;
+        let o = kg.add_node("entity", &triple.object)?;
+        kg.add_edge(s, o, &triple.predicate, 1.0)?;
     }
     Ok(())
+}
+
+/// 項目 244 Phase 3 Refactor — `seed_kg_for_factcheck_lab` で投入する 8 fact の
+/// `Triple` 表現を返す (caller 側 lint pass で uncovered 判定に使用)。
+///
+/// `seed_kg_for_factcheck_lab` の単一の真実源 (Single Source of Truth) として、
+/// Phase 4 で `experiment.rs::run_factcheck_pass_lab` から lint_kg_for_lab に
+/// seed_triples 引数として渡せるよう抽出。test の 8 triple hardcode 重複も解消。
+///
+/// `confidence` は seed (KG 内既存) 由来のため 1.0 固定 (rule-based extraction の
+/// 0.85/0.80 とは異なる、二軸分離設計と整合)。
+pub fn seed_triples_for_factcheck_lab() -> Vec<Triple> {
+    vec![
+        // halluc seed (Plan A G-4c、項目 230)
+        Triple {
+            subject: "Bonsai-8B".into(),
+            predicate: "parent_of".into(),
+            object: "Qwen3-8B".into(),
+            confidence: 1.0,
+        },
+        Triple {
+            subject: "Prism-ml".into(),
+            predicate: "is_a".into(),
+            object: "ternary_model".into(),
+            confidence: 1.0,
+        },
+        Triple {
+            subject: "Bonsai-Agent".into(),
+            predicate: "child_of".into(),
+            object: "Bonsai-8B".into(),
+            confidence: 1.0,
+        },
+        // success_fact seed (項目 242 Lab v21)
+        Triple {
+            subject: "Bonsai-Agent".into(),
+            predicate: "is_a".into(),
+            object: "rust_project".into(),
+            confidence: 1.0,
+        },
+        Triple {
+            subject: "Llama-server".into(),
+            predicate: "runtime_of".into(),
+            object: "Bonsai-Agent".into(),
+            confidence: 1.0,
+        },
+        Triple {
+            subject: "Sqlite".into(),
+            predicate: "storage_of".into(),
+            object: "Bonsai-Agent".into(),
+            confidence: 1.0,
+        },
+        Triple {
+            subject: "Reflexion".into(),
+            predicate: "loop_of".into(),
+            object: "Bonsai-Agent".into(),
+            confidence: 1.0,
+        },
+        Triple {
+            subject: "Path-Guard".into(),
+            predicate: "sandbox_of".into(),
+            object: "Bonsai-Agent".into(),
+            confidence: 1.0,
+        },
+    ]
 }
 
 /// 複数テキストに対し triple 抽出 + KG 検証を一括実行し、集約 summary を返す。
@@ -921,65 +989,18 @@ mod tests {
     /// 現行 8 fact seed + smoke 15 task expected_keywords で clean=true 必須。
     /// Lab v21 paired 起動前の sanity check として機能 (項目 244 推奨運用 protocol)。
     /// Phase 2 Green で coverage logic 実装後 PASS、Phase 5 Lab v21+ で前提条件化。
+    /// Phase 3 Refactor で seed_triples は `seed_triples_for_factcheck_lab()` SSOT 経由。
     #[test]
     fn t_lint_seed_kg_for_factcheck_lab_is_clean_with_smoke_keywords() {
         let store = setup_db();
         let kg = KnowledgeGraph::new(store.conn());
         seed_kg_for_factcheck_lab(&kg).expect("seed failed");
 
+        // Phase 3 Refactor — SSOT 経由で seed triple 取得 (8 件 hardcode 重複排除)
+        let seed_triples = seed_triples_for_factcheck_lab();
         // smoke 15 task expected_keywords の subject/object 全 8 entity を cover
         // (Pattern 1/2 regex match 経路と整合)。本 list は benchmark.rs::SMOKE_TASK_IDS
         // 順序と対応、項目 242/243 の expected_keywords を mirror。
-        let seed_triples = vec![
-            Triple {
-                subject: "Bonsai-8B".into(),
-                predicate: "parent_of".into(),
-                object: "Qwen3-8B".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Prism-ml".into(),
-                predicate: "is_a".into(),
-                object: "ternary_model".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Bonsai-Agent".into(),
-                predicate: "child_of".into(),
-                object: "Bonsai-8B".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Bonsai-Agent".into(),
-                predicate: "is_a".into(),
-                object: "rust_project".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Llama-server".into(),
-                predicate: "runtime_of".into(),
-                object: "Bonsai-Agent".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Sqlite".into(),
-                predicate: "storage_of".into(),
-                object: "Bonsai-Agent".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Reflexion".into(),
-                predicate: "loop_of".into(),
-                object: "Bonsai-Agent".into(),
-                confidence: 1.0,
-            },
-            Triple {
-                subject: "Path-Guard".into(),
-                predicate: "sandbox_of".into(),
-                object: "Bonsai-Agent".into(),
-                confidence: 1.0,
-            },
-        ];
         let keyword_bundles: Vec<Vec<String>> = vec![
             // halluc 3 task
             vec!["Bonsai-8B".into(), "parent_of".into(), "Qwen3-8B".into()],
@@ -1011,5 +1032,60 @@ mod tests {
             report.uncovered_seed_triples.len(),
             report.case_variant_nodes.len()
         );
+    }
+
+    /// Phase 3 Refactor — `seed_triples_for_factcheck_lab` SSOT 検証。
+    /// 8 fact (3 halluc + 5 success_fact) を返却、confidence=1.0 で deterministic。
+    #[test]
+    fn t_seed_triples_for_factcheck_lab_returns_8_triples() {
+        let triples = seed_triples_for_factcheck_lab();
+        assert_eq!(
+            triples.len(),
+            8,
+            "8 fact (3 halluc + 5 success_fact) を返すべき"
+        );
+        assert!(
+            triples
+                .iter()
+                .all(|t| (t.confidence - 1.0).abs() < f64::EPSILON),
+            "seed triple は全 confidence=1.0 (KG 既存由来)"
+        );
+        // 主要 entity invariant: success_fact の 5 つは「is_a/runtime_of/storage_of/loop_of/sandbox_of」predicate
+        let success_preds: std::collections::HashSet<&str> = triples
+            .iter()
+            .filter(|t| t.predicate != "parent_of" && t.predicate != "child_of")
+            .map(|t| t.predicate.as_str())
+            .collect();
+        for pred in &["is_a", "runtime_of", "storage_of", "loop_of", "sandbox_of"] {
+            assert!(
+                success_preds.contains(pred),
+                "predicate {pred} は success_fact seed に含まれるべき: got {success_preds:?}"
+            );
+        }
+    }
+
+    /// Phase 3 Refactor — `BONSAI_KG_LINT_STRICT` env opt-in 判定。
+    /// default OFF / "1"/"TRUE"/"true" で ON、それ以外で OFF。
+    /// `is_factcheck_enabled` / `is_all_trajectories_enabled` と同 pattern。
+    #[test]
+    fn t_is_kg_lint_strict_env_opt_in_default_off() {
+        // env mutate cross-test 競合回避 (FACTCHECK_ALL_ENV_TEST_LOCK 同 pattern、
+        // 本 env は他 test と独立だが将来 cross-file mutate に備え lock 取得)
+        let _g = FACTCHECK_ALL_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("BONSAI_KG_LINT_STRICT") };
+        assert!(!is_kg_lint_strict(), "未設定で false");
+
+        unsafe { std::env::set_var("BONSAI_KG_LINT_STRICT", "1") };
+        assert!(is_kg_lint_strict(), "\"1\" で true");
+
+        unsafe { std::env::set_var("BONSAI_KG_LINT_STRICT", "TRUE") };
+        assert!(is_kg_lint_strict(), "case-insensitive \"TRUE\" で true");
+
+        unsafe { std::env::set_var("BONSAI_KG_LINT_STRICT", "0") };
+        assert!(!is_kg_lint_strict(), "\"0\" で false");
+
+        unsafe { std::env::remove_var("BONSAI_KG_LINT_STRICT") };
     }
 }
