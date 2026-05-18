@@ -1641,6 +1641,31 @@ fn run_factcheck_pass_lab(store: &MemoryStore, since_event_id: i64) -> Result<Fa
         );
     }
 
+    // 項目 244 Phase 4: KG lint pass (LLM Wiki Lint パターン適用)。
+    // Lab v20 structural finding (matched=0 deterministic、19h 投下後発覚) の事前検出。
+    // 4 軸 (矛盾/孤立/uncovered/case_variant) を check、clean ない時 warn_log で警告。
+    // `BONSAI_KG_LINT_STRICT=1` 設定時のみ非 clean で abort (案 B 設計、plan §2.1)。
+    // production agent_loop はこの path に到達しない (`is_factcheck_enabled()` で短絡)。
+    let seed_triples = factcheck::seed_triples_for_factcheck_lab();
+    let keyword_bundles: Vec<Vec<String>> = BenchmarkSuite::default_tasks()
+        .tasks
+        .iter()
+        .map(|t| t.expected_keywords.clone())
+        .collect();
+    let lint_report = factcheck::lint_kg_for_lab(&graph, &seed_triples, &keyword_bundles);
+    lint_report.warn_log();
+    if factcheck::is_kg_lint_strict() && !lint_report.is_clean() {
+        anyhow::bail!(
+            "KG lint NOT clean and BONSAI_KG_LINT_STRICT=1 (項目 244 strict gate): \
+             conflicting={} orphan={} uncovered={} case_variant={}. \
+             seed/benchmark の不整合を解消するか env を unset してください。",
+            lint_report.conflicting_triples.len(),
+            lint_report.orphan_nodes.len(),
+            lint_report.uncovered_seed_triples.len(),
+            lint_report.case_variant_nodes.len(),
+        );
+    }
+
     // 項目 235: env opt-in で trajectory selection を拡張 (halluc SUCCESS-by-design 対応)。
     // env unset (default) → 従来 failed-only / min_steps=2 完全互換 (G-4c v1/v2 と同経路)。
     // env=1 → failed + successful chain + min_steps=0 で halluc 0/1-tool session も対象化
