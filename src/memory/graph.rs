@@ -2,6 +2,14 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::collections::{HashSet, VecDeque};
 
+/// 項目 244 Phase 2 Green — KG 内の 1 つの (subject, predicate, object) edge tuple。
+/// `all_conflicting_edge_pairs` の戻り値内で pair として使用。
+pub type EdgeTuple = (String, String, String);
+
+/// 項目 244 Phase 2 Green — KG 矛盾を表す 2 つの edge tuple の pair。
+/// `((subj, pred, obj_a), (subj, pred, obj_b))` 形式で subj+pred 同一・object 異なる pair。
+pub type ConflictingEdgePair = (EdgeTuple, EdgeTuple);
+
 /// グラフ構造の連想記憶。エンティティ間の関係をSQLiteで保持し、
 /// N階隣接探索でコンテキストを生成する。
 /// Agentic Engram知見: 「ファイルA→修正パターンB→ツールC」のような
@@ -216,6 +224,76 @@ impl<'a> KnowledgeGraph<'a> {
             Err(_) => return Vec::new(),
         };
         rows.filter_map(Result::ok).collect()
+    }
+
+    /// 項目 244 Phase 2 Green — orphan node 列挙 (incoming/outgoing edge を持たない node)。
+    ///
+    /// LLM Wiki Lint パターン (Karpathy) の「孤立ページ検出」適用。
+    /// Lab paired 起動前 sanity check で uncovered entity を警告する用途。
+    /// 戻り値: 孤立 node 名の Vec、空 Vec = 孤立なし。
+    pub fn orphan_nodes(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM knowledge_nodes \
+             WHERE id NOT IN (SELECT source_id FROM knowledge_edges) \
+               AND id NOT IN (SELECT target_id FROM knowledge_edges) \
+             ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 項目 244 Phase 2 Green — case variant pair 列挙 (同名 case 違い)。
+    ///
+    /// LLM Wiki Lint パターン「表記揺れ検出」適用。
+    /// 例: "Bonsai-Agent" と "bonsai-agent" 両方存在で 1 pair 返却。
+    /// 戻り値: `(name_a, name_b)` の Vec、a.id < b.id 順 (deterministic)。
+    pub fn case_variant_pairs(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.name, b.name FROM knowledge_nodes a \
+             JOIN knowledge_nodes b \
+               ON a.id < b.id AND LOWER(a.name) = LOWER(b.name) AND a.name != b.name \
+             ORDER BY a.name, b.name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 項目 244 Phase 2 Green — KG 内の全 (subject, predicate) 同一・object 異なる
+    /// edge pair を列挙 (find_conflicting_edges の全 KG 版)。
+    ///
+    /// LLM Wiki Lint パターン「矛盾検出」適用。
+    /// 戻り値: 各要素 `((subj, pred, obj_a), (subj, pred, obj_b))` の有向 pair、
+    /// edge id 順 (deterministic)。caller 側で `Triple` に変換する想定。
+    pub fn all_conflicting_edge_pairs(&self) -> Result<Vec<ConflictingEdgePair>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sn.name, ke.relation, tn.name \
+             FROM knowledge_edges ke \
+             JOIN knowledge_nodes sn ON sn.id = ke.source_id \
+             JOIN knowledge_nodes tn ON tn.id = ke.target_id \
+             ORDER BY sn.name, ke.relation, tn.name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let edges: Vec<EdgeTuple> = rows.filter_map(|r| r.ok()).collect();
+
+        // Group by (subject, predicate) and emit pairs with different objects
+        let mut conflicts = Vec::new();
+        for i in 0..edges.len() {
+            for j in (i + 1)..edges.len() {
+                if edges[i].0 == edges[j].0 && edges[i].1 == edges[j].1 && edges[i].2 != edges[j].2
+                {
+                    conflicts.push((edges[i].clone(), edges[j].clone()));
+                }
+            }
+        }
+        Ok(conflicts)
     }
 
     /// エラー→ファイル→ツール関係を記録（エラー発生時に呼ぶ）

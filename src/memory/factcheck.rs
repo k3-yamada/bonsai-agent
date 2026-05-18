@@ -253,6 +253,142 @@ pub fn run_factcheck_pass(texts: &[String], kg: &KnowledgeGraph<'_>) -> FactChec
     summary
 }
 
+// ── 項目 244 Phase 2 Green — KG Lint Coverage Check (LLM Wiki Lint パターン適用) ──
+//
+// 起点: .claude/plan/kg-lint-coverage-check.md §2.1 (案 B 推奨)
+// 設計: 4 軸 LintReport を Lab smoke startup で実行、矛盾/孤立/uncovered/case_variant を
+//       proactive detect。Lab v20 structural finding (matched=0 deterministic、19h 投下後
+//       発覚) を <1 sec で事前検出可能化。
+//
+// 配線 (Phase 4 Smoke G-8a/b/c、本 file scope 外):
+//   experiment.rs::run_lab で is_factcheck_enabled() 時に lint_kg_for_lab 呼出 → warn_log。
+//   `BONSAI_KG_LINT_STRICT=1` env で gate 化 (clean ない時 abort、opt-in)。
+
+/// KG 整合性 lint 結果 (4 軸: 矛盾/孤立/uncovered/case_variant)。
+///
+/// 各 field が空 = clean。`is_clean()` で全 field 空判定、`warn_log()` で
+/// `[WARN][lab.lint]` チャンネルに件数 emit。
+#[derive(Debug, Default, Clone)]
+pub struct LintReport {
+    /// (subject, predicate) 同一・object 異なる edge pair (KG 矛盾)。
+    /// 例: (Alice→Bob/parent_of, Alice→Charlie/parent_of)
+    pub conflicting_triples: Vec<(Triple, Triple)>,
+    /// incoming/outgoing edge を持たない node 名 (孤立 entity)。
+    pub orphan_nodes: Vec<String>,
+    /// seed triple のうち、subject/predicate/object のいずれも benchmark task
+    /// expected_keywords (= `keyword_bundles` flat 連結) で hit しないもの。
+    /// Lab paired で matched=0 必然となる「未 cover triple」を proactive detect。
+    pub uncovered_seed_triples: Vec<Triple>,
+    /// 同名 case 違い pair (表記揺れ)。例: ("Bonsai-Agent", "bonsai-agent")。
+    pub case_variant_nodes: Vec<(String, String)>,
+}
+
+impl LintReport {
+    /// 全 4 軸が空 = clean。Lab v21+ paired 起動前 sanity gate として使用。
+    pub fn is_clean(&self) -> bool {
+        self.conflicting_triples.is_empty()
+            && self.orphan_nodes.is_empty()
+            && self.uncovered_seed_triples.is_empty()
+            && self.case_variant_nodes.is_empty()
+    }
+
+    /// `[WARN][lab.lint]` チャンネルに各カテゴリ件数を emit。
+    /// clean=true の場合は emit せず (false positive 防止)。
+    /// 案 B 設計: log のみで Lab 続行、`BONSAI_KG_LINT_STRICT=1` env で gate 化は caller 責務。
+    pub fn warn_log(&self) {
+        if self.is_clean() {
+            return;
+        }
+        use crate::observability::logger::{LogLevel, log_event};
+        log_event(
+            LogLevel::Warn,
+            "lab.lint",
+            &format!(
+                "KG lint NOT clean: conflicting={} orphan={} uncovered={} case_variant={} \
+                 (Lab paired で structural blunder のリスクあり、`BONSAI_KG_LINT_STRICT=1` で gate 化可能)",
+                self.conflicting_triples.len(),
+                self.orphan_nodes.len(),
+                self.uncovered_seed_triples.len(),
+                self.case_variant_nodes.len(),
+            ),
+        );
+    }
+}
+
+/// KG 整合性 lint pass を実行し `LintReport` を返す (項目 244 Phase 2 Green)。
+///
+/// # 引数
+/// - `kg`: 検査対象 KnowledgeGraph (典型は `seed_kg_for_factcheck_lab` 適用後)
+/// - `seed_triples`: 期待 seed の Triple list (uncovered 判定用)、空 Vec なら uncovered check skip
+/// - `keyword_bundles`: benchmark task の expected_keywords list (各 task 1 bundle)、
+///   triple の subject/predicate/object がいずれかの bundle 内 keyword と equal なら hit
+///
+/// # 戻り値
+/// 各 field が空なら clean (`LintReport::is_clean()` で判定)。
+///
+/// # 実装方針
+/// - 矛盾: `kg.all_conflicting_edge_pairs()` → Triple pair 変換
+/// - 孤立: `kg.orphan_nodes()` 直結
+/// - uncovered: seed triple 各々を keyword_bundles で `is_triple_covered()` 判定、false なら格納
+/// - case variant: `kg.case_variant_pairs()` 直結
+///
+/// SQLite 失敗時は各 field を空 Vec として続行 (lint 自体の failure で Lab を阻害しない設計)。
+pub fn lint_kg_for_lab(
+    kg: &KnowledgeGraph<'_>,
+    seed_triples: &[Triple],
+    keyword_bundles: &[Vec<String>],
+) -> LintReport {
+    let conflicting_triples: Vec<(Triple, Triple)> = kg
+        .all_conflicting_edge_pairs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|((s1, p1, o1), (s2, p2, o2))| {
+            (
+                Triple {
+                    subject: s1,
+                    predicate: p1,
+                    object: o1,
+                    confidence: 1.0,
+                },
+                Triple {
+                    subject: s2,
+                    predicate: p2,
+                    object: o2,
+                    confidence: 1.0,
+                },
+            )
+        })
+        .collect();
+
+    let orphan_nodes = kg.orphan_nodes().unwrap_or_default();
+    let case_variant_nodes = kg.case_variant_pairs().unwrap_or_default();
+
+    let uncovered_seed_triples: Vec<Triple> = seed_triples
+        .iter()
+        .filter(|t| !is_triple_covered(t, keyword_bundles))
+        .cloned()
+        .collect();
+
+    LintReport {
+        conflicting_triples,
+        orphan_nodes,
+        uncovered_seed_triples,
+        case_variant_nodes,
+    }
+}
+
+/// triple が keyword bundles のいずれかで「hit」するか判定 (項目 244 Phase 2 Green 内部 helper)。
+///
+/// hit 条件: いずれかの bundle に含まれる keyword が triple.subject / predicate / object と equal。
+/// 設計判断: substring match ではなく exact match (false positive 抑止、R5 mitigation)。
+fn is_triple_covered(triple: &Triple, keyword_bundles: &[Vec<String>]) -> bool {
+    keyword_bundles.iter().any(|bundle| {
+        bundle
+            .iter()
+            .any(|kw| kw == &triple.subject || kw == &triple.predicate || kw == &triple.object)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -848,32 +984,16 @@ mod tests {
             // halluc 3 task
             vec!["Bonsai-8B".into(), "parent_of".into(), "Qwen3-8B".into()],
             vec!["Prism-ml".into(), "is_a".into(), "ternary_model".into()],
-            vec![
-                "Bonsai-Agent".into(),
-                "child_of".into(),
-                "Bonsai-8B".into(),
-            ],
+            vec!["Bonsai-Agent".into(), "child_of".into(), "Bonsai-8B".into()],
             // success_fact 5 task (項目 242)
-            vec![
-                "Bonsai-Agent".into(),
-                "is_a".into(),
-                "rust_project".into(),
-            ],
+            vec!["Bonsai-Agent".into(), "is_a".into(), "rust_project".into()],
             vec![
                 "Llama-server".into(),
                 "runtime_of".into(),
                 "Bonsai-Agent".into(),
             ],
-            vec![
-                "Sqlite".into(),
-                "storage_of".into(),
-                "Bonsai-Agent".into(),
-            ],
-            vec![
-                "Reflexion".into(),
-                "loop_of".into(),
-                "Bonsai-Agent".into(),
-            ],
+            vec!["Sqlite".into(), "storage_of".into(), "Bonsai-Agent".into()],
+            vec!["Reflexion".into(), "loop_of".into(), "Bonsai-Agent".into()],
             vec![
                 "Path-Guard".into(),
                 "sandbox_of".into(),
