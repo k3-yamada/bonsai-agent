@@ -1899,6 +1899,21 @@ pub fn judge_gate_check(
     })
 }
 
+/// 項目 252 Phase 2.5 wiring (F4 案 A、plan lab-runtime-stabilization-f4-mlx-latency.md §3.2.2).
+///
+/// Lab cycle 起動前の MLX server pre-warm. `count` 回 `backend.generate(&[user("ping")], ...)`
+/// を呼び、MLX 2-bit cold start latency を Lab cycle 計時前に消化する.
+/// 各 generate の Ok/Err は log_event のみ (graceful degradation、Err でも cycle 続行).
+///
+/// 戻り値: 成功した generate 呼出回数 (= count - Err 回数).
+/// MockLlmBackend は常に Ok を返すため、test では `assert_eq!(prewarm(&mock, n), n)` で確認可能.
+///
+/// Phase 1 Red stub: 常に 0 を返却 (生成呼出ゼロ).
+/// Phase 2 Green: loop 実装 + log_event + backend.generate("ping") 呼出.
+pub fn lab_mlx_prewarm(_backend: &dyn LlmBackend, _count: usize) -> usize {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3482,5 +3497,46 @@ mod tests {
         assert!((seen[0] - 0.3).abs() < 1e-9);
         assert!((seen[1] - 0.4).abs() < 1e-9);
         assert!((seen[2] - 0.5).abs() < 1e-9);
+    }
+
+    // ── 項目 252 Phase 2.5 wiring Phase 1 Red: lab_mlx_prewarm 動作確証 (stub で 2 FAIL) ──
+    //
+    // Phase 1 Red: lab_mlx_prewarm は常に 0 返却 → t1/t3 が FAIL、t2 (count=0 no-op) PASS.
+    // Phase 2 Green: loop + backend.generate("ping") + log_event 実装で 3 test 全 PASS.
+
+    /// Phase 1 Red 核心: count=3 で MockLlmBackend.generate を 3 回呼ぶ → return 3.
+    #[test]
+    fn t_lab_mlx_prewarm_returns_count_when_all_succeed() {
+        let backend = crate::runtime::inference::MockLlmBackend::new(vec![
+            "warm1".to_string(),
+            "warm2".to_string(),
+            "warm3".to_string(),
+        ]);
+        let succ = lab_mlx_prewarm(&backend, 3);
+        assert_eq!(
+            succ, 3,
+            "MockLlmBackend は常に Ok → count==3 すべて成功 (Phase 2 Green PASS 期待)"
+        );
+    }
+
+    /// Phase 1 Red sanity: count=0 で no-op、return 0 (stub も 0 → PASS).
+    #[test]
+    fn t_lab_mlx_prewarm_zero_count_is_noop() {
+        let backend = crate::runtime::inference::MockLlmBackend::single("unused");
+        let succ = lab_mlx_prewarm(&backend, 0);
+        assert_eq!(succ, 0, "count==0 で generate 呼出ゼロ (no-op)");
+    }
+
+    /// Phase 1 Red 核心: count=5 で return 5 (FAIL、stub 0 と乖離).
+    #[test]
+    fn t_lab_mlx_prewarm_count_5_all_succeed() {
+        let backend = crate::runtime::inference::MockLlmBackend::new(
+            (0..5).map(|i| format!("warm{i}")).collect(),
+        );
+        let succ = lab_mlx_prewarm(&backend, 5);
+        assert_eq!(
+            succ, 5,
+            "count==5 で全 5 回成功 (BONSAI_LAB_MLX_WARMUP_COUNT range 上限境界 (10) 半分)"
+        );
     }
 }
