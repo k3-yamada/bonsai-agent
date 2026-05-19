@@ -72,12 +72,12 @@ pub struct BudgetRatios {
 
 impl Default for BudgetRatios {
     fn default() -> Self {
-        // Phase 1 Red: 全 0、Phase 2 Green で 0.4/0.3/0.2/0.1 に変更
+        // Phase 2 Green: plan §3.1 base ratio 40/30/20/10
         Self {
-            recent_buffer: 0.0,
-            conversation_summary: 0.0,
-            relevant_entities: 0.0,
-            knowledge_graph: 0.0,
+            recent_buffer: 0.4,
+            conversation_summary: 0.3,
+            relevant_entities: 0.2,
+            knowledge_graph: 0.1,
         }
     }
 }
@@ -122,26 +122,49 @@ impl BudgetRatios {
         (sum - 1.0).abs() < 0.001
     }
 
-    /// Phase 1 Red: skeleton — 全 0 を返す.
+    /// `total` トークンを 4 軸 ratio で按分、余りは buffer に寄せる.
     pub fn allocate(&self, total: usize) -> AllocatedBudget {
-        let _ = (self, total);
+        let t = total as f32;
+        let buffer = (t * self.recent_buffer) as usize;
+        let summary = (t * self.conversation_summary) as usize;
+        let entities = (t * self.relevant_entities) as usize;
+        let kg = (t * self.knowledge_graph) as usize;
+        let sum = buffer + summary + entities + kg;
+        let remainder = total.saturating_sub(sum);
         AllocatedBudget {
-            total: 0,
-            buffer: 0,
-            summary: 0,
-            entities: 0,
-            kg: 0,
+            total,
+            buffer: buffer + remainder,
+            summary,
+            entities,
+            kg,
         }
     }
 
-    /// Phase 1 Red: skeleton — self を返す (no adjustment).
+    /// relevance score に応じて ratio を動的調整、正規化後返す.
+    ///
+    /// 計算式: new_ratio = base × (1 + (relevance - 0.5) × α)、α は `dynamic_budget_alpha()`。
+    /// 全 ratio 合計が 0 以下になった場合は self を返す (異常入力 safeguard)。
     pub fn adjusted(&self, relevance: &MemoryRelevance) -> BudgetRatios {
-        let _ = relevance;
-        *self
+        let alpha = dynamic_budget_alpha();
+        let adjust = |base: f32, rel: f32| base * (1.0 + (rel - 0.5) * alpha);
+        let nb = adjust(self.recent_buffer, relevance.buffer);
+        let ns = adjust(self.conversation_summary, relevance.summary);
+        let ne = adjust(self.relevant_entities, relevance.entities);
+        let nk = adjust(self.knowledge_graph, relevance.kg);
+        let sum = nb + ns + ne + nk;
+        if sum <= 0.0 {
+            return *self;
+        }
+        BudgetRatios {
+            recent_buffer: nb / sum,
+            conversation_summary: ns / sum,
+            relevant_entities: ne / sum,
+            knowledge_graph: nk / sum,
+        }
     }
 }
 
-/// `BONSAI_DYNAMIC_BUDGET=1` で dynamic budget 経路を有効化 (Phase 1 Red skeleton).
+/// `BONSAI_DYNAMIC_BUDGET=1` で dynamic budget 経路を有効化.
 pub fn is_dynamic_budget_enabled() -> bool {
     matches!(
         std::env::var("BONSAI_DYNAMIC_BUDGET").as_deref(),
@@ -149,14 +172,34 @@ pub fn is_dynamic_budget_enabled() -> bool {
     )
 }
 
-/// `BONSAI_DYNAMIC_BUDGET_RATIOS="0.4,0.3,0.2,0.1"` で ratio override (Phase 1 Red: 常に None).
+/// `BONSAI_DYNAMIC_BUDGET_RATIOS="0.4,0.3,0.2,0.1"` で ratio override.
+///
+/// 4 要素 + 合計が 1.0 ±ε でない場合は `None`、default fallback。
 pub fn dynamic_budget_ratios_from_env() -> Option<BudgetRatios> {
-    None
+    let val = std::env::var("BONSAI_DYNAMIC_BUDGET_RATIOS").ok()?;
+    let parts: Vec<f32> = val
+        .split(',')
+        .filter_map(|s| s.trim().parse::<f32>().ok())
+        .collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let r = BudgetRatios {
+        recent_buffer: parts[0],
+        conversation_summary: parts[1],
+        relevant_entities: parts[2],
+        knowledge_graph: parts[3],
+    };
+    if r.is_normalized() { Some(r) } else { None }
 }
 
-/// `BONSAI_DYNAMIC_BUDGET_ALPHA` で adjusted の α 係数 override (default 0.2).
+/// `BONSAI_DYNAMIC_BUDGET_ALPHA` で adjusted の α 係数 override (default 0.2、範囲 [0.0, 1.0])。
 pub fn dynamic_budget_alpha() -> f32 {
-    0.2
+    std::env::var("BONSAI_DYNAMIC_BUDGET_ALPHA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|a| (0.0..=1.0).contains(a))
+        .unwrap_or(0.2)
 }
 
 /// `BONSAI_DYNAMIC_BUDGET_*` env を弄る test 間 cross-file mutex.
