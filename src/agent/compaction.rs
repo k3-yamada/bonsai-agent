@@ -56,6 +56,113 @@ impl CompactionConfig {
     }
 }
 
+// ─── Dynamic Budget Ratios (項目 248、plan dynamic-token-budget-compaction.md §3.1) ───
+//
+// Phase 1 Red: skeleton (全 ratio=0.0、allocate は空、env getter は常に None)。
+// Phase 2 Green で full impl、Phase 4 で compact_if_needed 統合 (本 PR scope 外)。
+
+/// メモリ種別ごとの budget 配分 ratio (Zenn 4 architecture 配分の bonsai 適用).
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetRatios {
+    pub recent_buffer: f32,
+    pub conversation_summary: f32,
+    pub relevant_entities: f32,
+    pub knowledge_graph: f32,
+}
+
+impl Default for BudgetRatios {
+    fn default() -> Self {
+        // Phase 1 Red: 全 0、Phase 2 Green で 0.4/0.3/0.2/0.1 に変更
+        Self {
+            recent_buffer: 0.0,
+            conversation_summary: 0.0,
+            relevant_entities: 0.0,
+            knowledge_graph: 0.0,
+        }
+    }
+}
+
+/// 配分結果 (各種別ごとの絶対 token 数).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocatedBudget {
+    pub total: usize,
+    pub buffer: usize,
+    pub summary: usize,
+    pub entities: usize,
+    pub kg: usize,
+}
+
+/// 1 task ごとの種別 relevance score (0.0..=1.0).
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRelevance {
+    pub buffer: f32,
+    pub summary: f32,
+    pub entities: f32,
+    pub kg: f32,
+}
+
+impl Default for MemoryRelevance {
+    fn default() -> Self {
+        Self {
+            buffer: 1.0,
+            summary: 0.5,
+            entities: 0.5,
+            kg: 0.5,
+        }
+    }
+}
+
+impl BudgetRatios {
+    /// 合計が 1.0 ±ε か (Phase 1 Red では全 0 で false).
+    pub fn is_normalized(&self) -> bool {
+        let sum = self.recent_buffer
+            + self.conversation_summary
+            + self.relevant_entities
+            + self.knowledge_graph;
+        (sum - 1.0).abs() < 0.001
+    }
+
+    /// Phase 1 Red: skeleton — 全 0 を返す.
+    pub fn allocate(&self, total: usize) -> AllocatedBudget {
+        let _ = (self, total);
+        AllocatedBudget {
+            total: 0,
+            buffer: 0,
+            summary: 0,
+            entities: 0,
+            kg: 0,
+        }
+    }
+
+    /// Phase 1 Red: skeleton — self を返す (no adjustment).
+    pub fn adjusted(&self, relevance: &MemoryRelevance) -> BudgetRatios {
+        let _ = relevance;
+        *self
+    }
+}
+
+/// `BONSAI_DYNAMIC_BUDGET=1` で dynamic budget 経路を有効化 (Phase 1 Red skeleton).
+pub fn is_dynamic_budget_enabled() -> bool {
+    matches!(
+        std::env::var("BONSAI_DYNAMIC_BUDGET").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+/// `BONSAI_DYNAMIC_BUDGET_RATIOS="0.4,0.3,0.2,0.1"` で ratio override (Phase 1 Red: 常に None).
+pub fn dynamic_budget_ratios_from_env() -> Option<BudgetRatios> {
+    None
+}
+
+/// `BONSAI_DYNAMIC_BUDGET_ALPHA` で adjusted の α 係数 override (default 0.2).
+pub fn dynamic_budget_alpha() -> f32 {
+    0.2
+}
+
+/// `BONSAI_DYNAMIC_BUDGET_*` env を弄る test 間 cross-file mutex.
+#[cfg(test)]
+pub(crate) static DYNAMIC_BUDGET_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// メッセージ列の概算トークン数を保守的に算出する。
 ///
 /// ASCII (chars/3) と UTF-8 byte ベース (bytes*0.4) の `max` を取り、
@@ -1323,5 +1430,70 @@ mod tests {
         let unresolved = collect_unresolved(&messages, 1);
         assert_eq!(unresolved.len(), 1, "実エラーは未解決事項として収集する");
         assert!(unresolved[0].contains("ツール実行エラー"));
+    }
+
+    // ─── Dynamic Budget Ratios (項目 248) tests ───────────────────────────
+    //
+    // Phase 1 Red 期待: skeleton で 4 件 FAIL + 1 件 PASS (env unset sanity gate)。
+    // Phase 2 Green で 5 件 PASS に。
+
+    #[test]
+    fn t_budget_ratios_default_sums_to_one() {
+        let r = BudgetRatios::default();
+        assert!(
+            r.is_normalized(),
+            "default ratio の合計 == 1.0 ±ε (Phase 1 Red 期待 FAIL、Phase 2 Green PASS)"
+        );
+    }
+
+    #[test]
+    fn t_allocate_distributes_total() {
+        let r = BudgetRatios::default();
+        let alloc = r.allocate(10000);
+        // Phase 2 Green: buffer=4000, summary=3000, entities=2000, kg=1000
+        assert_eq!(
+            alloc.buffer + alloc.summary + alloc.entities + alloc.kg,
+            10000,
+            "Phase 2 Green: total 全消費 (allocate sum == 10000)"
+        );
+        assert_eq!(alloc.total, 10000);
+    }
+
+    #[test]
+    fn t_allocate_handles_remainder() {
+        let r = BudgetRatios::default();
+        let alloc = r.allocate(10003);
+        // 余り 3 は buffer に寄る
+        let sum = alloc.buffer + alloc.summary + alloc.entities + alloc.kg;
+        assert_eq!(sum, 10003, "Phase 2 Green: 余り含めて total 一致");
+    }
+
+    #[test]
+    fn t_adjusted_increases_high_relevance() {
+        let r = BudgetRatios::default();
+        let relevance = MemoryRelevance {
+            buffer: 1.0,
+            summary: 0.3,
+            entities: 0.8, // > 0.5 で entities ratio 増加
+            kg: 0.2,
+        };
+        let adjusted = r.adjusted(&relevance);
+        // Phase 2 Green: entities が base 0.2 より大きくなる
+        assert!(
+            adjusted.relevant_entities > 0.2,
+            "Phase 2 Green: high relevance で entities ratio 増 (Phase 1 Red FAIL 期待)"
+        );
+    }
+
+    #[test]
+    fn t_dynamic_budget_env_unset_returns_none() {
+        let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET_RATIOS") };
+        assert!(
+            dynamic_budget_ratios_from_env().is_none(),
+            "env unset で None 戻り (Phase 1 でも PASS、sanity gate)"
+        );
     }
 }
