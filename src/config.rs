@@ -345,6 +345,27 @@ pub fn lab_task_limit() -> Option<usize> {
         .filter(|n| (1..=15).contains(n))
 }
 
+/// `BONSAI_LAB_MLX_WARMUP=1` で Lab 専用 MLX server pre-warm gate (項目 252 候補、F4 案 A).
+///
+/// MLX 2-bit primary の cold start latency を Lab cycle 計時前に消化、F1 (sse 180s) と併用
+/// で Lab v22 paired 5h 完走を目標化。production default OFF (env unset 時 no-op)。
+///
+/// Phase 1 Red stub: 常に false 返却 (env=1 test FAIL 期待).
+/// Phase 2 Green: 既存 F2/F3 getter と同形 env parse + matches! 判定.
+pub fn is_lab_mlx_warmup() -> bool {
+    false
+}
+
+/// `BONSAI_LAB_MLX_WARMUP_COUNT=N` で pre-warm 投入回数 override (1..=10、項目 252 候補、F4 案 A).
+///
+/// 戻り値: 1..=10 で `Some(N)`、parse 失敗 / 範囲外 / unset で `None` → caller 側 unwrap_or(3) 想定.
+///
+/// Phase 1 Red stub: 常に None 返却 (env=5 test FAIL 期待).
+/// Phase 2 Green: 既存 lab_task_limit と同形 parse + filter.
+pub fn lab_mlx_warmup_count() -> Option<usize> {
+    None
+}
+
 /// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
 #[cfg(test)]
 pub(crate) static LAB_RUNTIME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1201,5 +1222,78 @@ max_iterations = 20
         unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "abc") };
         assert_eq!(lab_task_limit(), None, "parse 失敗で None");
         unsafe { std::env::remove_var("BONSAI_LAB_TASK_LIMIT") };
+    }
+
+    // ── 項目 252 候補: F4 案 A MLX pre-warm env getter test (Phase 1 Red、stub で 2 FAIL) ──
+    //
+    // Phase 1 Red: is_lab_mlx_warmup / lab_mlx_warmup_count は stub で false / None 返却.
+    // Phase 2 Green: 既存 F2/F3 と同形 env parse + matches! + range filter で 4 test PASS.
+    // Phase 3 Refactor: clippy/fmt clean、experiment.rs pre-warm 配線は別 commit (case-by-case).
+
+    /// Phase 1 Red 核心: env=1 で true 期待、stub は常に false → FAIL.
+    /// env unset 時 false (default OFF backward compat、stub でも PASS).
+    #[test]
+    fn t_is_lab_mlx_warmup_env_gate_active() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP") };
+        assert!(
+            !is_lab_mlx_warmup(),
+            "env unset で MLX pre-warm OFF (default backward compat)"
+        );
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP", "1") };
+        assert!(
+            is_lab_mlx_warmup(),
+            "env=\"1\" で MLX pre-warm ON (Phase 2 Green PASS 期待)"
+        );
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP") };
+    }
+
+    /// Phase 1 Red sanity: env unset で None (stub は常に None、PASS).
+    #[test]
+    fn t_lab_mlx_warmup_count_env_unset_none() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
+        assert_eq!(
+            lab_mlx_warmup_count(),
+            None,
+            "env unset で None (caller が unwrap_or(3) で default 適用)"
+        );
+    }
+
+    /// Phase 1 Red 核心: env=5 で Some(5) 期待、stub は None → FAIL.
+    #[test]
+    fn t_lab_mlx_warmup_count_env_parse() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "5") };
+        assert_eq!(
+            lab_mlx_warmup_count(),
+            Some(5),
+            "env=\"5\" で Some(5) (Phase 2 Green PASS 期待)"
+        );
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
+    }
+
+    /// Phase 1 Red sanity: range 外で None (stub は常に None、PASS).
+    #[test]
+    fn t_lab_mlx_warmup_count_env_out_of_range() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // 0 (下限外)
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "0") };
+        assert_eq!(lab_mlx_warmup_count(), None, "env=0 で None");
+        // 11 (上限外、1..=10)
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "11") };
+        assert_eq!(lab_mlx_warmup_count(), None, "env=11 (10超) で None");
+        // parse 失敗
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "abc") };
+        assert_eq!(lab_mlx_warmup_count(), None, "parse 失敗で None");
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
     }
 }
