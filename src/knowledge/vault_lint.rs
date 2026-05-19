@@ -368,4 +368,3 @@ mod tests {
         assert!(result, "BONSAI_VAULT_LINT_LAB=1 で Lab wiring gate ON");
     }
 }
-

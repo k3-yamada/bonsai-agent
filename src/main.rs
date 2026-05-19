@@ -147,13 +147,20 @@ fn main() -> Result<()> {
                 prev_sse
             );
         }
-        // F2: BONSAI_LAB_MLX_ONLY=1 → fallback_chain 無効化で retry chain 経路消滅
+        // F2: BONSAI_LAB_MLX_ONLY=1 → fallback_chain 無効化 + primary backend を MLX に切替
+        // (項目 249 Phase 4 Smoke G-RT で fallback クリアのみでは primary llama-server を試行する
+        // 構造的バグを実機で検出、F2 の本来意図「MLX-only」を完全実現するため primary も切替).
         if bonsai_agent::config::is_lab_mlx_only() {
             let prev_entries = app_config.fallback_chain.entries.len();
             app_config.fallback_chain.entries.clear();
+            let prev_backend = format!("{:?}", app_config.model.backend);
+            let prev_url = app_config.model.server_url.clone();
+            app_config.model.backend = ServerBackend::MlxLm;
+            app_config.model.server_url = "http://127.0.0.1:8000".to_string();
+            app_config.model.model_id = "prism-ml/Ternary-Bonsai-8B-mlx-2bit".to_string();
             eprintln!(
-                "[lab] BONSAI_LAB_MLX_ONLY=1 → fallback_chain.entries cleared ({} → 0)",
-                prev_entries
+                "[lab] BONSAI_LAB_MLX_ONLY=1 → primary backend {}({}) → MlxLm(8000) + fallback_chain.entries cleared ({} → 0)",
+                prev_backend, prev_url, prev_entries
             );
         }
     }
@@ -601,12 +608,18 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
                     &vault,
                     bonsai_agent::knowledge::vault_lint::vault_lint_stale_days(),
                 );
-                let duration_ms = start.elapsed().as_millis() as u64;
+                // critic finding M1 (項目 246 Phase 4): u128 → u64 安全 cast
+                // (`as u64` の silent truncation を回避、584M 年超は u64::MAX 飽和).
+                let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
                 report.warn_log();
 
+                // critic finding F2 (項目 246 Phase 4): session_id を timestamp suffix で uniquify
+                // (`Session::id` は ExperimentLoop 内部で生成され pre-lab 段階で未利用なので、
+                // unix timestamp で複数 Lab run の audit_log 行を区別可能化).
+                let session_id = format!("lab-vault-lint-{}", chrono::Utc::now().timestamp());
                 let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
                 let _ = audit.log(
-                    Some("lab-vault-lint"),
+                    Some(&session_id),
                     &bonsai_agent::observability::audit::AuditAction::VaultLint {
                         duplicate: report.duplicate_entries.len(),
                         stale: report.stale_entries.len(),
@@ -618,8 +631,7 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
                     },
                 );
 
-                if bonsai_agent::knowledge::vault_lint::is_vault_lint_strict()
-                    && !report.is_clean()
+                if bonsai_agent::knowledge::vault_lint::is_vault_lint_strict() && !report.is_clean()
                 {
                     anyhow::bail!(
                         "[lab] BONSAI_VAULT_LINT_STRICT=1 + Vault not clean → Lab 起動を中断 \
@@ -632,9 +644,9 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
                     );
                 }
             }
-            Err(e) => eprintln!(
-                "[lab.vault_lint] Vault open 失敗 (skip lint pass、non-fatal): {e}"
-            ),
+            Err(e) => {
+                eprintln!("[lab.vault_lint] Vault open 失敗 (skip lint pass、non-fatal): {e}")
+            }
         }
     }
 
