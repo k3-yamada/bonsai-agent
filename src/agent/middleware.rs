@@ -228,7 +228,9 @@ impl Middleware for StallMiddleware {
 
 /// 4. コンパクションミドルウェア
 pub struct CompactionMiddleware {
-    config: CompactionConfig,
+    /// 項目 248 critic F2 follow-up: test 経由 wiring 確証のため `pub(crate)` に visibility 拡張.
+    /// production API 表面 (`pub`) は無変更、`crate` 内 (compaction.rs tests 等) のみ参照可.
+    pub(crate) config: CompactionConfig,
 }
 
 impl CompactionMiddleware {
@@ -809,6 +811,64 @@ mod tests {
         assert!(
             session.messages.is_empty(),
             "inject after abort not reached"
+        );
+    }
+
+    // ── 項目 248 Phase 4 critic F2 follow-up: CompactionMiddleware wiring test ──
+    //
+    // critic 指摘: 「factory chain `.with_dynamic_budget_from_env()` の 8 行追加に対して
+    // CompactionMiddleware 経由の env→budget_ratios 反映 test が 0 件」。本 test 2 件で
+    // env on/off の middleware ↔ config flow を捕捉、wiring 8 行を空にすると FAIL する.
+
+    /// CompactionMiddleware::default() で env=1 → middleware.config.budget_ratios=Some 反映確証.
+    #[test]
+    fn t_compaction_middleware_default_wires_env_dynamic_budget() {
+        let _g = crate::agent::compaction::DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET_RATIOS") };
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET", "1") };
+        let mw = CompactionMiddleware::default();
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        assert!(
+            mw.config.budget_ratios.is_some(),
+            "env=1 で middleware default() chain が budget_ratios=Some 反映 (wiring 8 行が active)"
+        );
+    }
+
+    /// CompactionMiddleware::default() で env unset → backward compat None 維持確証.
+    #[test]
+    fn t_compaction_middleware_default_unset_backward_compat() {
+        let _g = crate::agent::compaction::DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET_RATIOS") };
+        let mw = CompactionMiddleware::default();
+        assert!(
+            mw.config.budget_ratios.is_none(),
+            "env unset で backward compat = None (production CLI 通常起動で影響ゼロ)"
+        );
+    }
+
+    /// CompactionMiddleware::with_n_ctx_budget(Some(8192)) で env=1 + 派生 budget 両方反映確証.
+    #[test]
+    fn t_compaction_middleware_with_n_ctx_budget_wires_env() {
+        let _g = crate::agent::compaction::DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET_RATIOS") };
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET", "1") };
+        let mw = CompactionMiddleware::with_n_ctx_budget(Some(8192));
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        assert!(
+            mw.config.budget_ratios.is_some(),
+            "env=1 で with_n_ctx_budget chain も budget_ratios 反映"
+        );
+        // n_ctx 派生 budget も同時反映 (8192 * 70 / 100 = 5734)
+        assert_eq!(
+            mw.config.max_context_tokens, 5734,
+            "from_n_ctx_budget の派生計算も維持 (factory chain 順序保護)"
         );
     }
 }

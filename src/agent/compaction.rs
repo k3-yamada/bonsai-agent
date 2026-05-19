@@ -1669,4 +1669,55 @@ mod tests {
             "total が max_context_tokens (allocate sum 一致)"
         );
     }
+
+    // ── 項目 248 Phase 4 critic F2 follow-up: env override 動作確証 2 件 ──
+    //
+    // critic 指摘: 「BONSAI_DYNAMIC_BUDGET_RATIOS env override の有効/無効分岐 test が 0 件」。
+    // 本 test 2 件で valid override + invalid fallback の両端を捕捉.
+
+    /// env override valid → ratio 反映確証.
+    #[test]
+    fn t_with_dynamic_budget_from_env_override_applied() {
+        let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET", "1") };
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET_RATIOS", "0.5,0.3,0.2,0.0") };
+        let c = CompactionConfig::default().with_dynamic_budget_from_env();
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET_RATIOS") };
+        let r = c.budget_ratios.expect("env=1 で Some");
+        assert!(
+            (r.recent_buffer - 0.5).abs() < 1e-6,
+            "override `0.5,0.3,0.2,0.0` の buffer ratio=0.5 反映"
+        );
+        assert!(
+            (r.knowledge_graph - 0.0).abs() < 1e-6,
+            "override の kg ratio=0.0 反映 (Lab paired で 4 軸調整可能化)"
+        );
+    }
+
+    /// env override invalid (sum != 1.0) → default 40/30/20/10 fallback 確証.
+    #[test]
+    fn t_with_dynamic_budget_from_env_invalid_falls_back_to_default() {
+        let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET", "1") };
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET_RATIOS", "0.1,0.1,0.1,0.1") }; // sum=0.4 invalid
+        let c = CompactionConfig::default().with_dynamic_budget_from_env();
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET_RATIOS") };
+        let r = c
+            .budget_ratios
+            .expect("env=1 で Some (override 不正でも default fallback)");
+        assert!(
+            (r.recent_buffer - 0.4).abs() < 1e-6,
+            "invalid override → BudgetRatios::default 40/30/20/10 fallback (buffer=0.4)"
+        );
+        assert!(
+            (r.knowledge_graph - 0.1).abs() < 1e-6,
+            "invalid override → kg=0.1 default"
+        );
+    }
 }
