@@ -136,6 +136,26 @@ fn main() -> Result<()> {
                 prev, app_config.model.inference.temperature
             );
         }
+
+        // 項目 249 Phase 2 Green: Lab Runtime Stabilization (CCG synthesis 経由)
+        // F1: BONSAI_LAB_LONG_SSE=1 → SSE chunk timeout 60 → 180 で MLX 初トークン遅延 catch
+        if bonsai_agent::config::is_lab_long_sse_timeout() {
+            let prev_sse = app_config.model.sse_chunk_timeout_secs;
+            app_config.model.sse_chunk_timeout_secs = 180;
+            eprintln!(
+                "[lab] BONSAI_LAB_LONG_SSE=1 → sse_chunk_timeout_secs {} -> 180 (MLX cold start catch)",
+                prev_sse
+            );
+        }
+        // F2: BONSAI_LAB_MLX_ONLY=1 → fallback_chain 無効化で retry chain 経路消滅
+        if bonsai_agent::config::is_lab_mlx_only() {
+            let prev_entries = app_config.fallback_chain.entries.len();
+            app_config.fallback_chain.entries.clear();
+            eprintln!(
+                "[lab] BONSAI_LAB_MLX_ONLY=1 → fallback_chain.entries cleared ({} → 0)",
+                prev_entries
+            );
+        }
     }
 
     let server_url = if cli.server_url != "http://localhost:8080" {

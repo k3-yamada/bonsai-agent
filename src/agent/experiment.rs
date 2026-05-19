@@ -1113,6 +1113,26 @@ pub fn run_experiment_loop(
             }
         }
     };
+
+    // 項目 249 Phase 2 Green: F3 — BONSAI_LAB_TASK_LIMIT=N で task pool 縮小 (smoke triage 用)
+    // CCG synthesis (Codex F3 案 + Gemini Iteration Velocity philosophy) より、cycle 80 → ~12 min
+    // 圧縮を達成するため、Lab cycle 開始時の suite.tasks を先頭 N 個に truncate。
+    let mut suite = suite;
+    if let Some(limit) = crate::config::lab_task_limit() {
+        let original = suite.tasks.len();
+        if limit < original {
+            suite.tasks.truncate(limit);
+            log_event(
+                LogLevel::Info,
+                "lab",
+                &format!(
+                    "BONSAI_LAB_TASK_LIMIT={} → suite.tasks {} → {} (smoke triage 用 task pool 縮小)",
+                    limit, original, limit
+                ),
+            );
+        }
+    }
+
     // 過去の試行済み変異detailをDBからロードし、重複回避
     let tried_details = load_tried_details(store.conn());
     let tried_count = tried_details.len();

@@ -307,6 +307,48 @@ impl InferenceParams {
     }
 }
 
+// ─── Lab Runtime Stabilization (項目 249、plan lab-runtime-stabilization.md §3) ───
+//
+// CCG synthesis (Codex SSE timeout root cause + Gemini Iteration Velocity) 経由で
+// Lab v22 Phase A 80 min/cycle → 30 min target 達成のための 3 軸 env-gated 修正。
+
+/// `BONSAI_LAB_LONG_SSE=1` で Lab 専用 SSE chunk timeout 60s → 180s に延長.
+///
+/// MLX 初トークン遅延を catch、non-stream retry + fallback chain 経路の暴走を抑止。
+/// production default は 60s 維持で後方互換 (env unset 時 no-op)。
+pub fn is_lab_long_sse_timeout() -> bool {
+    matches!(
+        std::env::var("BONSAI_LAB_LONG_SSE").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+/// `BONSAI_LAB_MLX_ONLY=1` で Lab 専用 fallback chain 無効化.
+///
+/// MLX primary 専用化、retry chain による 2nd backend 経由 timeout 消滅。
+/// noise floor 計測の estimand 純化 (「MLX 単独」評価系)。
+pub fn is_lab_mlx_only() -> bool {
+    matches!(
+        std::env::var("BONSAI_LAB_MLX_ONLY").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+/// `BONSAI_LAB_TASK_LIMIT=N` で Lab cycle 内 task pool 縮小 (smoke triage 用).
+///
+/// 戻り値: 1..=15 で `Some(N)`、それ以外 (parse 失敗 / 範囲外) で `None` → smoke 既定 15 維持。
+/// 5 で smoke wall ~1/3、Lab v22 Phase A 80 → ~27 min/cycle 想定。
+pub fn lab_task_limit() -> Option<usize> {
+    std::env::var("BONSAI_LAB_TASK_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| (1..=15).contains(n))
+}
+
+/// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
+#[cfg(test)]
+pub(crate) static LAB_RUNTIME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `BONSAI_LAB_TEMP` env を弄る test 間の競合回避 (項目 226/229/233/235 同 pattern、
 /// cross-file serialize)。`apply_lab_temp_override` test だけでなく、将来 Lab 起動側 test
 /// が同 env を弄る際にも参照可能。test build のみコンパイル (release では dead_code)。
@@ -1107,5 +1149,57 @@ max_iterations = 20
         assert!(r.is_none(), "範囲外 (>2.0) で None");
         assert_eq!(p.temperature, original);
         unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+    }
+
+    // ─── Lab Runtime Stabilization (項目 249) env getter tests ─────────────────────
+    //
+    // `LAB_RUNTIME_ENV_TEST_LOCK` で cross-file serialize、3 env var (BONSAI_LAB_LONG_SSE /
+    // BONSAI_LAB_MLX_ONLY / BONSAI_LAB_TASK_LIMIT) を保護。
+
+    #[test]
+    fn t_lab_long_sse_timeout_default_off() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_LAB_LONG_SSE") };
+        assert!(!is_lab_long_sse_timeout(), "env unset で long sse OFF");
+    }
+
+    #[test]
+    fn t_lab_mlx_only_env_gate_active() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_ONLY", "1") };
+        assert!(is_lab_mlx_only(), "env=\"1\" で mlx-only ON");
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_ONLY") };
+        assert!(!is_lab_mlx_only(), "env unset で mlx-only OFF");
+    }
+
+    #[test]
+    fn t_lab_task_limit_env_parse() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "5") };
+        assert_eq!(lab_task_limit(), Some(5), "env=\"5\" で Some(5)");
+        unsafe { std::env::remove_var("BONSAI_LAB_TASK_LIMIT") };
+    }
+
+    #[test]
+    fn t_lab_task_limit_env_out_of_range() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // 0 (下限外)
+        unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "0") };
+        assert_eq!(lab_task_limit(), None, "env=0 で None");
+        // 16 (上限外)
+        unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "16") };
+        assert_eq!(lab_task_limit(), None, "env=16 (15超) で None");
+        // parse 失敗
+        unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "abc") };
+        assert_eq!(lab_task_limit(), None, "parse 失敗で None");
+        unsafe { std::env::remove_var("BONSAI_LAB_TASK_LIMIT") };
     }
 }
