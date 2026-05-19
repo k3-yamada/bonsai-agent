@@ -576,6 +576,14 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
     } else {
         create_backend(ctx)
     };
+    // 項目 252 Phase 2.5 wiring (F4 案 A): MLX server pre-warm gate.
+    // raw backend (CachedBackend wrap 前) で呼出 → 全 N 回 cache miss させ実 MLX server に
+    // 負荷投入、cold start latency を Lab cycle 計時前に消化。env-gated default OFF.
+    if bonsai_agent::config::is_lab_mlx_warmup() {
+        let n = bonsai_agent::config::lab_mlx_warmup_count().unwrap_or(3);
+        let _succ = bonsai_agent::agent::experiment::lab_mlx_prewarm(backend.as_ref(), n);
+    }
+
     let tsv_path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("bonsai-agent")

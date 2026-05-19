@@ -1908,10 +1908,41 @@ pub fn judge_gate_check(
 /// 戻り値: 成功した generate 呼出回数 (= count - Err 回数).
 /// MockLlmBackend は常に Ok を返すため、test では `assert_eq!(prewarm(&mock, n), n)` で確認可能.
 ///
-/// Phase 1 Red stub: 常に 0 を返却 (生成呼出ゼロ).
-/// Phase 2 Green: loop 実装 + log_event + backend.generate("ping") 呼出.
-pub fn lab_mlx_prewarm(_backend: &dyn LlmBackend, _count: usize) -> usize {
-    0
+/// Phase 2 Green 実装: loop 実装 + log_event + backend.generate("ping") 呼出.
+/// 各 generate 結果は log_event のみ (graceful degradation、Err でも次の iter へ続行).
+pub fn lab_mlx_prewarm(backend: &dyn LlmBackend, count: usize) -> usize {
+    use crate::agent::conversation::Message;
+    log_event(
+        LogLevel::Info,
+        "lab",
+        &format!("[lab] BONSAI_LAB_MLX_WARMUP=1 → MLX pre-warm {count} 回投入"),
+    );
+    let cancel = CancellationToken::new();
+    let mut success_count = 0usize;
+    for i in 0..count {
+        let result = backend.generate(&[Message::user("ping")], &[], &mut |_| {}, &cancel);
+        match result {
+            Ok(_) => {
+                success_count += 1;
+                log_event(
+                    LogLevel::Info,
+                    "lab",
+                    &format!("[lab] pre-warm {}/{} OK", i + 1, count),
+                );
+            }
+            Err(e) => log_event(
+                LogLevel::Warn,
+                "lab",
+                &format!("[lab] pre-warm {}/{} FAIL: {e}", i + 1, count),
+            ),
+        }
+    }
+    log_event(
+        LogLevel::Info,
+        "lab",
+        &format!("[lab] pre-warm 完了 ({success_count}/{count} OK)"),
+    );
+    success_count
 }
 
 #[cfg(test)]
