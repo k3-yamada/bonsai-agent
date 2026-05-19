@@ -17,6 +17,12 @@ pub struct CompactionConfig {
     pub prune_minimum_chars: usize,
     /// Prune保護範囲（直近このトークン数分のメ���セージは削除対象外、OpenCode知見）
     pub prune_protect_tokens: usize,
+    /// 項目 248 Phase 4: dynamic budget ratio (Zenn 4 architecture 配分).
+    ///
+    /// `None` (default) で backward compat = 既存 prune logic.
+    /// `Some(_)` で `dynamic_budget_for_compaction` が allocate を返し、`compact_if_needed`
+    /// が `[INFO][compaction.budget]` log を emit (将来 4 軸個別 prune の hook).
+    pub budget_ratios: Option<BudgetRatios>,
 }
 impl Default for CompactionConfig {
     fn default() -> Self {
@@ -28,6 +34,8 @@ impl Default for CompactionConfig {
             max_context_tokens: 14000,
             prune_minimum_chars: 50,
             prune_protect_tokens: 4000,
+            // 項目 248 Phase 4: backward compat — env unset で None
+            budget_ratios: None,
         }
     }
 }
@@ -53,6 +61,15 @@ impl CompactionConfig {
             .prune_protect_tokens
             .min(config.max_context_tokens / 2);
         config
+    }
+
+    /// 項目 248 Phase 4: env-driven dynamic budget の wiring factory.
+    ///
+    /// Phase 1 Red stub: 常に self を返す (no-op).
+    /// Phase 2 Green: `BONSAI_DYNAMIC_BUDGET=1` で `BudgetRatios::default()` (or env override)
+    /// を `budget_ratios` に設定して返す。env unset で None 維持 (backward compat).
+    pub fn with_dynamic_budget_from_env(self) -> Self {
+        self
     }
 }
 
@@ -200,6 +217,17 @@ pub fn dynamic_budget_alpha() -> f32 {
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|a| (0.0..=1.0).contains(a))
         .unwrap_or(0.2)
+}
+
+/// 項目 248 Phase 4: `CompactionConfig.budget_ratios` が `Some` のとき allocate を返す.
+///
+/// Phase 1 Red stub: 常に `None` (no-op). Phase 2 Green で `is_some()` のとき
+/// `ratios.allocate(config.max_context_tokens)` を返す。
+///
+/// `compact_if_needed` から呼出され、Some の場合 `[INFO][compaction.budget]` log を emit.
+/// 将来 4 軸個別 prune の hook (現状は log emit のみで挙動変化なし).
+pub fn dynamic_budget_for_compaction(_config: &CompactionConfig) -> Option<AllocatedBudget> {
+    None
 }
 
 /// `BONSAI_DYNAMIC_BUDGET_*` env を弄る test 間 cross-file mutex.
@@ -1537,6 +1565,72 @@ mod tests {
         assert!(
             dynamic_budget_ratios_from_env().is_none(),
             "env unset で None 戻り (Phase 1 でも PASS、sanity gate)"
+        );
+    }
+
+    // ── 項目 248 Phase 4 Red: CompactionConfig.budget_ratios + with_dynamic_budget_from_env ──
+    //
+    // Phase 1 Red: field 追加 + 2 stub method (no-op) で t3/t4 が FAIL (logical).
+    // Phase 2 Green: env-driven Some 設定 + dynamic_budget_for_compaction allocate 返却.
+    // Phase 3 Refactor: log emit を compact_if_needed に wire、middleware.rs から factory chain.
+
+    /// Phase 1 Red sanity: default の budget_ratios は None (backward compat).
+    #[test]
+    fn t_compaction_config_default_budget_ratios_none() {
+        let c = CompactionConfig::default();
+        assert!(
+            c.budget_ratios.is_none(),
+            "Default は backward compat = None (env unset で従来挙動)"
+        );
+    }
+
+    /// Phase 1 Red sanity: env unset + with_dynamic_budget_from_env → None.
+    #[test]
+    fn t_with_dynamic_budget_from_env_unset_returns_none() {
+        let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        let c = CompactionConfig::default().with_dynamic_budget_from_env();
+        assert!(
+            c.budget_ratios.is_none(),
+            "env unset で backward compat = None 維持"
+        );
+    }
+
+    /// Phase 1 Red 核心 1: env=1 + with_dynamic_budget_from_env → Some(default 40/30/20/10).
+    /// stub は self 返却 → budget_ratios None のまま → FAIL 期待.
+    #[test]
+    fn t_with_dynamic_budget_from_env_set_returns_some() {
+        let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_DYNAMIC_BUDGET", "1") };
+        let c = CompactionConfig::default().with_dynamic_budget_from_env();
+        unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
+        assert!(
+            c.budget_ratios.is_some(),
+            "env=1 で BudgetRatios (40/30/20/10) を budget_ratios に設定 (Phase 2 Green PASS 期待)"
+        );
+    }
+
+    /// Phase 1 Red 核心 2: budget_ratios=Some で dynamic_budget_for_compaction が Some(allocated) 返却.
+    /// stub は常に None → FAIL 期待.
+    #[test]
+    fn t_dynamic_budget_for_compaction_returns_some_when_set() {
+        let c = CompactionConfig {
+            budget_ratios: Some(BudgetRatios::default()),
+            ..Default::default()
+        };
+        let allocated = dynamic_budget_for_compaction(&c);
+        assert!(
+            allocated.is_some(),
+            "budget_ratios=Some で allocate を返す (Phase 2 Green PASS 期待)"
+        );
+        let a = allocated.expect("Some 確認済");
+        assert_eq!(
+            a.total, c.max_context_tokens,
+            "total が max_context_tokens (allocate sum 一致)"
         );
     }
 }
