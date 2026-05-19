@@ -238,14 +238,18 @@ impl CompactionMiddleware {
 
     /// LLM context 予算から ContextOverflowGuard 用 middleware を構築。
     /// `None` なら legacy default、`Some(n)` で `n * 0.7` 派生 budget を使用。
+    ///
+    /// 項目 248 Phase 4: `.with_dynamic_budget_from_env()` で env-driven budget_ratios を統合
+    /// (env unset で None 維持 = backward compat、env on で Some 設定 + log emit hook 起動).
     pub fn with_n_ctx_budget(n_ctx_budget: Option<u32>) -> Self {
-        Self::new(CompactionConfig::from_n_ctx_budget(n_ctx_budget))
+        Self::new(CompactionConfig::from_n_ctx_budget(n_ctx_budget).with_dynamic_budget_from_env())
     }
 }
 
 impl Default for CompactionMiddleware {
     fn default() -> Self {
-        Self::new(CompactionConfig::default())
+        // 項目 248 Phase 4: env-driven dynamic budget wiring (env unset で従来挙動 backward compat).
+        Self::new(CompactionConfig::default().with_dynamic_budget_from_env())
     }
 }
 

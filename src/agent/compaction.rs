@@ -65,10 +65,15 @@ impl CompactionConfig {
 
     /// 項目 248 Phase 4: env-driven dynamic budget の wiring factory.
     ///
-    /// Phase 1 Red stub: 常に self を返す (no-op).
-    /// Phase 2 Green: `BONSAI_DYNAMIC_BUDGET=1` で `BudgetRatios::default()` (or env override)
-    /// を `budget_ratios` に設定して返す。env unset で None 維持 (backward compat).
-    pub fn with_dynamic_budget_from_env(self) -> Self {
+    /// `BONSAI_DYNAMIC_BUDGET=1` のとき `BudgetRatios` を `budget_ratios` に設定:
+    /// - `BONSAI_DYNAMIC_BUDGET_RATIOS` が valid (4 要素 + sum 1.0) なら env override 採用
+    /// - そうでなければ `BudgetRatios::default()` (40/30/20/10)
+    ///
+    /// env unset で None 維持 (backward compat).
+    pub fn with_dynamic_budget_from_env(mut self) -> Self {
+        if is_dynamic_budget_enabled() {
+            self.budget_ratios = Some(dynamic_budget_ratios_from_env().unwrap_or_default());
+        }
         self
     }
 }
@@ -221,13 +226,13 @@ pub fn dynamic_budget_alpha() -> f32 {
 
 /// 項目 248 Phase 4: `CompactionConfig.budget_ratios` が `Some` のとき allocate を返す.
 ///
-/// Phase 1 Red stub: 常に `None` (no-op). Phase 2 Green で `is_some()` のとき
-/// `ratios.allocate(config.max_context_tokens)` を返す。
-///
 /// `compact_if_needed` から呼出され、Some の場合 `[INFO][compaction.budget]` log を emit.
-/// 将来 4 軸個別 prune の hook (現状は log emit のみで挙動変化なし).
-pub fn dynamic_budget_for_compaction(_config: &CompactionConfig) -> Option<AllocatedBudget> {
-    None
+/// 将来 4 軸個別 prune の hook (現状は log emit のみで挙動変化なし、backward compat).
+pub fn dynamic_budget_for_compaction(config: &CompactionConfig) -> Option<AllocatedBudget> {
+    config
+        .budget_ratios
+        .as_ref()
+        .map(|r| r.allocate(config.max_context_tokens))
 }
 
 /// `BONSAI_DYNAMIC_BUDGET_*` env を弄る test 間 cross-file mutex.
@@ -821,6 +826,14 @@ pub fn compact_if_needed(
     messages: &mut Vec<Message>,
     config: &CompactionConfig,
 ) -> (u8, Vec<String>) {
+    // 項目 248 Phase 4 wiring: budget_ratios=Some のとき計測 log を emit (`[INFO][compaction.budget]`).
+    // 挙動変化なし (log のみ)、将来 4 軸個別 prune の hook 点として保存.
+    if let Some(allocated) = dynamic_budget_for_compaction(config) {
+        eprintln!(
+            "[INFO][compaction.budget] buffer={} summary={} entities={} kg={} total={}",
+            allocated.buffer, allocated.summary, allocated.entities, allocated.kg, allocated.total,
+        );
+    }
     let off = compact_level0(messages, config);
     let mut lv = 0u8;
     if estimate_tokens(messages) > config.max_context_tokens * 3 / 4 {
