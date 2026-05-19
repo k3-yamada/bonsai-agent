@@ -111,6 +111,20 @@ pub enum AuditAction {
     // 項目 193 (2026-05-06d): F3SizeGuard variant 削除。
     // F3 RequestSizeGuard を削除したため、対応する audit variant も不要化。
     // 既存 audit_log table 内の action_type='f3_size_guard' row は残存 (data loss なし)。
+    /// 項目 246 Phase 4: Lab cycle 起動前 / 終了後の Vault sanity lint pass 結果.
+    ///
+    /// `handle_lab_mode` 内 (pre-lab 配置) で `BONSAI_VAULT_LINT_LAB=1` のとき 1 Lab run 1 回発火。
+    /// strict gate (`BONSAI_VAULT_LINT_STRICT=1`) + not_clean で Lab 全体 bail (cycle 浪費回避)。
+    /// 各 field は `VaultLintReport` の同名 field を集約 (count、clean は is_clean()、duration_ms は計測).
+    VaultLint {
+        duplicate: usize,
+        stale: usize,
+        cross_cat: usize,
+        incomplete: usize,
+        orphan: usize,
+        clean: bool,
+        duration_ms: u64,
+    },
 }
 
 /// 監査ログライター（append-only）
@@ -137,6 +151,7 @@ impl<'a> AuditLog<'a> {
             AuditAction::AdvisorSkip { .. } => "advisor_skip",
             AuditAction::CriticCall { .. } => "critic_call",
             AuditAction::FactCheck { .. } => "factcheck",
+            AuditAction::VaultLint { .. } => "vault_lint",
         };
         let action_data = serde_json::to_string(action)?;
 
@@ -780,5 +795,36 @@ mod tests {
         let stats_b = audit.task_complete_stats(Some("s-B")).unwrap();
         assert_eq!(stats_b.total_completed, 1);
         assert!((stats_b.avg_steps - 7.0).abs() < 0.01);
+    }
+
+    /// 項目 246 Phase 4 Red: `AuditAction::VaultLint` variant の action_type 文字列確証.
+    ///
+    /// Why: Lab cycle 起動時の Vault lint pass 結果を SQLite audit_log に永続化する際、
+    /// action_type='vault_lint' で grep/集計するため文字列を固定する。
+    /// 既存 'factcheck' との衝突を避け、独立 namespace を確立。
+    #[test]
+    fn test_audit_action_vault_lint_round_trip() {
+        let store = test_store();
+        let audit = AuditLog::new(store.conn());
+        audit
+            .log(
+                Some("lab-session-1"),
+                &AuditAction::VaultLint {
+                    duplicate: 0,
+                    stale: 0,
+                    cross_cat: 0,
+                    incomplete: 0,
+                    orphan: 0,
+                    clean: true,
+                    duration_ms: 12,
+                },
+            )
+            .unwrap();
+        let recent = audit.recent(1).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            recent[0].action_type, "vault_lint",
+            "VaultLint variant は action_type='vault_lint' で永続化される"
+        );
     }
 }

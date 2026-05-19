@@ -102,6 +102,14 @@ pub fn is_vault_lint_strict() -> bool {
     )
 }
 
+/// 項目 246 Phase 4 用 Lab wiring gate. **Phase 1 Red skeleton — 常に false を返す**.
+///
+/// Phase 2 Green で `BONSAI_VAULT_LINT_LAB=1` で true を返すよう env parse 実装。
+/// Why: `is_vault_lint_strict` と独立した gate (strict は「失敗時 bail」、本 gate は「pass を発火するか」).
+pub fn is_vault_lint_lab_enabled() -> bool {
+    false
+}
+
 /// `BONSAI_VAULT_LINT_STALE_DAYS` env で stale 閾値を override (default 90).
 ///
 /// 範囲外 (0 以下 or 365 超) は default fallback、parse 失敗も同様。
@@ -323,4 +331,36 @@ mod tests {
         unsafe { std::env::remove_var("BONSAI_VAULT_LINT_STRICT") };
         assert!(!is_vault_lint_strict(), "env unset で strict OFF");
     }
+
+    /// 項目 246 Phase 4 Red: Lab wiring 用 env gate `BONSAI_VAULT_LINT_LAB` の default OFF 動作確証.
+    ///
+    /// Why: production CLI / 通常起動で Vault lint pass が暴発しないことを担保。
+    /// 既存 `is_vault_lint_strict` と独立 (strict は「失敗時 bail」、本 gate は「pass を発火するか」)。
+    #[test]
+    fn t_is_vault_lint_lab_enabled_default_off() {
+        let _g = VAULT_LINT_LAB_ENV_TEST_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("BONSAI_VAULT_LINT_LAB") };
+        assert!(
+            !is_vault_lint_lab_enabled(),
+            "env unset で Lab wiring gate OFF (production no-op)"
+        );
+    }
+
+    /// 項目 246 Phase 4 Red: env=1 で Lab wiring gate ON 動作確証.
+    ///
+    /// Why: paired Lab cycle で sanity gate 起動を opt-in 化する明示 env protocol を固定する。
+    #[test]
+    fn t_is_vault_lint_lab_enabled_when_set() {
+        let _g = VAULT_LINT_LAB_ENV_TEST_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("BONSAI_VAULT_LINT_LAB", "1") };
+        let result = is_vault_lint_lab_enabled();
+        unsafe { std::env::remove_var("BONSAI_VAULT_LINT_LAB") };
+        assert!(result, "BONSAI_VAULT_LINT_LAB=1 で Lab wiring gate ON");
+    }
 }
+
+/// 項目 246 Phase 4 用 cross-test env mutex (BONSAI_VAULT_LINT_LAB set/unset を直列化).
+///
+/// strict / stale_days と独立 lock (テスト並行性を最大化、ただし同一 env 名は直列化必須).
+#[cfg(test)]
+pub(crate) static VAULT_LINT_LAB_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
