@@ -102,12 +102,15 @@ pub fn is_vault_lint_strict() -> bool {
     )
 }
 
-/// 項目 246 Phase 4 用 Lab wiring gate. **Phase 1 Red skeleton — 常に false を返す**.
+/// 項目 246 Phase 4 用 Lab wiring gate. `BONSAI_VAULT_LINT_LAB=1` で Lab cycle 起動前 sanity pass を発火.
 ///
-/// Phase 2 Green で `BONSAI_VAULT_LINT_LAB=1` で true を返すよう env parse 実装。
 /// Why: `is_vault_lint_strict` と独立した gate (strict は「失敗時 bail」、本 gate は「pass を発火するか」).
+/// default OFF で production CLI / 通常 lab 起動は影響なし、paired smoke 起動前のみ opt-in.
 pub fn is_vault_lint_lab_enabled() -> bool {
-    false
+    matches!(
+        std::env::var("BONSAI_VAULT_LINT_LAB").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 /// `BONSAI_VAULT_LINT_STALE_DAYS` env で stale 閾値を override (default 90).
@@ -204,6 +207,13 @@ pub fn lint_vault_for_lab(vault: &Vault, stale_threshold_days: i64) -> VaultLint
 
     report
 }
+
+/// 項目 246 Phase 4 用 cross-test env mutex (BONSAI_VAULT_LINT_LAB set/unset を直列化).
+///
+/// strict / stale_days と独立 lock (テスト並行性を最大化、ただし同一 env 名は直列化必須).
+/// clippy `items_after_test_module` 回避のため tests module の前に配置.
+#[cfg(test)]
+pub(crate) static VAULT_LINT_LAB_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -359,8 +369,3 @@ mod tests {
     }
 }
 
-/// 項目 246 Phase 4 用 cross-test env mutex (BONSAI_VAULT_LINT_LAB set/unset を直列化).
-///
-/// strict / stale_days と独立 lock (テスト並行性を最大化、ただし同一 env 名は直列化必須).
-#[cfg(test)]
-pub(crate) static VAULT_LINT_LAB_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

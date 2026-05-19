@@ -584,6 +584,60 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
         judge_sample_size: ctx.app_config.experiment.judge_sample_size,
     };
     let backend = CachedBackend::new(backend, 200);
+
+    // 項目 246 Phase 4 Green: Lab cycle 起動前の Vault sanity gate.
+    // env-gated (`BONSAI_VAULT_LINT_LAB=1` で active 化、default OFF で no-op).
+    // 1 Lab run 1 回発火、strict=`BONSAI_VAULT_LINT_STRICT=1` + not_clean で bail (cycle 浪費回避).
+    // ECC architect 推奨設計 (pre-lab 1 回 emit + strict bail + 暗黙短絡).
+    if bonsai_agent::knowledge::vault_lint::is_vault_lint_lab_enabled() {
+        let vault_root = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("bonsai-agent")
+            .join("vault");
+        match bonsai_agent::knowledge::vault::Vault::new(&vault_root) {
+            Ok(vault) => {
+                let start = std::time::Instant::now();
+                let report = bonsai_agent::knowledge::vault_lint::lint_vault_for_lab(
+                    &vault,
+                    bonsai_agent::knowledge::vault_lint::vault_lint_stale_days(),
+                );
+                let duration_ms = start.elapsed().as_millis() as u64;
+                report.warn_log();
+
+                let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
+                let _ = audit.log(
+                    Some("lab-vault-lint"),
+                    &bonsai_agent::observability::audit::AuditAction::VaultLint {
+                        duplicate: report.duplicate_entries.len(),
+                        stale: report.stale_entries.len(),
+                        cross_cat: report.cross_category_leaks.len(),
+                        incomplete: report.incomplete_entries.len(),
+                        orphan: report.orphan_entries.len(),
+                        clean: report.is_clean(),
+                        duration_ms,
+                    },
+                );
+
+                if bonsai_agent::knowledge::vault_lint::is_vault_lint_strict()
+                    && !report.is_clean()
+                {
+                    anyhow::bail!(
+                        "[lab] BONSAI_VAULT_LINT_STRICT=1 + Vault not clean → Lab 起動を中断 \
+                         (duplicate={} stale={} cross_cat={} incomplete={} orphan={})",
+                        report.duplicate_entries.len(),
+                        report.stale_entries.len(),
+                        report.cross_category_leaks.len(),
+                        report.incomplete_entries.len(),
+                        report.orphan_entries.len(),
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "[lab.vault_lint] Vault open 失敗 (skip lint pass、non-fatal): {e}"
+            ),
+        }
+    }
+
     let experiments = run_experiment_loop(
         &ctx.config,
         &backend,
