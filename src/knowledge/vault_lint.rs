@@ -505,7 +505,10 @@ mod tests {
         let store = MemoryStore::in_memory().expect("in-memory store");
         let audit = AuditLog::new(store.conn());
         let result = run_vault_sanity_gate(dir.path(), 90, false, Some(&audit));
-        assert!(result.is_ok(), "clean Vault → Ok (warn-only でも emit する)");
+        assert!(
+            result.is_ok(),
+            "clean Vault → Ok (warn-only でも emit する)"
+        );
         let count: i64 = store
             .conn()
             .query_row(
