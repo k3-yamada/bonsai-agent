@@ -350,20 +350,24 @@ pub fn lab_task_limit() -> Option<usize> {
 /// MLX 2-bit primary の cold start latency を Lab cycle 計時前に消化、F1 (sse 180s) と併用
 /// で Lab v22 paired 5h 完走を目標化。production default OFF (env unset 時 no-op)。
 ///
-/// Phase 1 Red stub: 常に false 返却 (env=1 test FAIL 期待).
-/// Phase 2 Green: 既存 F2/F3 getter と同形 env parse + matches! 判定.
+/// Phase 2 Green 実装: 既存 F2/F3 getter と同形 matches! 判定 (`1` / `true` / `yes` 系を ON).
 pub fn is_lab_mlx_warmup() -> bool {
-    false
+    matches!(
+        std::env::var("BONSAI_LAB_MLX_WARMUP").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 /// `BONSAI_LAB_MLX_WARMUP_COUNT=N` で pre-warm 投入回数 override (1..=10、項目 252 候補、F4 案 A).
 ///
-/// 戻り値: 1..=10 で `Some(N)`、parse 失敗 / 範囲外 / unset で `None` → caller 側 unwrap_or(3) 想定.
+/// 戻り値: 1..=10 で `Some(N)`、parse 失敗 / 範囲外 / unset で `None` → caller 側 `unwrap_or(3)` 想定.
 ///
-/// Phase 1 Red stub: 常に None 返却 (env=5 test FAIL 期待).
-/// Phase 2 Green: 既存 lab_task_limit と同形 parse + filter.
+/// Phase 2 Green 実装: 既存 `lab_task_limit` と同形 parse + filter.
 pub fn lab_mlx_warmup_count() -> Option<usize> {
-    None
+    std::env::var("BONSAI_LAB_MLX_WARMUP_COUNT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| (1..=10).contains(n))
 }
 
 /// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
