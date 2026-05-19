@@ -124,7 +124,20 @@ struct AppContext {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let app_config = AppConfig::load()?;
+    let mut app_config = AppConfig::load()?;
+
+    // 項目 247 Phase C: Lab 起動時のみ `BONSAI_LAB_TEMP` env で temperature override.
+    // `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
+    // env unset 時は no-op、completely backward compatible。
+    if cli.lab {
+        if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
+            eprintln!(
+                "[lab] BONSAI_LAB_TEMP override: temperature {:.3} -> {:.3}",
+                prev, app_config.model.inference.temperature
+            );
+        }
+    }
+
     let server_url = if cli.server_url != "http://localhost:8080" {
         cli.server_url.clone()
     } else if app_config.model.backend == ServerBackend::MlxLm

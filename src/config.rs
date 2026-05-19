@@ -283,7 +283,35 @@ impl InferenceParams {
             repeat_penalty: 1.1,
         }
     }
+
+    /// Lab 用 temperature override (`BONSAI_LAB_TEMP` env 経由).
+    ///
+    /// `.claude/plan/lab-v22-metric-redesign.md` §3.5 = Lab cycle 内 sampling noise 排除のため、
+    /// Lab 起動時のみ温度を env から強制 override する。production code (config.toml の
+    /// `[model.inference] temperature`) には影響なし — env unset 時は no-op で完全後方互換。
+    ///
+    /// 戻り値:
+    /// - `Some(prev_temp)`: override 適用、prev_temp は元の値
+    /// - `None`: env unset / parse 失敗 / 範囲外 (`[0.0, 2.0]` 外)
+    ///
+    /// 範囲 `[0.0, 2.0]` は llama-server / mlx-lm の標準受け付け範囲。
+    pub fn apply_lab_temp_override(&mut self) -> Option<f64> {
+        let val = std::env::var("BONSAI_LAB_TEMP").ok()?;
+        let parsed: f64 = val.parse().ok()?;
+        if !(0.0..=2.0).contains(&parsed) {
+            return None;
+        }
+        let prev = self.temperature;
+        self.temperature = parsed;
+        Some(prev)
+    }
 }
+
+/// `BONSAI_LAB_TEMP` env を弄る test 間の競合回避 (項目 226/229/233/235 同 pattern、
+/// cross-file serialize)。`apply_lab_temp_override` test だけでなく、将来 Lab 起動側 test
+/// が同 env を弄る際にも参照可能。test build のみコンパイル (release では dead_code)。
+#[cfg(test)]
+pub(crate) static LAB_TEMP_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -987,5 +1015,97 @@ max_iterations = 20
             "旧 config でも blocks フィールドはデフォルト空"
         );
         assert_eq!(config.memory.max_memories, 1000, "他フィールドもデフォルト");
+    }
+
+    // ─── BONSAI_LAB_TEMP env override tests (項目 247 Phase C、plan §3.5) ───────────
+    //
+    // `LAB_TEMP_ENV_TEST_LOCK` で cross-file serialize、各 test 末尾で env を必ず unset
+    // して隣接 test に副作用を残さない (FACTCHECK_ALL_ENV_TEST_LOCK 同 pattern)。
+
+    #[test]
+    fn t_apply_lab_temp_override_unset_returns_none() {
+        let _g = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+        let mut p = InferenceParams::default();
+        let original = p.temperature;
+        let r = p.apply_lab_temp_override();
+        assert!(r.is_none(), "env unset で None 戻り");
+        assert_eq!(p.temperature, original, "env unset では temperature 不変");
+    }
+
+    #[test]
+    fn t_apply_lab_temp_override_valid_zero() {
+        let _g = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "0") };
+        let mut p = InferenceParams::default();
+        let r = p.apply_lab_temp_override();
+        assert_eq!(r, Some(0.5), "default temperature 0.5 が prev として返る");
+        assert_eq!(
+            p.temperature, 0.0,
+            "env=\"0\" で temperature=0.0 に override"
+        );
+        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+    }
+
+    #[test]
+    fn t_apply_lab_temp_override_valid_decimal() {
+        let _g = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "0.3") };
+        let mut p = InferenceParams::default();
+        let r = p.apply_lab_temp_override();
+        assert_eq!(r, Some(0.5));
+        assert!(
+            (p.temperature - 0.3).abs() < f64::EPSILON,
+            "env=\"0.3\" で temperature=0.3 に override"
+        );
+        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+    }
+
+    #[test]
+    fn t_apply_lab_temp_override_invalid_parse() {
+        let _g = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "not_a_number") };
+        let mut p = InferenceParams::default();
+        let original = p.temperature;
+        let r = p.apply_lab_temp_override();
+        assert!(r.is_none(), "parse 失敗で None");
+        assert_eq!(p.temperature, original, "parse 失敗時は temperature 不変");
+        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+    }
+
+    #[test]
+    fn t_apply_lab_temp_override_out_of_range_negative() {
+        let _g = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "-1") };
+        let mut p = InferenceParams::default();
+        let original = p.temperature;
+        let r = p.apply_lab_temp_override();
+        assert!(r.is_none(), "範囲外負値で None");
+        assert_eq!(p.temperature, original);
+        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+    }
+
+    #[test]
+    fn t_apply_lab_temp_override_out_of_range_high() {
+        let _g = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "3.5") };
+        let mut p = InferenceParams::default();
+        let original = p.temperature;
+        let r = p.apply_lab_temp_override();
+        assert!(r.is_none(), "範囲外 (>2.0) で None");
+        assert_eq!(p.temperature, original);
+        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
     }
 }
