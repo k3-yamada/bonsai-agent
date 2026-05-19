@@ -14,6 +14,39 @@
 //! 5 unit test のうち 4 件が FAIL する想定 (clean=true は sanity gate として PASS)。
 
 use crate::knowledge::vault::Vault;
+use chrono::{NaiveDateTime, TimeZone};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// vault.rs:34 と同形式の timestamp ("%Y-%m-%d %H:%M")。
+const TIMESTAMP_FMT: &str = "%Y-%m-%d %H:%M";
+
+/// vault.rs の append() で書き込まれる全 6 カテゴリ。
+const CATEGORIES: &[&str] = &[
+    "decisions",
+    "facts",
+    "preferences",
+    "patterns",
+    "insights",
+    "todos",
+];
+
+/// 重複 / cross-cat 判定に使う content prefix 長 (vault.rs::append の dedup 50 文字と整合)。
+const PREFIX_LEN: usize = 50;
+
+/// incomplete 検出の単語パターン (trim 後の content が完全一致した場合に incomplete 認定)。
+const INCOMPLETE_MARKERS: &[&str] = &["TODO", "FIXME", "WIP", "..."];
+
+/// vault md の 1 行 (`- [YYYY-MM-DD HH:MM] content`) を parse。
+fn parse_vault_line(line: &str) -> Option<(chrono::DateTime<chrono::Utc>, String, String)> {
+    let trimmed = line.trim_start();
+    let stripped = trimmed.strip_prefix("- [")?;
+    let end_bracket = stripped.find(']')?;
+    let timestamp_str = &stripped[..end_bracket];
+    let naive = NaiveDateTime::parse_from_str(timestamp_str, TIMESTAMP_FMT).ok()?;
+    let timestamp = chrono::Utc.from_utc_datetime(&naive);
+    let content = stripped[end_bracket + 1..].trim().to_string();
+    Some((timestamp, timestamp_str.to_string(), content))
+}
 
 /// Vault lint 結果 (plan §3.1 (d) factcheck sanity gate の Vault 軸).
 ///
@@ -42,22 +75,126 @@ impl VaultLintReport {
             && self.orphan_entries.is_empty()
     }
 
-    /// warning log を `[INFO][lab.vault_lint]` prefix で出力 (Phase 3 で本実装、Phase 1 stub).
+    /// warning log を `[INFO][lab.vault_lint]` prefix で出力 (項目 244 KG lint と整合).
+    ///
+    /// 各軸の count + clean=true/false を tracing 経由ではなく `log_event` で出力可能だが、
+    /// 本 plan §3.1 ではシンプルに eprintln + prefix を採用 (運用 protocol で grep 容易)。
     pub fn warn_log(&self) {
-        // Phase 1+2 stub. Phase 3 Refactor で実装予定。
+        eprintln!(
+            "[INFO][lab.vault_lint] duplicate={} stale={} cross_cat={} incomplete={} orphan={} clean={}",
+            self.duplicate_entries.len(),
+            self.stale_entries.len(),
+            self.cross_category_leaks.len(),
+            self.incomplete_entries.len(),
+            self.orphan_entries.len(),
+            self.is_clean()
+        );
     }
+}
+
+/// `BONSAI_VAULT_LINT_STRICT=1` で strict gate mode (FAIL 時 abort) を opt-in 化.
+///
+/// 既定 OFF (warning のみ、Lab 続行)。production CI / paired Lab 起動前で strict gate 推奨。
+pub fn is_vault_lint_strict() -> bool {
+    matches!(
+        std::env::var("BONSAI_VAULT_LINT_STRICT").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+/// `BONSAI_VAULT_LINT_STALE_DAYS` env で stale 閾値を override (default 90).
+///
+/// 範囲外 (0 以下 or 365 超) は default fallback、parse 失敗も同様。
+pub fn vault_lint_stale_days() -> i64 {
+    const DEFAULT: i64 = 90;
+    std::env::var("BONSAI_VAULT_LINT_STALE_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|d| (1..=365).contains(d))
+        .unwrap_or(DEFAULT)
 }
 
 /// Lab 起動時の Vault sanity lint pass.
 ///
 /// `stale_threshold_days`: 90 (default、`BONSAI_VAULT_LINT_STALE_DAYS` env で override 可)。
 ///
-/// Phase 1 Red 実装: 全フィールド空を返す skeleton。Phase 2 Green で 4 軸 (duplicate /
-/// stale / cross-cat / incomplete) を実装、orphan は Phase 3+ で KG wiring 経由実装。
+/// Phase 2 Green 実装: 4 軸 (duplicate / stale / cross-cat / incomplete) を検出。
+/// orphan_entries は Phase 3+ で KG wiring 経由実装 (本 phase では常に空)。
 pub fn lint_vault_for_lab(vault: &Vault, stale_threshold_days: i64) -> VaultLintReport {
-    // Phase 1 Red: skeleton — 全フィールド空、is_clean() == true
-    let _ = (vault, stale_threshold_days);
-    VaultLintReport::default()
+    let mut report = VaultLintReport::default();
+    let now = chrono::Utc::now();
+    let stale_threshold = chrono::Duration::days(stale_threshold_days);
+
+    // prefix → set of categories (cross-cat 判定用)
+    let mut prefix_to_cats: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for cat in CATEGORIES {
+        let path = vault.root().join(format!("{cat}.md"));
+        let content = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // 同 cat 内 prefix → count (duplicate 判定用)
+        let mut prefix_counts_in_cat: BTreeMap<String, usize> = BTreeMap::new();
+
+        for line in content.lines() {
+            let Some((timestamp, timestamp_str, parsed_content)) = parse_vault_line(line) else {
+                continue;
+            };
+
+            // incomplete: 空 / whitespace / INCOMPLETE_MARKERS 完全一致
+            let trimmed = parsed_content.trim();
+            if trimmed.is_empty()
+                || INCOMPLETE_MARKERS.contains(&trimmed)
+                || INCOMPLETE_MARKERS
+                    .iter()
+                    .any(|m| trimmed.eq_ignore_ascii_case(m))
+            {
+                report
+                    .incomplete_entries
+                    .push((cat.to_string(), line.trim().to_string()));
+                continue;
+            }
+
+            // stale: timestamp が threshold より古い
+            let age = now - timestamp;
+            if age > stale_threshold {
+                let excerpt: String = parsed_content.chars().take(60).collect();
+                report
+                    .stale_entries
+                    .push((cat.to_string(), timestamp_str, excerpt));
+            }
+
+            // duplicate / cross-cat 用 prefix 集計
+            let prefix: String = parsed_content.chars().take(PREFIX_LEN).collect();
+            *prefix_counts_in_cat.entry(prefix.clone()).or_insert(0) += 1;
+            prefix_to_cats
+                .entry(prefix)
+                .or_default()
+                .insert(cat.to_string());
+        }
+
+        // duplicate: 同 cat 内で count >= 2
+        for (prefix, count) in prefix_counts_in_cat {
+            if count >= 2 {
+                report
+                    .duplicate_entries
+                    .push((cat.to_string(), prefix, count));
+            }
+        }
+    }
+
+    // cross_category_leaks: prefix が 2 cat 以上
+    for (prefix, cats) in prefix_to_cats {
+        if cats.len() >= 2 {
+            report
+                .cross_category_leaks
+                .push((prefix, cats.into_iter().collect()));
+        }
+    }
+
+    report
 }
 
 #[cfg(test)]
@@ -74,21 +211,26 @@ mod tests {
         }
     }
 
-    /// Phase 1 Red 期待: skeleton で空 → 検出 0 → FAIL (expected len>=1)
+    /// Phase 2 Green 期待: 重複 prefix を検出 → PASS
+    /// Note: `Vault::append` は 50 char prefix dedup を行うため、test fixture は直接 md に書込んで
+    ///       past data や bug で混入する重複シナリオを模擬する。
     #[test]
     fn t_vault_lint_detects_duplicate_entries() {
         let dir = tempdir().expect("tempdir");
         let vault = Vault::new(dir.path()).expect("vault new");
-        let e1 = make_entry(StockCategory::Fact, "the same long content of fifty characters length here xx");
-        vault.append(&e1).expect("append 1");
-        // 重複 append (Vault 側 50 char prefix dedup で skip される可能性あるが、
-        // lint は md ファイル ベースで判定するため、回避するために少し変えて append)
-        let e2 = make_entry(StockCategory::Fact, "the same long content of fifty characters length here yy");
-        vault.append(&e2).expect("append 2");
+        // 直接 facts.md に同 prefix の重複 entry を書込 (append() dedup bypass)
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        let now_ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let dup = format!(
+            "\n- [{}] the same long content of fifty characters length here xx\n- [{}] the same long content of fifty characters length here yy\n",
+            now_ts, now_ts
+        );
+        std::fs::write(&facts_path, existing + &dup).expect("write");
         let report = lint_vault_for_lab(&vault, 90);
         assert!(
             !report.duplicate_entries.is_empty(),
-            "重複 entry を検出 (Phase 1 Red 期待 FAIL、Phase 2 Green で PASS)"
+            "重複 entry を検出 (Phase 2 Green PASS、同 prefix 50 char で count>=2)"
         );
     }
 
@@ -119,7 +261,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let vault = Vault::new(dir.path()).expect("vault new");
         // 同一 50 char prefix content を decisions と facts の 2 cat に append
-        let common = "shared content that lands in two different categories for cross-cat leak test";
+        let common =
+            "shared content that lands in two different categories for cross-cat leak test";
         let e1 = make_entry(StockCategory::Decision, common);
         let e2 = make_entry(StockCategory::Fact, common);
         vault.append(&e1).expect("append d");
@@ -163,5 +306,21 @@ mod tests {
             report.is_clean(),
             "新規 Vault (entry なし) は clean=true (Phase 1 でも PASS)"
         );
+    }
+
+    /// Phase 3 env getter test: BONSAI_VAULT_LINT_STALE_DAYS 動作確証
+    /// (env mutex は config::LAB_TEMP_ENV_TEST_LOCK と独立、本 test 内のみ env 触る)
+    #[test]
+    fn t_vault_lint_stale_days_default_90() {
+        // env unset を保証 (前 test 残留対策)
+        unsafe { std::env::remove_var("BONSAI_VAULT_LINT_STALE_DAYS") };
+        assert_eq!(vault_lint_stale_days(), 90, "env unset で default 90");
+    }
+
+    /// Phase 3 env getter test: BONSAI_VAULT_LINT_STRICT 動作確証
+    #[test]
+    fn t_vault_lint_strict_default_off() {
+        unsafe { std::env::remove_var("BONSAI_VAULT_LINT_STRICT") };
+        assert!(!is_vault_lint_strict(), "env unset で strict OFF");
     }
 }
