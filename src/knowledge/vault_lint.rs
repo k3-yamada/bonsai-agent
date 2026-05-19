@@ -208,6 +208,26 @@ pub fn lint_vault_for_lab(vault: &Vault, stale_threshold_days: i64) -> VaultLint
     report
 }
 
+/// Lab cycle 起動前の Vault sanity gate (項目 246 Phase 4 → 項目 251 helper extraction).
+///
+/// 副作用: `report.warn_log()` + (`audit` が `Some` なら) `AuditLog::log(VaultLint)` emit.
+/// `strict=true` + `!report.is_clean()` で `Err(anyhow)` 返却、caller で bail へ転送.
+///
+/// Returns:
+/// - `Ok(VaultLintReport)` — gate 通過 (clean、または warn-only mode で not_clean)
+/// - `Err(anyhow::Error)` — strict gate FAIL (項目 246 critic F1 follow-up = 核心 bail 分岐)
+///
+/// Phase 1 Red: `unimplemented!()` stub で 4 test 全 FAIL (panic).
+/// Phase 2 Green: main.rs::handle_lab_mode の inline ブロックを本 helper に書換.
+pub fn run_vault_sanity_gate(
+    _vault_root: &std::path::Path,
+    _stale_days: i64,
+    _strict: bool,
+    _audit: Option<&crate::observability::audit::AuditLog>,
+) -> anyhow::Result<VaultLintReport> {
+    unimplemented!("項目 251 Phase 1 Red: Phase 2 Green で実装")
+}
+
 /// 項目 246 Phase 4 用 cross-test env mutex (BONSAI_VAULT_LINT_LAB set/unset を直列化).
 ///
 /// strict / stale_days と独立 lock (テスト並行性を最大化、ただし同一 env 名は直列化必須).
@@ -366,5 +386,96 @@ mod tests {
         let result = is_vault_lint_lab_enabled();
         unsafe { std::env::remove_var("BONSAI_VAULT_LINT_LAB") };
         assert!(result, "BONSAI_VAULT_LINT_LAB=1 で Lab wiring gate ON");
+    }
+
+    // ── 項目 251 follow-up: run_vault_sanity_gate helper test (項目 246 critic F1 対応) ──
+    //
+    // Phase 1 Red: helper は `unimplemented!()` stub で 4 test 全て panic (FAIL).
+    // Phase 2 Green: lint_vault_for_lab + warn_log + audit.log + strict bail で 4 test PASS.
+
+    /// Phase 1 Red: clean Vault + strict=true + audit=None → Ok + clean (PASS 期待).
+    #[test]
+    fn t_run_vault_sanity_gate_clean_returns_ok() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        let result = run_vault_sanity_gate(dir.path(), 90, true, None);
+        let report = result.expect("clean Vault + strict=true → Ok");
+        assert!(
+            report.is_clean(),
+            "新規 Vault は clean=true (Phase 2 Green で lint_vault_for_lab 呼出を期待)"
+        );
+    }
+
+    /// Phase 1 Red: dirty Vault + strict=false + audit=None → Ok + report に duplicate 反映.
+    ///
+    /// Why: warn-only mode は dirty Vault でも Lab cycle 続行する設計、Ok 返却を厳格確証.
+    #[test]
+    fn t_run_vault_sanity_gate_dirty_warn_only_returns_ok() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        let now_ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let dup = format!(
+            "\n- [{now_ts}] same long content prefix fifty chars for dup test xx\n- [{now_ts}] same long content prefix fifty chars for dup test yy\n"
+        );
+        std::fs::write(&facts_path, existing + &dup).expect("write");
+        let result = run_vault_sanity_gate(dir.path(), 90, false, None);
+        let report = result.expect("warn-only mode で dirty Vault でも Ok 返却 (続行)");
+        assert!(
+            !report.duplicate_entries.is_empty(),
+            "warn-only mode でも report に duplicate を反映 (lint pass 自体は実行)"
+        );
+    }
+
+    /// Phase 1 Red: dirty Vault + strict=true + audit=None → Err (**核心 bail テスト**).
+    ///
+    /// Why: 項目 246 critic F1 follow-up. strict + bail 分岐 (highest-stakes、Lab paired 起動を
+    /// 中断) の coverage を確保。silent regression で `bail!` を `Ok(())` にすり替える変更が
+    /// 入ったとき、本 test が catch する。
+    #[test]
+    fn t_run_vault_sanity_gate_dirty_strict_returns_err() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        let now_ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let dup = format!(
+            "\n- [{now_ts}] same long content prefix fifty chars for dup test xx\n- [{now_ts}] same long content prefix fifty chars for dup test yy\n"
+        );
+        std::fs::write(&facts_path, existing + &dup).expect("write");
+        let result = run_vault_sanity_gate(dir.path(), 90, true, None);
+        assert!(
+            result.is_err(),
+            "strict=true + dirty Vault → Err で Lab cycle 中断 (項目 246 critic F1)"
+        );
+    }
+
+    /// Phase 1 Red: clean Vault + strict=false + audit=Some(&log) → Ok + audit_log 1 件 INSERT.
+    ///
+    /// Why: Phase 2 Green で AuditLog::log(VaultLint variant) 呼出が helper 内で行われる
+    /// ことを確証。`action_type='vault_lint'` で count==1 を要求 (既存 schema 整合).
+    #[test]
+    fn t_run_vault_sanity_gate_emits_audit_log() {
+        use crate::memory::store::MemoryStore;
+        use crate::observability::audit::AuditLog;
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        let store = MemoryStore::in_memory().expect("in-memory store");
+        let audit = AuditLog::new(store.conn());
+        let result = run_vault_sanity_gate(dir.path(), 90, false, Some(&audit));
+        assert!(result.is_ok(), "clean Vault → Ok (warn-only でも emit する)");
+        let count: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action_type = 'vault_lint'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(
+            count, 1,
+            "Some(&audit) で audit_log に vault_lint action 1 件 INSERT (Phase 2 Green)"
+        );
     }
 }
