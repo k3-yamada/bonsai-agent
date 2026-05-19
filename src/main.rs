@@ -592,61 +592,30 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
     };
     let backend = CachedBackend::new(backend, 200);
 
-    // 項目 246 Phase 4 Green: Lab cycle 起動前の Vault sanity gate.
+    // 項目 246 Phase 4 Green → 項目 251 helper extraction: Lab cycle 起動前の Vault sanity gate.
     // env-gated (`BONSAI_VAULT_LINT_LAB=1` で active 化、default OFF で no-op).
-    // 1 Lab run 1 回発火、strict=`BONSAI_VAULT_LINT_STRICT=1` + not_clean で bail (cycle 浪費回避).
-    // ECC architect 推奨設計 (pre-lab 1 回 emit + strict bail + 暗黙短絡).
+    // strict=`BONSAI_VAULT_LINT_STRICT=1` + not_clean で bail (cycle 浪費回避).
+    // helper 内で warn_log + audit emit + strict bail を集約 (項目 246 critic F1 follow-up).
     if bonsai_agent::knowledge::vault_lint::is_vault_lint_lab_enabled() {
         let vault_root = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("bonsai-agent")
             .join("vault");
-        match bonsai_agent::knowledge::vault::Vault::new(&vault_root) {
-            Ok(vault) => {
-                let start = std::time::Instant::now();
-                let report = bonsai_agent::knowledge::vault_lint::lint_vault_for_lab(
-                    &vault,
-                    bonsai_agent::knowledge::vault_lint::vault_lint_stale_days(),
-                );
-                // critic finding M1 (項目 246 Phase 4): u128 → u64 安全 cast
-                // (`as u64` の silent truncation を回避、584M 年超は u64::MAX 飽和).
-                let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-                report.warn_log();
-
-                // critic finding F2 (項目 246 Phase 4): session_id を timestamp suffix で uniquify
-                // (`Session::id` は ExperimentLoop 内部で生成され pre-lab 段階で未利用なので、
-                // unix timestamp で複数 Lab run の audit_log 行を区別可能化).
-                let session_id = format!("lab-vault-lint-{}", chrono::Utc::now().timestamp());
-                let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
-                let _ = audit.log(
-                    Some(&session_id),
-                    &bonsai_agent::observability::audit::AuditAction::VaultLint {
-                        duplicate: report.duplicate_entries.len(),
-                        stale: report.stale_entries.len(),
-                        cross_cat: report.cross_category_leaks.len(),
-                        incomplete: report.incomplete_entries.len(),
-                        orphan: report.orphan_entries.len(),
-                        clean: report.is_clean(),
-                        duration_ms,
-                    },
-                );
-
-                if bonsai_agent::knowledge::vault_lint::is_vault_lint_strict() && !report.is_clean()
-                {
-                    anyhow::bail!(
-                        "[lab] BONSAI_VAULT_LINT_STRICT=1 + Vault not clean → Lab 起動を中断 \
-                         (duplicate={} stale={} cross_cat={} incomplete={} orphan={})",
-                        report.duplicate_entries.len(),
-                        report.stale_entries.len(),
-                        report.cross_category_leaks.len(),
-                        report.incomplete_entries.len(),
-                        report.orphan_entries.len(),
-                    );
-                }
+        let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
+        let strict = bonsai_agent::knowledge::vault_lint::is_vault_lint_strict();
+        if let Err(e) = bonsai_agent::knowledge::vault_lint::run_vault_sanity_gate(
+            &vault_root,
+            bonsai_agent::knowledge::vault_lint::vault_lint_stale_days(),
+            strict,
+            Some(&audit),
+        ) {
+            // strict + not_clean は helper 内 bail を伝播 → Lab 起動を中断.
+            // warn-only mode (strict=false) の Vault::new 失敗等は eprintln で警告し続行
+            // (production CLI 初回起動で Vault dir 未作成 = non-fatal の従来 contract 維持).
+            if strict {
+                return Err(e);
             }
-            Err(e) => {
-                eprintln!("[lab.vault_lint] Vault open 失敗 (skip lint pass、non-fatal): {e}")
-            }
+            eprintln!("[lab.vault_lint] sanity gate failed (warn-only): {e}");
         }
     }
 

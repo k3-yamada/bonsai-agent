@@ -217,15 +217,56 @@ pub fn lint_vault_for_lab(vault: &Vault, stale_threshold_days: i64) -> VaultLint
 /// - `Ok(VaultLintReport)` — gate 通過 (clean、または warn-only mode で not_clean)
 /// - `Err(anyhow::Error)` — strict gate FAIL (項目 246 critic F1 follow-up = 核心 bail 分岐)
 ///
-/// Phase 1 Red: `unimplemented!()` stub で 4 test 全 FAIL (panic).
-/// Phase 2 Green: main.rs::handle_lab_mode の inline ブロックを本 helper に書換.
+/// Phase 2 Green 実装: lint_vault_for_lab → warn_log → (Some(audit) なら) audit.log →
+/// strict && !is_clean なら bail。Vault::new 失敗は Err 伝播 (caller `?` で bail へ転送).
 pub fn run_vault_sanity_gate(
-    _vault_root: &std::path::Path,
-    _stale_days: i64,
-    _strict: bool,
-    _audit: Option<&crate::observability::audit::AuditLog>,
+    vault_root: &std::path::Path,
+    stale_days: i64,
+    strict: bool,
+    audit: Option<&crate::observability::audit::AuditLog>,
 ) -> anyhow::Result<VaultLintReport> {
-    unimplemented!("項目 251 Phase 1 Red: Phase 2 Green で実装")
+    let vault = Vault::new(vault_root).map_err(|e| {
+        anyhow::anyhow!(
+            "[lab.vault_lint] Vault::new failed at {}: {e}",
+            vault_root.display()
+        )
+    })?;
+    let start = std::time::Instant::now();
+    let report = lint_vault_for_lab(&vault, stale_days);
+    // critic finding M1: u128 → u64 安全 cast (584M 年超は u64::MAX 飽和).
+    let duration_ms: u64 = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    report.warn_log();
+
+    if let Some(audit_log) = audit {
+        // critic finding F2: session_id を timestamp suffix で uniquify
+        // (複数 Lab run の audit_log 行を区別可能化).
+        let session_id = format!("lab-vault-lint-{}", chrono::Utc::now().timestamp());
+        let _ = audit_log.log(
+            Some(&session_id),
+            &crate::observability::audit::AuditAction::VaultLint {
+                duplicate: report.duplicate_entries.len(),
+                stale: report.stale_entries.len(),
+                cross_cat: report.cross_category_leaks.len(),
+                incomplete: report.incomplete_entries.len(),
+                orphan: report.orphan_entries.len(),
+                clean: report.is_clean(),
+                duration_ms,
+            },
+        );
+    }
+
+    if strict && !report.is_clean() {
+        anyhow::bail!(
+            "[lab] BONSAI_VAULT_LINT_STRICT=1 + Vault not clean → Lab 起動を中断 \
+             (duplicate={} stale={} cross_cat={} incomplete={} orphan={})",
+            report.duplicate_entries.len(),
+            report.stale_entries.len(),
+            report.cross_category_leaks.len(),
+            report.incomplete_entries.len(),
+            report.orphan_entries.len(),
+        );
+    }
+    Ok(report)
 }
 
 /// 項目 246 Phase 4 用 cross-test env mutex (BONSAI_VAULT_LINT_LAB set/unset を直列化).
