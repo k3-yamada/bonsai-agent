@@ -1,5 +1,6 @@
 use crate::agent::conversation::{Message, Role};
 use crate::memory::store::MemoryStore;
+use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::embedder::{Embedder, cosine_similarity};
 use std::collections::HashMap;
 
@@ -65,11 +66,13 @@ impl CompactionConfig {
 
     /// 項目 248 Phase 4: env-driven dynamic budget の wiring factory.
     ///
-    /// `BONSAI_DYNAMIC_BUDGET=1` のとき `BudgetRatios` を `budget_ratios` に設定:
-    /// - `BONSAI_DYNAMIC_BUDGET_RATIOS` が valid (4 要素 + sum 1.0) なら env override 採用
+    /// `BONSAI_DYNAMIC_BUDGET ∈ {"1","true","TRUE","yes","YES"}` のとき `BudgetRatios` を
+    /// `budget_ratios` に設定 (`is_dynamic_budget_enabled` matcher と整合):
+    /// - `BONSAI_DYNAMIC_BUDGET_RATIOS` が valid (4 要素 + sum 1.0 + 各 ≥ 0.0 finite)
+    ///   なら env override 採用
     /// - そうでなければ `BudgetRatios::default()` (40/30/20/10)
     ///
-    /// env unset で None 維持 (backward compat).
+    /// env unset で None 維持 (backward compat). critic F6 follow-up で accept 値 list を明示.
     pub fn with_dynamic_budget_from_env(mut self) -> Self {
         if is_dynamic_budget_enabled() {
             self.budget_ratios = Some(dynamic_budget_ratios_from_env().unwrap_or_default());
@@ -136,11 +139,21 @@ impl Default for MemoryRelevance {
 
 impl BudgetRatios {
     /// 合計が 1.0 ±ε か (Phase 1 Red では全 0 で false).
+    ///
+    /// critic F4 follow-up: 各 ratio が finite + ≥ 0.0 であることも要件化
+    /// (`BONSAI_DYNAMIC_BUDGET_RATIOS="-0.5,0.5,0.5,0.5"` のような sum=1.0 だが負の値を含む
+    /// override を reject、Lab paired 起動時の `f32 → usize` cast 飽和による隠れ歪み回避).
     pub fn is_normalized(&self) -> bool {
-        let sum = self.recent_buffer
-            + self.conversation_summary
-            + self.relevant_entities
-            + self.knowledge_graph;
+        let parts = [
+            self.recent_buffer,
+            self.conversation_summary,
+            self.relevant_entities,
+            self.knowledge_graph,
+        ];
+        if !parts.iter().all(|p| p.is_finite() && *p >= 0.0) {
+            return false;
+        }
+        let sum: f32 = parts.iter().sum();
         (sum - 1.0).abs() < 0.001
     }
 
@@ -826,12 +839,22 @@ pub fn compact_if_needed(
     messages: &mut Vec<Message>,
     config: &CompactionConfig,
 ) -> (u8, Vec<String>) {
-    // 項目 248 Phase 4 wiring: budget_ratios=Some のとき計測 log を emit (`[INFO][compaction.budget]`).
-    // 挙動変化なし (log のみ)、将来 4 軸個別 prune の hook 点として保存.
+    // 項目 248 Phase 4 wiring: budget_ratios=Some のとき計測 log を emit.
+    // critic F1 follow-up: eprintln → 構造化 logger (`BONSAI_LOG` で level filter 可)、
+    // Lab paired 起動時の stderr 容量問題回避。挙動変化なし (log のみ)、将来 4 軸個別
+    // prune の hook 点として保存.
     if let Some(allocated) = dynamic_budget_for_compaction(config) {
-        eprintln!(
-            "[INFO][compaction.budget] buffer={} summary={} entities={} kg={} total={}",
-            allocated.buffer, allocated.summary, allocated.entities, allocated.kg, allocated.total,
+        log_event(
+            LogLevel::Info,
+            "compaction.budget",
+            &format!(
+                "buffer={} summary={} entities={} kg={} total={}",
+                allocated.buffer,
+                allocated.summary,
+                allocated.entities,
+                allocated.kg,
+                allocated.total,
+            ),
         );
     }
     let off = compact_level0(messages, config);
