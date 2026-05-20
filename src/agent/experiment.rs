@@ -1899,16 +1899,19 @@ pub fn judge_gate_check(
     })
 }
 
-/// 項目 252 Phase 2.5 wiring (F4 案 A、plan lab-runtime-stabilization-f4-mlx-latency.md §3.2.2).
+/// 項目 252 Phase 2.5 wiring + M2 per-iter timeout (F4 案 A).
 ///
 /// Lab cycle 起動前の MLX server pre-warm. `count` 回 `backend.generate(&[user("ping")], ...)`
 /// を呼び、MLX 2-bit cold start latency を Lab cycle 計時前に消化する.
 /// 各 generate の Ok/Err は log_event のみ (graceful degradation、Err でも cycle 続行).
 /// 各 iter 先頭で `cancel.is_cancelled()` チェック → Ctrl+C 中断応答性確保 (critic M1 fix).
-/// per-iter wall timeout は項目 252 M2 plan で対処予定、本実装では iter 境界 cancel 反映のみ.
 ///
-/// 戻り値: 成功した generate 呼出回数 (= count - Err 回数).
-/// MockLlmBackend は常に Ok を返すため、test では `assert_eq!(prewarm(&mock, n), n)` で確認可能.
+/// **項目 252 M2 (per-iter wall budget)**: `BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS` env で
+/// 各 iter に独立 deadline (default 180s、range 1..=600、env=0 sentinel で素朴 loop 経路).
+/// 1 iter が hang しても次 iter へ進む (thread::scope + mpsc::recv_timeout pattern).
+///
+/// 戻り値: 成功した generate 呼出回数 (= count - Err 回数 - timeout 回数).
+/// MockLlmBackend は常に Ok を返すため、test では `assert_eq!(prewarm(&mock, n, ...), n)` で確認可能.
 pub fn lab_mlx_prewarm(
     backend: &dyn LlmBackend,
     count: usize,
@@ -1917,10 +1920,14 @@ pub fn lab_mlx_prewarm(
     use crate::agent::conversation::Message;
     // code-reviewer MEDIUM M-1 fix: ping prompt を loop 外 hoist で重複 alloc 回避.
     let prompt = [Message::user("ping")];
+    // M2 Phase 2 Green: per-iter wall budget (0 = sentinel disable、>0 = thread::scope path).
+    let timeout_secs = crate::config::lab_mlx_warmup_timeout_secs();
     log_event(
         LogLevel::Info,
         "lab",
-        &format!("[lab] BONSAI_LAB_MLX_WARMUP=1 → MLX pre-warm {count} 回投入"),
+        &format!(
+            "[lab] BONSAI_LAB_MLX_WARMUP=1 → MLX pre-warm {count} 回投入 (timeout={timeout_secs}s, 0=disable)"
+        ),
     );
     let mut success_count = 0usize;
     for i in 0..count {
@@ -1935,7 +1942,26 @@ pub fn lab_mlx_prewarm(
             );
             break;
         }
-        let result = backend.generate(&prompt, &[], &mut |_| {}, cancel);
+        // M2 case A: timeout=0 で素朴 loop (rollback path)、>0 で thread::scope + recv_timeout.
+        let result: anyhow::Result<()> = if timeout_secs == 0 {
+            backend
+                .generate(&prompt, &[], &mut |_| {}, cancel)
+                .map(|_| ())
+        } else {
+            let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let r = backend
+                        .generate(&prompt, &[], &mut |_| {}, cancel)
+                        .map(|_| ());
+                    let _ = tx.send(r);
+                });
+                match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
+                    Ok(r) => r,
+                    Err(_) => Err(anyhow::anyhow!("pre-warm timeout after {timeout_secs}s")),
+                }
+            })
+        };
         match result {
             Ok(_) => {
                 success_count += 1;

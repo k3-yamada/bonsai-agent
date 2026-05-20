@@ -370,21 +370,31 @@ pub fn lab_mlx_warmup_count() -> Option<usize> {
         .filter(|n| (1..=10).contains(n))
 }
 
-/// 項目 252 M2 Phase 1 Red stub: `BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS` env で per-iter wall budget override.
+/// 項目 252 M2 Phase 2 Green: `BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS` env で per-iter wall budget override.
 ///
 /// plan: `.claude/plan/lab-mlx-prewarm-timeout-bound.md` 案 A (per-iter wall budget).
 ///
-/// Phase 2 Green では:
-/// - 範囲 1..=600 で env override
-/// - 範囲外 / parse 失敗で default 180 fallback (F1 sse_chunk_timeout 整合)
-/// - 0 = sentinel「timeout 無効化」(明示 disable 経路、case A 前の素朴 loop)
+/// 動作:
+/// - env unset で default 180 (F1 sse_chunk_timeout 整合、MLX 2-bit cold start 取りこぼし回避)
+/// - env=N (1..=600) で N を return
+/// - env=0 sentinel で 0 (caller 側で「timeout 無効化、素朴 loop」経路を選択)
+/// - env=範囲外 / parse 失敗で default 180 fallback
 ///
-/// Phase 1 Red stub: 常に 0 (= sentinel disable) を return、env 無視。
-/// Phase 2 Green で parse 本実装、env=180 default、env=0 sentinel、env=範囲外 fallback。
+/// caller (`lab_mlx_prewarm`) は戻り値 0 で素朴 loop、>0 で thread::scope + recv_timeout 経路.
 pub fn lab_mlx_warmup_timeout_secs() -> u64 {
-    // Phase 1 Red stub: env 無視で 0 sentinel return.
-    // Phase 2 Green で BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS env parse + range 1..=600 + default 180.
-    0
+    const DEFAULT: u64 = 180;
+    match std::env::var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") {
+        Ok(s) => match s.parse::<u64>() {
+            // env=0 sentinel: 0 を passthrough (caller で素朴 loop 経路)
+            Ok(0) => 0,
+            // env=N (1..=600): N を return
+            Ok(n) if (1..=600).contains(&n) => n,
+            // range out / parse 失敗: default 180 fallback
+            _ => DEFAULT,
+        },
+        // unset: default 180
+        Err(_) => DEFAULT,
+    }
 }
 
 /// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
