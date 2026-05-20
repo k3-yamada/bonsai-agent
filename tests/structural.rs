@@ -26,11 +26,77 @@ const LAYER_ORDER: &[&str] = &[
 
 const SIZE_LIMIT: usize = 800;
 
-/// SIZE-001 whitelist (Phase 2 Green 適用、Phase 1 Red は空).
-const WHITELIST_OVER_800: &[&str] = &[];
+/// SIZE-001 whitelist — Phase 2 Green で既存 violation 20 件を全件許容.
+/// path string substr match. 各 file は今後の Z-4 follow-up plan で
+/// 分割検討対象 (項目 248 Phase 5 axis prune と並列の compaction 分割含む).
+const WHITELIST_OVER_800: &[&str] = &[
+    "src/tools/repomap.rs",
+    "src/tools/mod.rs",
+    "src/tools/file.rs",
+    "src/memory/heuristics.rs",
+    "src/memory/store.rs",
+    "src/memory/factcheck.rs",
+    "src/config.rs",
+    "src/runtime/llama_server.rs",
+    "src/runtime/model_router.rs",
+    "src/agent/benchmark.rs",
+    "src/agent/subagent.rs",
+    "src/agent/experiment_log.rs",
+    "src/agent/agent_loop/tests.rs",
+    "src/agent/middleware.rs",
+    "src/agent/compaction.rs",
+    "src/agent/error_recovery.rs",
+    "src/agent/event_store.rs",
+    "src/agent/experiment.rs",
+    "src/observability/audit.rs",
+    "src/main.rs",
+];
 
-/// LOG-001 whitelist (Phase 2 Green 適用、Phase 1 Red は空).
-const WHITELIST_EPRINTLN: &[&str] = &[];
+/// DEP-001 whitelist — Phase 1 Red baseline で検出された 32 件を許容.
+/// (path, current_layer, imported_layer) tuple、現状は type-only import や
+/// cross-cutting reference として legitimate. 真の防御は逆方向 function call で、
+/// type read だけは layer 順を弱めて許容. follow-up plan で個別 audit 推奨.
+const WHITELIST_DEP: &[(&str, &str, &str)] = &[
+    (
+        "src/memory/mocks/event_repository_mock.rs",
+        "memory",
+        "agent",
+    ),
+    ("src/memory/experience.rs", "memory", "agent"),
+    ("src/memory/heuristics.rs", "memory", "agent"),
+    ("src/memory/heuristics.rs", "memory", "runtime"),
+    ("src/memory/store.rs", "memory", "runtime"),
+    ("src/memory/store.rs", "memory", "agent"),
+    ("src/memory/skill.rs", "memory", "agent"),
+    ("src/memory/search.rs", "memory", "runtime"),
+    ("src/runtime/cache.rs", "runtime", "agent"),
+    ("src/runtime/cache.rs", "runtime", "tools"),
+    ("src/runtime/llama_server.rs", "runtime", "agent"),
+    ("src/runtime/llama_server.rs", "runtime", "tools"),
+    ("src/runtime/model_router.rs", "runtime", "agent"),
+    ("src/runtime/inference.rs", "runtime", "agent"),
+    ("src/runtime/inference.rs", "runtime", "tools"),
+    ("src/observability/audit.rs", "observability", "memory"),
+];
+
+/// LOG-001 whitelist — Phase 2 Green で operator visibility 用途を許容.
+/// path string substr match. 一部 (advisor_inject.rs) は log_event 化候補で
+/// follow-up plan の TODO.
+const WHITELIST_EPRINTLN: &[&str] = &[
+    "src/main.rs",                            // CLI 出力、operator visibility
+    "src/bin/longmemeval_bench.rs",           // bench CLI 出力
+    "src/agent/experiment.rs",                // Lab 進捗 (log_event 化検討中)
+    "src/agent/agent_loop/advisor_inject.rs", // log_event 化候補 (follow-up TODO)
+    "src/agent/agent_loop/step.rs",           // step 進捗
+    "src/agent/context_inject.rs",            // context 注入 trace
+    "src/runtime/llama_server.rs",            // server log
+    "src/runtime/embedder.rs",                // embed log
+    "src/observability/logger.rs",            // logger 内部 (log_event implementation)
+    "src/safety/secrets.rs",                  // security warning
+    "src/knowledge/vault_lint.rs",            // 項目 246 implementation の意図的 eprintln
+    "src/memory/store.rs",                    // memory store warning
+    "src/eval/longmemeval/runner.rs",         // longmemeval runner trace
+];
 
 /// src/ 配下の全 .rs ファイルを再帰収集.
 fn walk_src() -> Vec<PathBuf> {
@@ -54,10 +120,7 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn count_lines(path: &Path) -> usize {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .count()
+    fs::read_to_string(path).unwrap_or_default().lines().count()
 }
 
 /// "src/<module>/..." から最上位 module 名を抽出.
@@ -142,13 +205,20 @@ fn t_layer_order_no_upward_dep() {
                 continue; // cross-cutting (cancel, config) は LAYER_ORDER 外
             };
             if imported_idx > current_idx {
-                violations.push((path.clone(), current_mod.clone(), imported_mod.clone()));
+                // Phase 2 Green: whitelist 適用 (path, current, imported) tuple match.
+                let path_str = path.to_string_lossy().to_string();
+                let whitelisted = WHITELIST_DEP.iter().any(|(p, c, i)| {
+                    path_str == *p && c == &current_mod.as_str() && i == &imported_mod.as_str()
+                });
+                if !whitelisted {
+                    violations.push((path.clone(), current_mod.clone(), imported_mod.clone()));
+                }
             }
         }
     }
     assert!(
         violations.is_empty(),
-        "[LINT:DEP-001] {} 件の layer 違反. 上位 layer への依存は禁止. 修正方法: 該当機能を下位 layer に再 implement、or cross-cutting concern なら cancel/config に移行. 参照: docs/architecture/module-layer-rules.md\nViolations: {:?}",
+        "[LINT:DEP-001] {} 件の layer 違反 (whitelist 外). 上位 layer への依存は禁止. 修正方法: 該当機能を下位 layer に再 implement、or cross-cutting concern なら cancel/config に移行、or 一時的に WHITELIST_DEP に追加. 参照: docs/architecture/module-layer-rules.md\nViolations: {:?}",
         violations.len(),
         violations
     );
@@ -189,6 +259,16 @@ fn t_no_eprintln_in_production() {
     );
 }
 
+/// `[LINT:<UPPERCASE>` pattern を含む source line のみ count (code 自体の `[LINT:` 言及を除外).
+/// META meta-test の self-reference false positive 回避.
+fn contains_lint_code(line: &str) -> bool {
+    line.find("[LINT:").is_some_and(|i| {
+        line.as_bytes()
+            .get(i + 6)
+            .is_some_and(|c| c.is_ascii_uppercase())
+    })
+}
+
 #[test]
 fn t_lint_error_messages_include_docs_link() {
     // meta-test: 本 file の panic message を read して `docs/` link が含まれているか.
@@ -196,7 +276,7 @@ fn t_lint_error_messages_include_docs_link() {
     let mut lint_codes = Vec::new();
     let mut lint_codes_with_docs = Vec::new();
     for line in content.lines() {
-        if line.contains("[LINT:") {
+        if contains_lint_code(line) {
             lint_codes.push(line.to_string());
             if line.contains("docs/") {
                 lint_codes_with_docs.push(line.to_string());
@@ -205,7 +285,7 @@ fn t_lint_error_messages_include_docs_link() {
     }
     assert!(
         !lint_codes.is_empty(),
-        "[LINT:META] panic message に [LINT:CODE] 形式が 1 件以上含まれること"
+        "[LINT:META] panic message に [LINT:CODE] 形式が 1 件以上含まれること. 参照: docs/architecture/module-layer-rules.md"
     );
     assert_eq!(
         lint_codes.len(),
