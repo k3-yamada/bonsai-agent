@@ -587,8 +587,12 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
         // critic F3 follow-up: succ==0 で全 fail の場合 stderr 警告
         // (Lab cycle 続行は graceful degradation 維持、但し silent failure 防止).
         if n > 0 && succ == 0 {
+            // code-reviewer MEDIUM M-2 fix: env 表記混同回避.
+            // BONSAI_LAB_MLX_WARMUP=1 は ON/OFF flag、count は別 env _COUNT.
             eprintln!(
-                "[lab] WARN: BONSAI_LAB_MLX_WARMUP={n} すべて失敗 (succ=0/n={n}). MLX server 未起動か到達不可の可能性. Lab cycle は続行するが cold start latency 未消化."
+                "[lab] WARN: pre-warm 全失敗 (succ=0/n={n}, BONSAI_LAB_MLX_WARMUP_COUNT={n}). \
+                 MLX server 未起動か到達不可の可能性. \
+                 Lab cycle は続行するが cold start latency 未消化."
             );
         }
     }

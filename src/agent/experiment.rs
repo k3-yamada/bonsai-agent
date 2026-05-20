@@ -1904,21 +1904,19 @@ pub fn judge_gate_check(
 /// Lab cycle 起動前の MLX server pre-warm. `count` 回 `backend.generate(&[user("ping")], ...)`
 /// を呼び、MLX 2-bit cold start latency を Lab cycle 計時前に消化する.
 /// 各 generate の Ok/Err は log_event のみ (graceful degradation、Err でも cycle 続行).
+/// 各 iter 先頭で `cancel.is_cancelled()` チェック → Ctrl+C 中断応答性確保 (critic M1 fix).
+/// per-iter wall timeout は項目 252 M2 plan で対処予定、本実装では iter 境界 cancel 反映のみ.
 ///
 /// 戻り値: 成功した generate 呼出回数 (= count - Err 回数).
 /// MockLlmBackend は常に Ok を返すため、test では `assert_eq!(prewarm(&mock, n), n)` で確認可能.
-///
-/// Phase 2 Green 実装 + critic M1 follow-up: loop 実装 + log_event + backend.generate("ping").
-/// 各 generate 結果は log_event のみ (graceful degradation、Err でも次の iter へ続行).
-///
-/// critic M1 fix: caller の `cancel` を forward、各 iter で `cancel.is_cancelled()` 早期 bail.
-/// (Ctrl+C 中断応答性確保、F2 fallback chain と整合).
 pub fn lab_mlx_prewarm(
     backend: &dyn LlmBackend,
     count: usize,
     cancel: &CancellationToken,
 ) -> usize {
     use crate::agent::conversation::Message;
+    // code-reviewer MEDIUM M-1 fix: ping prompt を loop 外 hoist で重複 alloc 回避.
+    let prompt = [Message::user("ping")];
     log_event(
         LogLevel::Info,
         "lab",
@@ -1937,7 +1935,7 @@ pub fn lab_mlx_prewarm(
             );
             break;
         }
-        let result = backend.generate(&[Message::user("ping")], &[], &mut |_| {}, cancel);
+        let result = backend.generate(&prompt, &[], &mut |_| {}, cancel);
         match result {
             Ok(_) => {
                 success_count += 1;
