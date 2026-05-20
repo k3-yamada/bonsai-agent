@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## プロジェクト概要
 
 `bonsai-agent` — Bonsai-8B（1ビット量子化Qwen3-8B、1.28GB）で動作するRust製自律型エージェント。
-Mac M2 16GB上でllama-server HTTP API経由で推論。1278テスト、69ソースファイル。
+Mac M2 16GB上でllama-server HTTP API経由で推論。1348 unit test (2026-05-21 時点)、95+ ソースファイル。
 
 設計原則: **「Scaffolding > Model」** — 1ビットモデルの改善余地は限定的。ハーネス側で信頼性を底上げする。
 
@@ -20,7 +20,7 @@ Mac M2 16GB上でllama-server HTTP API経由で推論。1278テスト、69ソー
 
 ## ハーネスパターン
 
-p^n問題（ステップ蓄積による失敗確率指数的増大）への対策。**項目 1-239 は [memory/harness_patterns_archive.md](../../.claude/projects/-Users-keizo-bonsai-agent/memory/harness_patterns_archive.md) に verbatim アーカイブ**。CLAUDE.md は索引 + デフォルト化済み変異 + 直近 5 項目の 1 行サマリーのみ保持。
+p^n問題（ステップ蓄積による失敗確率指数的増大）への対策。**項目 1-252 は `~/.claude/projects/-Users-keizo-bonsai-agent/memory/harness_patterns_archive.md` (Claude Code session memory) に verbatim アーカイブ**。CLAUDE.md は索引 + デフォルト化済み変異 + 直近項目の 1 行サマリーのみ保持。
 
 ### カテゴリ索引（archive 参照用）
 

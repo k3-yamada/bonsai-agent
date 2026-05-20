@@ -145,10 +145,7 @@ fn extract_use_crate_modules(content: &str) -> Vec<String> {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("use crate::") {
             // "use crate::agent::experiment::*;" → "agent"
-            let module = rest
-                .split(|c: char| c == ':' || c == ';' || c == ' ' || c == ',' || c == '{')
-                .next()
-                .unwrap_or("");
+            let module = rest.split([':', ';', ' ', ',', '{']).next().unwrap_or("");
             if !module.is_empty() {
                 modules.push(module.to_string());
             }
