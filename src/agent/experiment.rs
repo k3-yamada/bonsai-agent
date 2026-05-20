@@ -3590,4 +3590,36 @@ mod tests {
             "count==5 で全 5 回成功 (BONSAI_LAB_MLX_WARMUP_COUNT range 上限境界 (10) 半分)"
         );
     }
+
+    // critic F1 follow-up: Err-path coverage.
+    // backend.generate が常に Err を返す場合に lab_mlx_prewarm が 0 を返し、
+    // graceful degradation (panic せず) で完走することを確証.
+
+    /// `LlmBackend` を impl して常に Err を返す test-only backend.
+    struct AlwaysFailBackend;
+    impl crate::runtime::inference::LlmBackend for AlwaysFailBackend {
+        fn model_id(&self) -> &str {
+            "always-fail-mock"
+        }
+        fn generate(
+            &self,
+            _messages: &[crate::agent::conversation::Message],
+            _tools: &[crate::tools::ToolSchema],
+            _on_token: &mut dyn FnMut(&str),
+            _cancel: &CancellationToken,
+        ) -> Result<crate::runtime::inference::GenerateResult> {
+            anyhow::bail!("simulated MLX server unreachable (F1 test)")
+        }
+    }
+
+    #[test]
+    fn t_lab_mlx_prewarm_all_fail_returns_zero() {
+        let backend = AlwaysFailBackend;
+        let cancel = CancellationToken::new();
+        let succ = lab_mlx_prewarm(&backend, 3, &cancel);
+        assert_eq!(
+            succ, 0,
+            "全 backend.generate Err → succ=0 (graceful degradation、panic 禁止)"
+        );
+    }
 }
