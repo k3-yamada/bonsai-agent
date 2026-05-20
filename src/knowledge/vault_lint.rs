@@ -63,6 +63,11 @@ pub struct VaultLintReport {
     pub incomplete_entries: Vec<(String, String)>,
     /// (category, content_excerpt) で KG link 欠落 (Phase 1+2 未実装)
     pub orphan_entries: Vec<(String, String)>,
+    /// 項目 254 Phase 1 Red: 5 軸目 = incomplete + aged > N days な entry
+    /// (category, timestamp_str, content_excerpt, age_days).
+    /// 2do BRAIN article (Qiita YushiYamamoto) の Obsidian Dataview
+    /// `WHERE status != "reviewed"` 等価検出。draft 老化 = orphan draft の温床。
+    pub unreviewed_aged_entries: Vec<(String, String, String, i64)>,
 }
 
 impl VaultLintReport {
@@ -123,6 +128,18 @@ pub fn vault_lint_stale_days() -> i64 {
         .and_then(|v| v.parse::<i64>().ok())
         .filter(|d| (1..=365).contains(d))
         .unwrap_or(DEFAULT)
+}
+
+/// 項目 254 Phase 1 Red stub: `BONSAI_VAULT_UNREVIEWED_DAYS` env で 5 軸目閾値 override (default 14).
+///
+/// 範囲 1..=90、範囲外 / parse 失敗は default 14 fallback。
+/// Phase 1 Red は stub で常に 14 を return (env 無視)、Phase 2 Green で parse 本実装.
+///
+/// 2do BRAIN article §「Obsidian Dataview」の `WHERE status != "reviewed"` 検出閾値.
+pub fn vault_unreviewed_days() -> i64 {
+    // Phase 1 Red stub: env 無視で固定値 14 を return.
+    // Phase 2 Green で BONSAI_VAULT_UNREVIEWED_DAYS env を parse、range 1..=90 で fallback.
+    14
 }
 
 /// Lab 起動時の Vault sanity lint pass.
@@ -520,6 +537,92 @@ mod tests {
         assert_eq!(
             count, 1,
             "Some(&audit) で audit_log に vault_lint action 1 件 INSERT (Phase 2 Green)"
+        );
+    }
+
+    // ── 項目 254 Phase 1 Red: unreviewed_aged_entries 5 軸目検出 4 test ──
+    //
+    // Phase 1 Red: lint_vault_for_lab() は 5 軸目を populate しない → t1/t3 が FAIL.
+    // Phase 2 Green: incomplete + aged > unreviewed_threshold で populate → 4 test 全 PASS.
+    //
+    // 設計: 既存 incomplete_entries 検出 + 新 age > threshold check で 5 軸目に追加.
+    // 既存 incomplete_entries は age 無関係に全件、5 軸目は incomplete AND aged サブセット.
+
+    /// Phase 1 Red 核心: incomplete + 30 日経過 entry → unreviewed_aged 1 件検出.
+    /// FAIL 期待 (Phase 1 stub では unreviewed_aged_entries は常に空).
+    #[test]
+    fn t_vault_lint_detects_incomplete_aged_entry() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        let aged_ts = chrono::Utc::now() - chrono::Duration::days(30);
+        let line = format!("\n- [{}] TODO\n", aged_ts.format("%Y-%m-%d %H:%M"));
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        std::fs::write(&facts_path, existing + &line).expect("write");
+        let vault = Vault::new(dir.path()).expect("vault reopen");
+        let report = lint_vault_for_lab(&vault, 90);
+        assert!(
+            !report.unreviewed_aged_entries.is_empty(),
+            "incomplete (TODO) + 30 日経過 → unreviewed_aged 検出 (Phase 1 Red FAIL 期待)"
+        );
+    }
+
+    /// Phase 1 Red sanity: incomplete + 5 日経過 (< default 14) → unreviewed_aged 検出ゼロ.
+    /// Phase 1 stub でも PASS (空 Vec で trivial sanity)、Phase 2 Green でも PASS.
+    #[test]
+    fn t_vault_lint_recent_incomplete_not_detected() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        let recent_ts = chrono::Utc::now() - chrono::Duration::days(5);
+        let line = format!("\n- [{}] TODO\n", recent_ts.format("%Y-%m-%d %H:%M"));
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        std::fs::write(&facts_path, existing + &line).expect("write");
+        let vault = Vault::new(dir.path()).expect("vault reopen");
+        let report = lint_vault_for_lab(&vault, 90);
+        assert!(
+            report.unreviewed_aged_entries.is_empty(),
+            "incomplete + 5 日経過 (< default 14) は unreviewed_aged 非検出"
+        );
+    }
+
+    /// Phase 1 Red 核心: env getter range validation.
+    /// FAIL 期待 (Phase 1 stub は env 無視で常に 14 を return).
+    /// 注: env mutation のため独立 mutex は不要 (本 test 内のみ touch、tests module で他 test
+    ///     は BONSAI_VAULT_UNREVIEWED_DAYS を読まない).
+    #[test]
+    fn t_vault_unreviewed_days_env_override() {
+        unsafe { std::env::set_var("BONSAI_VAULT_UNREVIEWED_DAYS", "30") };
+        let result = vault_unreviewed_days();
+        unsafe { std::env::remove_var("BONSAI_VAULT_UNREVIEWED_DAYS") };
+        assert_eq!(
+            result, 30,
+            "BONSAI_VAULT_UNREVIEWED_DAYS=30 で env override (Phase 1 Red FAIL = stub は 14)"
+        );
+    }
+
+    /// Phase 1 Red sanity: non-incomplete (regular content) + 30 日経過
+    /// → stale_entries には入るが unreviewed_aged_entries には入らない.
+    /// Phase 1 stub でも PASS (空 Vec で trivial sanity)、Phase 2 Green でも PASS.
+    #[test]
+    fn t_vault_lint_non_incomplete_aged_not_in_unreviewed() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        // 通常 content (incomplete でない) + 30 日経過 → stale 軸のみ
+        let aged_ts = chrono::Utc::now() - chrono::Duration::days(30);
+        let line = format!(
+            "\n- [{}] regular content long enough to avoid incomplete detection\n",
+            aged_ts.format("%Y-%m-%d %H:%M")
+        );
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        std::fs::write(&facts_path, existing + &line).expect("write");
+        let vault = Vault::new(dir.path()).expect("vault reopen");
+        // stale_threshold 90 で 30 日は stale 範囲外、incomplete でもないので unreviewed_aged も空
+        let report = lint_vault_for_lab(&vault, 90);
+        assert!(
+            report.unreviewed_aged_entries.is_empty(),
+            "通常 content (incomplete でない) は unreviewed_aged 非検出 (incomplete サブセット軸)"
         );
     }
 }
