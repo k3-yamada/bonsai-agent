@@ -582,8 +582,15 @@ fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
     if bonsai_agent::config::is_lab_mlx_warmup() {
         let n = bonsai_agent::config::lab_mlx_warmup_count().unwrap_or(3);
         // critic M1 fix: caller の ctx.cancel を forward (Ctrl+C 中断応答性確保).
-        let _succ =
+        let succ =
             bonsai_agent::agent::experiment::lab_mlx_prewarm(backend.as_ref(), n, &ctx.cancel);
+        // critic F3 follow-up: succ==0 で全 fail の場合 stderr 警告
+        // (Lab cycle 続行は graceful degradation 維持、但し silent failure 防止).
+        if n > 0 && succ == 0 {
+            eprintln!(
+                "[lab] WARN: BONSAI_LAB_MLX_WARMUP={n} すべて失敗 (succ=0/n={n}). MLX server 未起動か到達不可の可能性. Lab cycle は続行するが cold start latency 未消化."
+            );
+        }
     }
 
     let tsv_path = dirs::data_dir()
