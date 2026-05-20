@@ -78,6 +78,7 @@ impl VaultLintReport {
             && self.cross_category_leaks.is_empty()
             && self.incomplete_entries.is_empty()
             && self.orphan_entries.is_empty()
+            && self.unreviewed_aged_entries.is_empty()
     }
 
     /// warning log を `[INFO][lab.vault_lint]` prefix で出力 (項目 244 KG lint と整合).
@@ -86,12 +87,13 @@ impl VaultLintReport {
     /// 本 plan §3.1 ではシンプルに eprintln + prefix を採用 (運用 protocol で grep 容易)。
     pub fn warn_log(&self) {
         eprintln!(
-            "[INFO][lab.vault_lint] duplicate={} stale={} cross_cat={} incomplete={} orphan={} clean={}",
+            "[INFO][lab.vault_lint] duplicate={} stale={} cross_cat={} incomplete={} orphan={} unreviewed_aged={} clean={}",
             self.duplicate_entries.len(),
             self.stale_entries.len(),
             self.cross_category_leaks.len(),
             self.incomplete_entries.len(),
             self.orphan_entries.len(),
+            self.unreviewed_aged_entries.len(),
             self.is_clean()
         );
     }
@@ -130,16 +132,19 @@ pub fn vault_lint_stale_days() -> i64 {
         .unwrap_or(DEFAULT)
 }
 
-/// 項目 254 Phase 1 Red stub: `BONSAI_VAULT_UNREVIEWED_DAYS` env で 5 軸目閾値 override (default 14).
+/// 項目 254 Phase 2 Green: `BONSAI_VAULT_UNREVIEWED_DAYS` env で 5 軸目閾値 override (default 14).
 ///
 /// 範囲 1..=90、範囲外 / parse 失敗は default 14 fallback。
-/// Phase 1 Red は stub で常に 14 を return (env 無視)、Phase 2 Green で parse 本実装.
 ///
-/// 2do BRAIN article §「Obsidian Dataview」の `WHERE status != "reviewed"` 検出閾値.
+/// 2do BRAIN article §「Obsidian Dataview」の `WHERE status != "reviewed"` 検出閾値。
+/// `vault_lint_stale_days()` (default 90) と独立、`unreviewed_aged_entries` 専用閾値.
 pub fn vault_unreviewed_days() -> i64 {
-    // Phase 1 Red stub: env 無視で固定値 14 を return.
-    // Phase 2 Green で BONSAI_VAULT_UNREVIEWED_DAYS env を parse、range 1..=90 で fallback.
-    14
+    const DEFAULT: i64 = 14;
+    std::env::var("BONSAI_VAULT_UNREVIEWED_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|d| (1..=90).contains(d))
+        .unwrap_or(DEFAULT)
 }
 
 /// Lab 起動時の Vault sanity lint pass.
@@ -152,6 +157,8 @@ pub fn lint_vault_for_lab(vault: &Vault, stale_threshold_days: i64) -> VaultLint
     let mut report = VaultLintReport::default();
     let now = chrono::Utc::now();
     let stale_threshold = chrono::Duration::days(stale_threshold_days);
+    // 項目 254 Phase 2 Green: 5 軸目 unreviewed_aged 閾値 (env 経由).
+    let unreviewed_threshold_days = vault_unreviewed_days();
 
     // prefix → set of categories (cross-cat 判定用)
     let mut prefix_to_cats: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -182,6 +189,18 @@ pub fn lint_vault_for_lab(vault: &Vault, stale_threshold_days: i64) -> VaultLint
                 report
                     .incomplete_entries
                     .push((cat.to_string(), line.trim().to_string()));
+                // 項目 254 Phase 2 Green: incomplete + aged > unreviewed_threshold で 5 軸目.
+                // 2do BRAIN article の `WHERE status != "reviewed" AND aged > N days` 等価.
+                let age_days = (now - timestamp).num_days();
+                if age_days > unreviewed_threshold_days {
+                    let excerpt: String = parsed_content.chars().take(60).collect();
+                    report.unreviewed_aged_entries.push((
+                        cat.to_string(),
+                        timestamp_str.clone(),
+                        excerpt,
+                        age_days,
+                    ));
+                }
                 continue;
             }
 
@@ -266,6 +285,7 @@ pub fn run_vault_sanity_gate(
                 cross_cat: report.cross_category_leaks.len(),
                 incomplete: report.incomplete_entries.len(),
                 orphan: report.orphan_entries.len(),
+                unreviewed_aged: report.unreviewed_aged_entries.len(),
                 clean: report.is_clean(),
                 duration_ms,
             },
@@ -275,12 +295,13 @@ pub fn run_vault_sanity_gate(
     if strict && !report.is_clean() {
         anyhow::bail!(
             "[lab] BONSAI_VAULT_LINT_STRICT=1 + Vault not clean → Lab 起動を中断 \
-             (duplicate={} stale={} cross_cat={} incomplete={} orphan={})",
+             (duplicate={} stale={} cross_cat={} incomplete={} orphan={} unreviewed_aged={})",
             report.duplicate_entries.len(),
             report.stale_entries.len(),
             report.cross_category_leaks.len(),
             report.incomplete_entries.len(),
             report.orphan_entries.len(),
+            report.unreviewed_aged_entries.len(),
         );
     }
     Ok(report)

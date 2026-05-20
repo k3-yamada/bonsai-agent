@@ -122,6 +122,9 @@ pub enum AuditAction {
         cross_cat: usize,
         incomplete: usize,
         orphan: usize,
+        /// 項目 254 Phase 2 Green: 5 軸目 unreviewed_aged count (additive、既存 row は absent).
+        #[serde(default)]
+        unreviewed_aged: usize,
         clean: bool,
         duration_ms: u64,
     },
@@ -815,6 +818,7 @@ mod tests {
                     cross_cat: 0,
                     incomplete: 0,
                     orphan: 0,
+                    unreviewed_aged: 0,
                     clean: true,
                     duration_ms: 12,
                 },
