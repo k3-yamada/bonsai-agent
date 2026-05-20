@@ -96,6 +96,7 @@ const WHITELIST_EPRINTLN: &[&str] = &[
     "src/knowledge/vault_lint.rs",            // 項目 246 implementation の意図的 eprintln
     "src/memory/store.rs",                    // memory store warning
     "src/eval/longmemeval/runner.rs",         // longmemeval runner trace
+    "src/agent/compaction.rs", // 項目 248 Phase 4 budget log emit (旧 in_test logic で hidden、HIGH #2 fix で検出)
 ];
 
 /// src/ 配下の全 .rs ファイルを再帰収集.
@@ -139,19 +140,29 @@ fn layer_index(module: &str) -> Option<usize> {
 }
 
 /// `use crate::<module>::` 形式の import を全件抽出 (string→module 列).
+/// critic HIGH #3 fix: brace-grouped (`use crate::{a, b, c}`) + multi-line も対応.
 fn extract_use_crate_modules(content: &str) -> Vec<String> {
     let mut modules = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("use crate::") {
-            // "use crate::agent::experiment::*;" → "agent"
-            let module = rest.split([':', ';', ' ', ',', '{']).next().unwrap_or("");
-            if !module.is_empty() {
-                modules.push(module.to_string());
+            // brace-grouped: "use crate::{agent::*, tools::*};" → rest = "{agent::*, tools::*};"
+            // 通常: "use crate::agent::experiment::*;" → rest = "agent::experiment::*;"
+            let rest = rest.trim_start_matches('{');
+            for part in rest.split(',') {
+                let module = part.trim().split("::").next().unwrap_or("").trim();
+                if !module.is_empty() && module != "self" && !module.starts_with('}') {
+                    modules.push(module.to_string());
+                }
             }
         }
     }
     modules
+}
+
+/// Path を whitelist 用 normalized string に変換 (Windows backslash 対応).
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 #[test]
@@ -160,11 +171,11 @@ fn t_no_new_src_file_over_800_lines() {
         .into_iter()
         .filter_map(|path| {
             let lines = count_lines(&path);
-            if lines > SIZE_LIMIT
-                && !WHITELIST_OVER_800
-                    .iter()
-                    .any(|w| path.to_string_lossy().contains(w))
-            {
+            // critic CRITICAL #1 fix: substr contains → exact equality.
+            // 旧 substr match では "src/tools/file.rs" が "src/agent/tools/file.rs" にも
+            // match する silent-regression bypass あり、exact match で解消.
+            let path_str = normalize_path(&path);
+            if lines > SIZE_LIMIT && !WHITELIST_OVER_800.iter().any(|w| path_str == *w) {
                 Some((path, lines))
             } else {
                 None
@@ -225,26 +236,42 @@ fn t_layer_order_no_upward_dep() {
 fn t_no_eprintln_in_production() {
     let mut violations: Vec<(PathBuf, usize)> = Vec::new();
     for path in walk_src() {
-        let path_str = path.to_string_lossy().to_string();
-        if WHITELIST_EPRINTLN.iter().any(|w| path_str.contains(w)) {
+        // critic CRITICAL #1 fix: substr contains → exact equality (path collision 回避).
+        let path_str = normalize_path(&path);
+        if WHITELIST_EPRINTLN.iter().any(|w| path_str == *w) {
             continue;
         }
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        // 簡易検出: cfg(test) より前の eprintln! を検出
-        let mut in_test = false;
+        // critic HIGH #2 fix: in_test 状態は mod tests { ... } block 内のみ scope、
+        // brace depth で正しく追跡 (旧実装は一度 true で永続化される silent bypass あり).
+        let mut test_brace_depth: i32 = 0; // mod tests 開始時に >0、終了時に 0
+        let mut in_test_attr = false; // 直前行が #[cfg(test)] / #[test]
         for (i, line) in content.lines().enumerate() {
             let trimmed = line.trim_start();
-            // #[cfg(test)] / mod tests スコープに入ったら以降は test fixture 扱い
-            if trimmed.starts_with("#[cfg(test)]")
-                || trimmed.starts_with("#[test]")
-                || trimmed.starts_with("mod tests")
-            {
-                in_test = true;
-            }
+            let in_test = test_brace_depth > 0;
+            // eprintln 検出 (production のみ、test block 内は除外)
             if !in_test && trimmed.contains("eprintln!") {
                 violations.push((path.clone(), i + 1));
+            }
+            // brace depth 追跡: mod tests または #[cfg(test)] 直後の { を検出
+            let braces_open = line.matches('{').count() as i32;
+            let braces_close = line.matches('}').count() as i32;
+            if in_test_attr || trimmed.starts_with("mod tests") {
+                // この行で test scope 開始 (mod tests { または #[cfg(test)] mod X {)
+                test_brace_depth += braces_open - braces_close;
+                in_test_attr = false;
+            } else if in_test {
+                // test scope 内: depth update
+                test_brace_depth += braces_open - braces_close;
+                if test_brace_depth < 0 {
+                    test_brace_depth = 0; // 防御的 clamp
+                }
+            }
+            // 次行 attr 連動 setup
+            if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]") {
+                in_test_attr = true;
             }
         }
     }
@@ -291,4 +318,16 @@ fn t_lint_error_messages_include_docs_link() {
         lint_codes.len(),
         lint_codes_with_docs.len()
     );
+    // critic HIGH #4 fix: 各 lint code (SIZE-001/DEP-001/LOG-001/META) の panic 用途明示確証.
+    // silent deletion (refactor で assert! が消える) 防止のため、code 毎に最低 1 件 expected.
+    // 注: code name を runtime format で組立て、source 内に bracketed リテラルを増やさない
+    // (contains_lint_code self-count を抑制、META meta-test の false positive 回避).
+    for code in &["SIZE-001", "DEP-001", "LOG-001", "META"] {
+        let bracketed = format!("[LINT:{}]", code);
+        assert!(
+            lint_codes.iter().any(|l| l.contains(&bracketed)),
+            "[LINT:META] 必須 lint code {} が source 内に未発見. 修正方法: assert! 削除 silent regression 防止、docs/architecture/module-layer-rules.md を参照",
+            bracketed
+        );
+    }
 }
