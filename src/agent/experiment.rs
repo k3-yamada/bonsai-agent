@@ -1908,19 +1908,36 @@ pub fn judge_gate_check(
 /// 戻り値: 成功した generate 呼出回数 (= count - Err 回数).
 /// MockLlmBackend は常に Ok を返すため、test では `assert_eq!(prewarm(&mock, n), n)` で確認可能.
 ///
-/// Phase 2 Green 実装: loop 実装 + log_event + backend.generate("ping") 呼出.
+/// Phase 2 Green 実装 + critic M1 follow-up: loop 実装 + log_event + backend.generate("ping").
 /// 各 generate 結果は log_event のみ (graceful degradation、Err でも次の iter へ続行).
-pub fn lab_mlx_prewarm(backend: &dyn LlmBackend, count: usize) -> usize {
+///
+/// critic M1 fix: caller の `cancel` を forward、各 iter で `cancel.is_cancelled()` 早期 bail.
+/// (Ctrl+C 中断応答性確保、F2 fallback chain と整合).
+pub fn lab_mlx_prewarm(
+    backend: &dyn LlmBackend,
+    count: usize,
+    cancel: &CancellationToken,
+) -> usize {
     use crate::agent::conversation::Message;
     log_event(
         LogLevel::Info,
         "lab",
         &format!("[lab] BONSAI_LAB_MLX_WARMUP=1 → MLX pre-warm {count} 回投入"),
     );
-    let cancel = CancellationToken::new();
     let mut success_count = 0usize;
     for i in 0..count {
-        let result = backend.generate(&[Message::user("ping")], &[], &mut |_| {}, &cancel);
+        if cancel.is_cancelled() {
+            log_event(
+                LogLevel::Warn,
+                "lab",
+                &format!(
+                    "[lab] pre-warm interrupted at {}/{count} (cancel signal)",
+                    i
+                ),
+            );
+            break;
+        }
+        let result = backend.generate(&[Message::user("ping")], &[], &mut |_| {}, cancel);
         match result {
             Ok(_) => {
                 success_count += 1;
@@ -3543,7 +3560,8 @@ mod tests {
             "warm2".to_string(),
             "warm3".to_string(),
         ]);
-        let succ = lab_mlx_prewarm(&backend, 3);
+        let cancel = CancellationToken::new();
+        let succ = lab_mlx_prewarm(&backend, 3, &cancel);
         assert_eq!(
             succ, 3,
             "MockLlmBackend は常に Ok → count==3 すべて成功 (Phase 2 Green PASS 期待)"
@@ -3554,7 +3572,8 @@ mod tests {
     #[test]
     fn t_lab_mlx_prewarm_zero_count_is_noop() {
         let backend = crate::runtime::inference::MockLlmBackend::single("unused");
-        let succ = lab_mlx_prewarm(&backend, 0);
+        let cancel = CancellationToken::new();
+        let succ = lab_mlx_prewarm(&backend, 0, &cancel);
         assert_eq!(succ, 0, "count==0 で generate 呼出ゼロ (no-op)");
     }
 
@@ -3564,7 +3583,8 @@ mod tests {
         let backend = crate::runtime::inference::MockLlmBackend::new(
             (0..5).map(|i| format!("warm{i}")).collect(),
         );
-        let succ = lab_mlx_prewarm(&backend, 5);
+        let cancel = CancellationToken::new();
+        let succ = lab_mlx_prewarm(&backend, 5, &cancel);
         assert_eq!(
             succ, 5,
             "count==5 で全 5 回成功 (BONSAI_LAB_MLX_WARMUP_COUNT range 上限境界 (10) 半分)"
