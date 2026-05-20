@@ -9,6 +9,9 @@
 //! - cross_category_leaks: 同 content[0..50] が異なる cat に分散
 //! - incomplete_entries: content が空 / whitespace のみ / "TODO" のみ等
 //! - orphan_entries: KG link 欠落 (Phase 1+2 では未実装、Phase 3+ で wiring)
+//! - unreviewed_aged_entries (項目 254): incomplete AND `vault_unreviewed_days` 日以上経過
+//!   = 2do BRAIN article (Qiita YushiYamamoto) の Obsidian Dataview
+//!   `WHERE status != "reviewed"` 等価。draft 老化 = orphan draft の温床を検出。
 //!
 //! TDD strict Phase 1 Red: skeleton 実装で `VaultLintReport` 全フィールドが空を返す。
 //! 5 unit test のうち 4 件が FAIL する想定 (clean=true は sanity gate として PASS)。
