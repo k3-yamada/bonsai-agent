@@ -370,6 +370,23 @@ pub fn lab_mlx_warmup_count() -> Option<usize> {
         .filter(|n| (1..=10).contains(n))
 }
 
+/// 項目 252 M2 Phase 1 Red stub: `BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS` env で per-iter wall budget override.
+///
+/// plan: `.claude/plan/lab-mlx-prewarm-timeout-bound.md` 案 A (per-iter wall budget).
+///
+/// Phase 2 Green では:
+/// - 範囲 1..=600 で env override
+/// - 範囲外 / parse 失敗で default 180 fallback (F1 sse_chunk_timeout 整合)
+/// - 0 = sentinel「timeout 無効化」(明示 disable 経路、case A 前の素朴 loop)
+///
+/// Phase 1 Red stub: 常に 0 (= sentinel disable) を return、env 無視。
+/// Phase 2 Green で parse 本実装、env=180 default、env=0 sentinel、env=範囲外 fallback。
+pub fn lab_mlx_warmup_timeout_secs() -> u64 {
+    // Phase 1 Red stub: env 無視で 0 sentinel return.
+    // Phase 2 Green で BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS env parse + range 1..=600 + default 180.
+    0
+}
+
 /// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
 #[cfg(test)]
 pub(crate) static LAB_RUNTIME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1299,5 +1316,64 @@ max_iterations = 20
         unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "abc") };
         assert_eq!(lab_mlx_warmup_count(), None, "parse 失敗で None");
         unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
+    }
+
+    // ── 項目 252 M2 Phase 1 Red: lab_mlx_warmup_timeout_secs env getter 3 test ──
+    //
+    // Phase 1 Red: stub は常に 0 (sentinel disable) を return → 2 test FAIL.
+    // Phase 2 Green: env parse + range 1..=600 + default 180 で 3 test PASS.
+
+    /// Phase 1 Red sanity: env unset で default 180 期待、stub は 0 → FAIL.
+    #[test]
+    fn t_lab_mlx_warmup_timeout_secs_default_180() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") };
+        assert_eq!(
+            lab_mlx_warmup_timeout_secs(),
+            180,
+            "env unset で default 180 = F1 sse_chunk_timeout 整合 (Phase 1 Red FAIL = stub は 0)"
+        );
+    }
+
+    /// Phase 1 Red 核心: env=60 で 60 を return 期待、stub は 0 → FAIL.
+    #[test]
+    fn t_lab_mlx_warmup_timeout_secs_env_override() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "60") };
+        let result = lab_mlx_warmup_timeout_secs();
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") };
+        assert_eq!(
+            result, 60,
+            "env=60 で 60 を return (Phase 1 Red FAIL = stub は 0)"
+        );
+    }
+
+    /// Phase 1 Red sanity: env=0 sentinel と out-of-range fallback の挙動.
+    /// stub は常に 0 を return するため env=0 sanity と range out 両方とも 0 で stub PASS、
+    /// Phase 2 Green では env=0 は 0 を return (sentinel disable)、range out (601) は 180 fallback.
+    #[test]
+    fn t_lab_mlx_warmup_timeout_secs_sentinel_and_range() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // env=0 = sentinel disable (Phase 2 Green で 0 を return、Phase 1 Red stub も 0 で trivial PASS)
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "0") };
+        assert_eq!(
+            lab_mlx_warmup_timeout_secs(),
+            0,
+            "env=0 sentinel で 0 (timeout 無効化、Phase 1/2 共に PASS)"
+        );
+        // env=601 = range out → Phase 2 Green で default 180 fallback
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "601") };
+        let result_out = lab_mlx_warmup_timeout_secs();
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") };
+        assert_eq!(
+            result_out, 180,
+            "env=601 (range out) で default 180 fallback (Phase 1 Red FAIL = stub は 0)"
+        );
     }
 }
