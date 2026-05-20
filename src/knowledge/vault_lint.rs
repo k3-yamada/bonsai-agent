@@ -649,4 +649,42 @@ mod tests {
             "通常 content (incomplete でない) は unreviewed_aged 非検出 (incomplete サブセット軸)"
         );
     }
+
+    /// 項目 254 Phase 4 wiring test: 5 軸目 populate 確証 + strict bail 連動.
+    ///
+    /// Why: is_clean() に unreviewed_aged_entries が含まれることを silent regression
+    /// から守る. 設計上 5 軸目は incomplete + aged サブセットのため独立 trigger 不可だが、
+    /// 「5 軸目が確実に populate される」+ 「strict bail が発火する」の 2 点を確証することで
+    /// is_clean() ロジックの整合性を担保 (silent regression で unreviewed_aged を is_clean()
+    /// から外す変更が入ったら本 test 単独では catch しないが、count 確証は単独 catch する).
+    #[test]
+    fn t_run_vault_sanity_gate_unreviewed_populates_and_bails() {
+        let dir = tempdir().expect("tempdir");
+        let _vault = Vault::new(dir.path()).expect("vault new");
+        // incomplete (TODO) + 30 日経過 = incomplete + unreviewed_aged 両方 trigger
+        let aged_ts = chrono::Utc::now() - chrono::Duration::days(30);
+        let line = format!("\n- [{}] TODO\n", aged_ts.format("%Y-%m-%d %H:%M"));
+        let facts_path = dir.path().join("facts.md");
+        let existing = std::fs::read_to_string(&facts_path).unwrap_or_default();
+        std::fs::write(&facts_path, existing + &line).expect("write");
+        // 第 1 確証: 5 軸目 populate
+        let vault = Vault::new(dir.path()).expect("reopen");
+        let report = lint_vault_for_lab(&vault, 90);
+        assert_eq!(
+            report.unreviewed_aged_entries.len(),
+            1,
+            "incomplete + 30 日経過 entry が unreviewed_aged に push される (silent regression: lint_vault_for_lab から 5 軸目 logic 削除を catch)"
+        );
+        // 第 2 確証: is_clean() == false (4 軸目 incomplete + 5 軸目 unreviewed_aged 共に non-empty)
+        assert!(
+            !report.is_clean(),
+            "5 軸目 populate で is_clean() == false (silent regression: is_clean() から unreviewed_aged 削除を catch、ただし incomplete も dirty なので独立 catch 不可)"
+        );
+        // 第 3 確証: strict bail 発火
+        let result = run_vault_sanity_gate(dir.path(), 90, true, None);
+        assert!(
+            result.is_err(),
+            "strict=true + dirty Vault (incomplete + unreviewed_aged) → bail (項目 251 bail branch pattern を 5 軸目 wiring に適用)"
+        );
+    }
 }
