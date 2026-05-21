@@ -753,31 +753,28 @@ pub fn compact_if_needed(
     config: &CompactionConfig,
 ) -> (u8, Vec<String>) {
     // 項目 248 Phase 4 wiring: budget_ratios=Some のとき計測 log を emit.
-    // critic F1 follow-up: eprintln → 構造化 logger (`BONSAI_LOG` で level filter 可)、
-    // Lab paired 起動時の stderr 容量問題回避。挙動変化なし (log のみ)、将来 4 軸個別
-    // prune の hook 点として保存.
-    if let Some(allocated) = dynamic_budget_for_compaction(config) {
+    // 項目 248 Phase 5 (rust-reviewer H-1 fix): allocated を compact_level{1,2}_with_budget に
+    // 伝播し、axis-priority prune を実 production 経路で有効化。env unset = allocated None で
+    // 既存 wrapper 経路と semantic 同等、env=1 で overflow 軸優先 prune が発火。
+    let allocated = dynamic_budget_for_compaction(config);
+    if let Some(a) = allocated.as_ref() {
         log_event(
             LogLevel::Info,
             "compaction.budget",
             &format!(
                 "buffer={} summary={} entities={} kg={} total={}",
-                allocated.buffer,
-                allocated.summary,
-                allocated.entities,
-                allocated.kg,
-                allocated.total,
+                a.buffer, a.summary, a.entities, a.kg, a.total,
             ),
         );
     }
     let off = compact_level0(messages, config);
     let mut lv = 0u8;
     if estimate_tokens(messages) > config.max_context_tokens * 3 / 4 {
-        compact_level1(messages, config);
+        compact_level1_with_budget(messages, config, allocated.as_ref());
         lv = 1;
     }
     if estimate_tokens(messages) > config.max_context_tokens * 9 / 10 {
-        compact_level2(messages, config);
+        compact_level2_with_budget(messages, config, allocated.as_ref());
         lv = 2;
     }
     if estimate_tokens(messages) > config.max_context_tokens {
@@ -1021,16 +1018,18 @@ pub fn compact_level2_with_budget(
     let boundary = t - config.placeholder_keep_recent;
 
     // summary 軸 overflow チェック (allocated=None のとき overflow なし)
+    // rust-reviewer M-2 fix: overflow_axes と同一 `>=` 判定で contract 統一
+    // (float→usize 切捨 1 token 誤差吸収)
     let summary_overflow = match allocated {
         Some(a) => {
             let usage = measure_axis_usage(messages, config.placeholder_keep_recent);
-            usage.summary > a.summary
+            usage.summary >= a.summary
         }
         None => false,
     };
     let summary_max = if summary_overflow {
-        // 30% さらに圧縮
-        (config.summary_max_chars as f64 * 0.7) as usize
+        // 30% さらに圧縮、rust-reviewer M-3 fix: usize 切捨で 0 になる corner case を防ぐため `.max(1)`
+        ((config.summary_max_chars as f64 * 0.7) as usize).max(1)
     } else {
         config.summary_max_chars
     };
@@ -2008,8 +2007,8 @@ mod tests {
     #[test]
     fn t_compact_level1_with_budget_prunes_overflow_axis_first() {
         // Phase 2 Green で実装: overflow_axes が KG overflow を検出し、KG tool を優先 prune。
-        // stub では overflow_axes が常に空 Vec を返すため、KG 判定は MemoryKind::Unclassified
-        // になる。overflow 検出 + 軸優先判定を直接テストする。
+        // rust-reviewer H-2 fix: helper 単体検証 + compact_level1_with_budget の実 prune 挙動を
+        // 同一 test で双方確証 (axis-priority prune が実 production 経路で発火する事を保証)。
         let msgs = vec![
             Message::user("q"),
             Message::assistant("a"),
@@ -2034,6 +2033,39 @@ mod tests {
         assert!(
             overflows.iter().any(|(k, _)| *k == MemoryKind::Kg),
             "KG overflow が overflow_axes で検出される (stub: empty で FAIL)"
+        );
+
+        // rust-reviewer H-2 fix: 実 prune 挙動を assert
+        // KG tool message が overflow 軸として優先 prune されることを直接確証
+        let mut prune_msgs = vec![
+            Message::system("s"),
+            Message::user("first user query"),
+            Message::assistant("plan response"),
+            Message::tool(
+                "kg long content that should be pruned first when KG overflow occurs",
+                "memory_search_1",
+            ),
+            Message::tool("entity short data", "agenther_x"),
+            Message::user("recent user"),
+            Message::assistant("recent assistant"),
+        ];
+        let config = CompactionConfig {
+            max_context_tokens: 100,
+            placeholder_keep_recent: 2,
+            prune_protect_tokens: 10,
+            prune_minimum_chars: 5,
+            ..CompactionConfig::default()
+        };
+        compact_level1_with_budget(&mut prune_msgs, &config, Some(&allocated));
+        // KG tool が `[prev:memory_search_1]` または `[prev:idx]` に prune されている事
+        let kg_pruned = prune_msgs.iter().any(|m| {
+            matches!(m.role, Role::Tool)
+                && m.tool_call_id.as_deref() == Some("memory_search_1")
+                && m.content.starts_with("[prev:")
+        });
+        assert!(
+            kg_pruned,
+            "KG overflow 時に KG tool が prune される (実 axis-priority prune 確証)"
         );
     }
 
