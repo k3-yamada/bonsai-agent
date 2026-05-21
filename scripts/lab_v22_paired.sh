@@ -36,37 +36,12 @@ set -euo pipefail
 LOG_DIR="${1:-./lab-v22-logs}"
 mkdir -p "$LOG_DIR"
 
-# Z-3 Phase 5: drift monitor post-cycle hook (Phase 2 Green).
+# Z-3 Phase 5: drift monitor post-cycle hook (Phase 3 Refactor).
+# shared helper (scripts/drift/lab_hook.sh) を source し on_lab_complete を trap 登録.
 # BONSAI_DRIFT_LINT_LAB=1 で drift_lint を Lab cycle 終了後に自動 trigger.
-# advisory only: drift exit code を Lab cycle exit code に伝搬させない.
 # NOTE: trap は BONSAI_BIN 検査より前に登録することで、早期 exit 時も hook が動作する.
-on_lab_complete() {
-    local exit_code=$?
-    if [[ "${BONSAI_DRIFT_LINT_LAB:-0}" == "1" ]]; then
-        local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        local last_cycle="${LOG_DIR}/test_off_5.log"
-        local commit_hash
-        commit_hash=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-        echo "=== [drift_lint] Lab cycle complete, running drift_lint... ==="
-        # advisory only: drift exit code を Lab exit code に伝搬させない
-        bash "${script_dir}/drift/run_lint.sh" || true
-        local report
-        report="$(cd "${script_dir}/.." && pwd)/docs/quality/drift-$(date +%Y%m%d).md"
-        if [[ -f "$report" ]]; then
-            {
-                echo ""
-                echo "## Lab Cycle Linkage"
-                echo "- Triggered by: $(basename "${BASH_SOURCE[0]}")"
-                echo "- Last cycle log: \`${last_cycle}\`"
-                echo "- Commit at trigger: \`${commit_hash}\`"
-                echo "- Lab exit code (preserved): ${exit_code}"
-            } >> "$report"
-            echo "[drift_lint] report appended: ${report}"
-        fi
-    fi
-    exit "$exit_code"  # AC-3/AC-4: 元の exit code を厳密に維持
-}
+# shellcheck source=scripts/drift/lab_hook.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/drift/lab_hook.sh"
 trap on_lab_complete EXIT
 
 BONSAI_BIN="${BONSAI_BIN:-./target/release/bonsai}"

@@ -127,11 +127,25 @@ test_cycle_linkage_appended() {
     assert "t_drift_hook_cycle_linkage_appended" "yes" "$has_linkage"
 }
 
-echo "=== Z-3 Phase 5 drift_hook test (Phase 2 Green) ==="
+# Test 5: shared helper source pattern が機能する確証
+test_helper_source_pattern() {
+    # lab_hook.sh 存在 + on_lab_complete 定義含むこと
+    local helper="scripts/drift/lab_hook.sh"
+    local has_helper="no" has_func="no"
+    [[ -f "$helper" ]] && has_helper="yes"
+    [[ "$has_helper" == "yes" ]] && grep -q "^on_lab_complete()" "$helper" && has_func="yes"
+    # caller (aa_test.sh) が source pattern 採用済
+    local has_source="no"
+    grep -q 'source.*drift/lab_hook.sh' scripts/lab_v22_aa_test.sh && has_source="yes"
+    assert "t_drift_hook_helper_source_pattern" "yes:yes:yes" "${has_helper}:${has_func}:${has_source}"
+}
+
+echo "=== Z-3 Phase 5 drift_hook test (Phase 3 Refactor) ==="
 test_env_off_no_report
 test_env_on_report_generated
 test_lab_exit_code_preserved
 test_cycle_linkage_appended
+test_helper_source_pattern
 echo ""
 echo "Pass: $PASS, Fail: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
