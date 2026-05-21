@@ -873,6 +873,92 @@ pub fn compact_if_needed(
     }
     (lv, off)
 }
+
+// ========== Phase 5 — 4 軸個別 prune stub (項目 248 Phase 5、plan §3 Phase 1 Red) ==========
+
+/// メモリ種別タグ (prefix-based 判別、Phase 5 plan §1.2)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemoryKind {
+    Buffer,
+    Summary,
+    Entities,
+    Kg,
+    Unclassified,
+}
+
+/// 単一 Message の種別判別 (prefix + role + tool_call_id ベース、O(1))
+/// Phase 1 Red: stub (常に Unclassified return)
+#[allow(dead_code)]
+pub(crate) fn classify_memory_kind(
+    _msg: &crate::agent::conversation::Message,
+    _idx: usize,
+    _total: usize,
+    _keep_recent: usize,
+) -> MemoryKind {
+    MemoryKind::Unclassified
+}
+
+/// 4 軸 token 消費集計
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AxisUsage {
+    pub buffer: usize,
+    pub summary: usize,
+    pub entities: usize,
+    pub kg: usize,
+    pub unclassified: usize,
+}
+
+/// messages 全体の 4 軸 token 消費を集計
+/// Phase 1 Red: stub (常に Default return)
+#[allow(dead_code)]
+pub(crate) fn measure_axis_usage(
+    _messages: &[crate::agent::conversation::Message],
+    _keep_recent: usize,
+) -> AxisUsage {
+    AxisUsage::default()
+}
+
+/// allocated との差分で overflow 軸を返す (超過量降順)
+/// Phase 1 Red: stub (常に空 Vec return)
+#[allow(dead_code)]
+pub(crate) fn overflow_axes(
+    _usage: &AxisUsage,
+    _allocated: &AllocatedBudget,
+) -> Vec<(MemoryKind, usize)> {
+    Vec::new()
+}
+
+/// compact_level1 + budget 軸統合版
+/// Phase 1 Red: stub (compact_level1 即委譲、budget 無視)
+pub fn compact_level1_with_budget(
+    messages: &mut [Message],
+    config: &CompactionConfig,
+    _allocated: Option<&AllocatedBudget>,
+) {
+    compact_level1(messages, config);
+}
+
+/// compact_level2 + budget 軸統合版
+/// Phase 1 Red: stub (compact_level2 即委譲、budget 無視)
+pub fn compact_level2_with_budget(
+    messages: &mut [Message],
+    config: &CompactionConfig,
+    _allocated: Option<&AllocatedBudget>,
+) {
+    compact_level2(messages, config);
+}
+
+/// 直近 messages から MemoryRelevance を粗推定
+/// Phase 1 Red: stub (Default return)
+pub fn memory_relevance_from_messages(
+    _messages: &[Message],
+    _keep_recent: usize,
+) -> MemoryRelevance {
+    MemoryRelevance::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1718,6 +1804,139 @@ mod tests {
         assert!(
             (r.knowledge_graph - 0.1).abs() < 1e-6,
             "invalid override → kg=0.1 default"
+        );
+    }
+
+    // ========== Phase 5 — 4 軸個別 prune (項目 248 Phase 5、plan §3 Phase 1 Red) ==========
+
+    #[test]
+    fn t_classify_buffer_role() {
+        // 末尾 keep_recent 件は Buffer 判定
+        let msg = Message::user("recent");
+        let kind = classify_memory_kind(&msg, 5, 6, 2); // idx=5, total=6, keep_recent=2 → 末尾 2 件
+        assert_eq!(kind, MemoryKind::Buffer, "末尾 keep_recent 件は Buffer");
+    }
+
+    #[test]
+    fn t_classify_summary_prefix() {
+        let msg = Message::assistant("...[summarized] content");
+        let kind = classify_memory_kind(&msg, 0, 10, 2);
+        assert_eq!(
+            kind,
+            MemoryKind::Summary,
+            "[summarized] prefix の Assistant は Summary"
+        );
+    }
+
+    #[test]
+    fn t_classify_entities_tool_call_id() {
+        let msg = Message::tool("entity content", "agenther_xyz");
+        let kind = classify_memory_kind(&msg, 0, 10, 2);
+        assert_eq!(
+            kind,
+            MemoryKind::Entities,
+            "agenther_ prefix tool_call_id は Entities"
+        );
+    }
+
+    #[test]
+    fn t_classify_kg_tool_call_id() {
+        let msg = Message::tool("kg content", "memory_search_1");
+        let kind = classify_memory_kind(&msg, 0, 10, 2);
+        assert_eq!(
+            kind,
+            MemoryKind::Kg,
+            "memory_search_ prefix tool_call_id は Kg"
+        );
+    }
+
+    #[test]
+    fn t_measure_axis_usage_sums_correctly() {
+        let messages = vec![
+            Message::user("q"),
+            Message::assistant("a"),
+            Message::tool("entity short", "agenther_1"),
+        ];
+        let usage = measure_axis_usage(&messages, 1);
+        let total_axis =
+            usage.buffer + usage.summary + usage.entities + usage.kg + usage.unclassified;
+        // 4 軸 + unclassified の合計 == 全 message の token 合計に等しい
+        let expected_total: usize = messages.iter().map(|m| m.content.len().div_ceil(4)).sum();
+        assert_eq!(total_axis, expected_total, "4 軸合計 == 全 token");
+    }
+
+    #[test]
+    fn t_overflow_axes_descending() {
+        let usage = AxisUsage {
+            buffer: 50,
+            summary: 10,
+            entities: 5,
+            kg: 100,
+            unclassified: 0,
+        };
+        let allocated = AllocatedBudget {
+            total: 100,
+            buffer: 40,
+            summary: 30,
+            entities: 20,
+            kg: 10,
+        };
+        let result = overflow_axes(&usage, &allocated);
+        // kg: 100-10=90 overflow / buffer: 50-40=10 overflow / summary/entities は overflow なし
+        assert_eq!(result.len(), 2, "kg + buffer の 2 軸 overflow");
+        assert_eq!(result[0].0, MemoryKind::Kg, "kg が overflow 量最大");
+        assert_eq!(result[1].0, MemoryKind::Buffer, "buffer が次点");
+    }
+
+    #[test]
+    fn t_compact_level1_with_budget_prunes_overflow_axis_first() {
+        // Phase 2 Green で実装: overflow_axes が KG overflow を検出し、KG tool を優先 prune。
+        // stub では overflow_axes が常に空 Vec を返すため、KG 判定は MemoryKind::Unclassified
+        // になる。overflow 検出 + 軸優先判定を直接テストする。
+        let msgs = vec![
+            Message::user("q"),
+            Message::assistant("a"),
+            Message::tool("kg result content", "memory_search_1"),
+        ];
+        let usage = measure_axis_usage(&msgs, 1);
+        // Phase 2 Green では kg > 0 になるが stub では kg == 0
+        assert!(
+            usage.kg > 0,
+            "KG tool の token が kg 軸に集計される (stub: 0 で FAIL)"
+        );
+
+        let allocated = AllocatedBudget {
+            total: 100,
+            buffer: 40,
+            summary: 30,
+            entities: 20,
+            kg: 5,
+        };
+        // usage.kg > allocated.kg なら overflow
+        let overflows = overflow_axes(&usage, &allocated);
+        assert!(
+            overflows.iter().any(|(k, _)| *k == MemoryKind::Kg),
+            "KG overflow が overflow_axes で検出される (stub: empty で FAIL)"
+        );
+    }
+
+    #[test]
+    fn t_compact_if_needed_backward_compat_when_env_unset() {
+        // env unset (None) でも measure_axis_usage は全 token を unclassified で返す
+        // (stub は Default = 全 0 を返す) → unclassified == 0 の assert で FAIL になる
+        let messages = vec![
+            Message::user("hello world"),
+            Message::assistant("response text"),
+        ];
+        let usage = measure_axis_usage(&messages, 1);
+        let expected_total: usize = messages.iter().map(|m| m.content.len().div_ceil(4)).sum();
+        // stub では全 0 → total_axis == 0 で FAIL
+        // Phase 2 Green では unclassified に全 token が集約されるため PASS
+        let total_axis =
+            usage.buffer + usage.summary + usage.entities + usage.kg + usage.unclassified;
+        assert_eq!(
+            total_axis, expected_total,
+            "measure_axis_usage: 全 token が 4 軸 + unclassified に集約される (stub: 0 で FAIL)"
         );
     }
 }
