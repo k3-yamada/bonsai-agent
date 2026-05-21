@@ -163,7 +163,7 @@ pub(super) fn inject_replan_on_stall(
     stall_detector.reset();
     log_event(
         LogLevel::Info,
-        "advisor.stall_replan",
+        "stall.replan",
         &format!(
             "検出→再計画ステップ注入 (advisor残{}/{}回)",
             advisor.remaining(),
