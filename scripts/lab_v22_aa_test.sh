@@ -33,6 +33,39 @@ set -euo pipefail
 LOG_DIR="${1:-./lab-v22-aa-logs}"
 mkdir -p "$LOG_DIR"
 
+# Z-3 Phase 5: drift monitor post-cycle hook (Phase 2 Green).
+# BONSAI_DRIFT_LINT_LAB=1 で drift_lint を Lab cycle 終了後に自動 trigger.
+# advisory only: drift exit code を Lab cycle exit code に伝搬させない.
+# NOTE: trap は BONSAI_BIN 検査より前に登録することで、早期 exit 時も hook が動作する.
+on_lab_complete() {
+    local exit_code=$?
+    if [[ "${BONSAI_DRIFT_LINT_LAB:-0}" == "1" ]]; then
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        local last_cycle="${LOG_DIR}/test_off_5.log"
+        local commit_hash
+        commit_hash=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+        echo "=== [drift_lint] Lab cycle complete, running drift_lint... ==="
+        # advisory only: drift exit code を Lab exit code に伝搬させない
+        bash "${script_dir}/drift/run_lint.sh" || true
+        local report
+        report="$(cd "${script_dir}/.." && pwd)/docs/quality/drift-$(date +%Y%m%d).md"
+        if [[ -f "$report" ]]; then
+            {
+                echo ""
+                echo "## Lab Cycle Linkage"
+                echo "- Triggered by: $(basename "${BASH_SOURCE[0]}")"
+                echo "- Last cycle log: \`${last_cycle}\`"
+                echo "- Commit at trigger: \`${commit_hash}\`"
+                echo "- Lab exit code (preserved): ${exit_code}"
+            } >> "$report"
+            echo "[drift_lint] report appended: ${report}"
+        fi
+    fi
+    exit "$exit_code"  # AC-3/AC-4: 元の exit code を厳密に維持
+}
+trap on_lab_complete EXIT
+
 BONSAI_BIN="${BONSAI_BIN:-./target/release/bonsai}"
 if [[ ! -x "$BONSAI_BIN" ]]; then
     echo "ERROR: $BONSAI_BIN not found or not executable. Run 'cargo build --release' first." >&2
@@ -79,12 +112,3 @@ echo "=== ALL A/A CYCLES COMPLETE ==="
 echo "Logs: $LOG_DIR"
 echo "Next: python3 scripts/lab_v22_metric.py $LOG_DIR --mode aa"
 echo "  → sd(Δ) = σ_noise が出力される。Phase D/E で --noise-floor σ を指定。"
-
-# Z-3 Phase 5: drift monitor post-cycle hook (stub、Phase 1 Red).
-# Implementation 本体は Phase 2 Green で追加.
-on_lab_complete() {
-    local _ec=$?
-    echo "[drift_hook] not implemented (Phase 1 Red stub)"
-    exit "$_ec"
-}
-trap on_lab_complete EXIT

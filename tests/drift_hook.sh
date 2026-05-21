@@ -104,10 +104,34 @@ test_lab_exit_code_preserved() {
     assert "t_drift_hook_lab_exit_code_preserved" "1" "$exit_code"
 }
 
-echo "=== Z-3 Phase 5 drift_hook test (Phase 1 Red) ==="
+# Test 4: Lab Cycle Linkage section が追記される
+test_cycle_linkage_appended() {
+    local today
+    today=$(date +%Y%m%d)
+    local report="docs/quality/drift-${today}.md"
+    local backup="${report}.drift_hook_test_backup"
+
+    [[ -f "$report" ]] && cp "$report" "$backup"
+    rm -f "$report"
+
+    export BONSAI_DRIFT_LINT_LAB=1
+    BONSAI_BIN=/nonexistent/path bash scripts/lab_v22_aa_test.sh /tmp/drift_hook_test_logs >/dev/null 2>&1 || true
+    unset BONSAI_DRIFT_LINT_LAB
+
+    local has_linkage="no"
+    [[ -f "$report" ]] && grep -q "## Lab Cycle Linkage" "$report" && has_linkage="yes"
+
+    rm -f "$report"
+    [[ -f "$backup" ]] && mv "$backup" "$report"
+
+    assert "t_drift_hook_cycle_linkage_appended" "yes" "$has_linkage"
+}
+
+echo "=== Z-3 Phase 5 drift_hook test (Phase 2 Green) ==="
 test_env_off_no_report
 test_env_on_report_generated
 test_lab_exit_code_preserved
+test_cycle_linkage_appended
 echo ""
 echo "Pass: $PASS, Fail: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
