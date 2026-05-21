@@ -80,22 +80,20 @@ const WHITELIST_DEP: &[(&str, &str, &str)] = &[
 ];
 
 /// LOG-001 whitelist — Phase 2 Green で operator visibility 用途を許容.
-/// path string substr match. 一部 (advisor_inject.rs) は log_event 化候補で
-/// follow-up plan の TODO.
+/// path string substr match.
 const WHITELIST_EPRINTLN: &[&str] = &[
-    "src/main.rs",                            // CLI 出力、operator visibility
-    "src/bin/longmemeval_bench.rs",           // bench CLI 出力
-    "src/agent/experiment.rs",                // Lab 進捗 (log_event 化検討中)
-    "src/agent/agent_loop/advisor_inject.rs", // log_event 化候補 (follow-up TODO)
-    "src/agent/agent_loop/step.rs",           // step 進捗
-    "src/agent/context_inject.rs",            // context 注入 trace
-    "src/runtime/llama_server.rs",            // server log
-    "src/runtime/embedder.rs",                // embed log
-    "src/observability/logger.rs",            // logger 内部 (log_event implementation)
-    "src/safety/secrets.rs",                  // security warning
-    "src/knowledge/vault_lint.rs",            // 項目 246 implementation の意図的 eprintln
-    "src/memory/store.rs",                    // memory store warning
-    "src/eval/longmemeval/runner.rs",         // longmemeval runner trace
+    "src/main.rs",                    // CLI 出力、operator visibility
+    "src/bin/longmemeval_bench.rs",   // bench CLI 出力
+    "src/agent/experiment.rs",        // Lab 進捗 (log_event 化検討中)
+    "src/agent/agent_loop/step.rs",   // step 進捗
+    "src/agent/context_inject.rs",    // context 注入 trace
+    "src/runtime/llama_server.rs",    // server log
+    "src/runtime/embedder.rs",        // embed log
+    "src/observability/logger.rs",    // logger 内部 (log_event implementation)
+    "src/safety/secrets.rs",          // security warning
+    "src/knowledge/vault_lint.rs",    // 項目 246 implementation の意図的 eprintln
+    "src/memory/store.rs",            // memory store warning
+    "src/eval/longmemeval/runner.rs", // longmemeval runner trace
     "src/agent/compaction.rs", // 項目 248 Phase 4 budget log emit (旧 in_test logic で hidden、HIGH #2 fix で検出)
 ];
 

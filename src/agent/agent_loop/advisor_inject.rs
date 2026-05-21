@@ -40,11 +40,14 @@ pub(super) fn resolve_advisor_prompt(
     // Claude Code バックエンド優先
     if let Ok(Some(cc_advice)) = advisor.try_claude_code_advice(role, task_context) {
         let duration_ms = start.elapsed().as_millis() as u64;
-        eprintln!(
-            "[advisor] Claude Code応答取得 role={:?} ({}文字, {}ms)",
-            role,
-            cc_advice.len(),
-            duration_ms
+        log_event(
+            LogLevel::Info,
+            "advisor.cc_success",
+            &format!(
+                "Claude Code応答取得 role={role:?} ({}文字, {}ms)",
+                cc_advice.len(),
+                duration_ms
+            ),
         );
         return AdvisorResolution {
             prompt: cc_advice,
@@ -55,11 +58,14 @@ pub(super) fn resolve_advisor_prompt(
     match advisor.try_remote_advice(role, task_context) {
         Ok(Some(remote)) => {
             let duration_ms = start.elapsed().as_millis() as u64;
-            eprintln!(
-                "[advisor] 外部アドバイザー応答取得 role={:?} ({}文字, {}ms)",
-                role,
-                remote.len(),
-                duration_ms
+            log_event(
+                LogLevel::Info,
+                "advisor.remote_success",
+                &format!(
+                    "外部アドバイザー応答取得 role={role:?} ({}文字, {}ms)",
+                    remote.len(),
+                    duration_ms
+                ),
             );
             AdvisorResolution {
                 prompt: remote,
@@ -74,7 +80,11 @@ pub(super) fn resolve_advisor_prompt(
         },
         Err(e) => {
             let duration_ms = start.elapsed().as_millis() as u64;
-            eprintln!("[advisor] 外部API失敗 role={role:?}、ローカルにフォールバック: {e}");
+            log_event(
+                LogLevel::Warn,
+                "advisor.remote_failure",
+                &format!("外部API失敗 role={role:?}、ローカルにフォールバック: {e}"),
+            );
             AdvisorResolution {
                 prompt: advisor.local_prompt_for(role, task_context),
                 source: "local",
@@ -151,10 +161,14 @@ pub(super) fn inject_replan_on_stall(
     session.add_message(Message::system(replan_msg));
     advisor.record_call();
     stall_detector.reset();
-    eprintln!(
-        "[stall] 検出→再計画ステップ注入 (advisor残{}/{}回)",
-        advisor.remaining(),
-        advisor.max_uses
+    log_event(
+        LogLevel::Info,
+        "advisor.stall_replan",
+        &format!(
+            "検出→再計画ステップ注入 (advisor残{}/{}回)",
+            advisor.remaining(),
+            advisor.max_uses
+        ),
     );
     true
 }
@@ -235,10 +249,14 @@ pub(super) fn inject_verification_step(
     }
     session.add_message(Message::system(checklist));
     advisor.record_call();
-    eprintln!(
-        "[advisor] 完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
-        advisor.remaining(),
-        advisor.max_uses
+    log_event(
+        LogLevel::Info,
+        "advisor.verify_inject",
+        &format!(
+            "完了前自己検証ステップ挿入 (iter {iteration}, 残{}/{}回)",
+            advisor.remaining(),
+            advisor.max_uses
+        ),
     );
     true
 }
