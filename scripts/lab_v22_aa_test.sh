@@ -79,3 +79,12 @@ echo "=== ALL A/A CYCLES COMPLETE ==="
 echo "Logs: $LOG_DIR"
 echo "Next: python3 scripts/lab_v22_metric.py $LOG_DIR --mode aa"
 echo "  → sd(Δ) = σ_noise が出力される。Phase D/E で --noise-floor σ を指定。"
+
+# Z-3 Phase 5: drift monitor post-cycle hook (stub、Phase 1 Red).
+# Implementation 本体は Phase 2 Green で追加.
+on_lab_complete() {
+    local _ec=$?
+    echo "[drift_hook] not implemented (Phase 1 Red stub)"
+    exit "$_ec"
+}
+trap on_lab_complete EXIT
