@@ -17,7 +17,7 @@ pub mod middleware;
 pub mod context_inject;
 pub mod frontier;
 pub mod subagent;
+pub mod t6_prompt_augment;
 pub mod tool_exec;
 pub mod tool_selection_bench;
 pub mod working_memory;
-pub mod t6_prompt_augment;
