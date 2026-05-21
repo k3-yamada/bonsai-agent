@@ -963,6 +963,14 @@ pub struct BenchmarkSuite {
 /// `smoke_tasks()` でこの ID に一致するタスクのみを返し、Lab 中の dev iteration
 /// を 1/8 に短縮する（k=3 で 15 ラン vs 120 ラン）。
 const SMOKE_TASK_IDS: &[&str] = &[
+    // 項目 261 T6 案 A Phase 4 wiring follow-up (2026-05-22): SMOKE_TASK_IDS 先頭に T6 5 task 追加。
+    // BONSAI_LAB_SMOKE=1 + BONSAI_LAB_TASK_LIMIT=5 で T6 のみ smoke を可能化、
+    // BONSAI_T6_PROMPT_AUGMENT=1 の G-T6-1/G-T6-2 paired 計測 hook 点。
+    "lh_plan_refactor_5files",         // T6 LongHorizonPlanning: RepoMap → file_read × 3+ → リファクタ計画
+    "lh_test_red_green",               // T6: benchmark.rs 読取 → test 2 件提案
+    "lh_dependency_chain",             // T6: mod.rs 読取 → 各 module file_read → 依存グラフ
+    "lh_plan_then_revise",             // T6: Cargo.toml 読取 → 計画 → リスク改訂
+    "lh_multi_modal_audit",            // T6: shell(git log) + ファイル数 + Cargo.toml
     "file_read_simple",                // ToolUse: 単純ファイル読み取り
     "multi_step_write_read",           // MultiStep: 書込→読込
     "error_recovery",                  // ErrorRecovery: エラー後の代替試行
@@ -1010,17 +1018,20 @@ fn setup_halluc_fixtures() -> std::io::Result<()> {
 }
 
 impl BenchmarkSuite {
-    /// 開発時用の smoke タスクセット（10 タスク、Plan A G-4c で 7→10 拡張）。
+    /// 開発時用の smoke タスクセット (15 タスク、項目 261 T6 案 A で 10→15 拡張)。
     ///
-    /// `default_tasks()` のうち `SMOKE_TASK_IDS` に一致するものだけを抽出。
-    /// CI/Lab 本番では `default_tasks()`（40 タスク）を使い、開発時の高速確認に
+    /// `default_tasks()` + `agentfloor_tasks()` の集合から `SMOKE_TASK_IDS` に一致するものを抽出、
+    /// **SMOKE_TASK_IDS の順序を保持**して返す (TASK_LIMIT=N が SMOKE_TASK_IDS 先頭から
+    /// N 件を選択する挙動を保証、項目 261 T6 5 task が先頭のため LIMIT=5 で T6-only smoke)。
+    /// CI/Lab 本番では `default_tasks()` (40 タスク) を使い、開発時の高速確認に
     /// 限定して `smoke_tasks()` を使う。
     pub fn smoke_tasks() -> Self {
+        let mut all = Self::default_tasks().tasks;
+        all.extend(Self::agentfloor_tasks().tasks);
         Self {
-            tasks: Self::default_tasks()
-                .tasks
-                .into_iter()
-                .filter(|t| SMOKE_TASK_IDS.contains(&t.id.as_str()))
+            tasks: SMOKE_TASK_IDS
+                .iter()
+                .filter_map(|id| all.iter().find(|t| t.id.as_str() == *id).cloned())
                 .collect(),
         }
     }
@@ -2670,19 +2681,23 @@ mod tests {
     fn test_smoke_tasks_subset_of_default() {
         let smoke = BenchmarkSuite::smoke_tasks();
         let default = BenchmarkSuite::default_tasks();
+        let agentfloor = BenchmarkSuite::agentfloor_tasks();
         assert_eq!(
             smoke.tasks.len(),
-            15,
-            "smoke は 15 タスク (項目 242 Lab v21 で 10→15、success_fact 5 task 追加)"
+            20,
+            "smoke は 20 タスク (項目 261 T6 案 A で 15→20、T6 lh_* 5 task 先頭追加)"
         );
-        assert!(smoke.tasks.len() < default.tasks.len(), "smoke ⊂ default");
-        // すべての smoke ID は default に含まれる
-        let default_ids: std::collections::HashSet<&str> =
-            default.tasks.iter().map(|t| t.id.as_str()).collect();
+        // すべての smoke ID は default ∪ agentfloor に含まれる
+        let known_ids: std::collections::HashSet<&str> = default
+            .tasks
+            .iter()
+            .chain(agentfloor.tasks.iter())
+            .map(|t| t.id.as_str())
+            .collect();
         for t in &smoke.tasks {
             assert!(
-                default_ids.contains(t.id.as_str()),
-                "smoke ID {} は default に存在すべき",
+                known_ids.contains(t.id.as_str()),
+                "smoke ID {} は default ∪ agentfloor に存在すべき",
                 t.id
             );
         }
