@@ -3,6 +3,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
+use crate::agent::t6_prompt_augment::augment_system_prompt;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::memory::store::MemoryStore;
@@ -2083,11 +2084,13 @@ impl BenchmarkSuite {
                 store.reset_session_data_for_lab()?;
 
                 // jitter_seed時はプロンプトに実行番号を付加してキャッシュ回避
-                let system_prompt = if multi.jitter_seed {
+                // T6 prompt augment: env=1 + LongHorizonPlanning tier で directive を append
+                let base_prompt = if multi.jitter_seed {
                     format!("{}\n<!-- run:{run_idx} -->", config.system_prompt)
                 } else {
                     config.system_prompt.clone()
                 };
+                let system_prompt = augment_system_prompt(&base_prompt, task.capability_tier);
 
                 let task_config = AgentConfig {
                     max_iterations: task.max_iterations,
@@ -2193,7 +2196,8 @@ impl BenchmarkSuite {
                             break;
                         }
                         store.reset_session_data_for_lab()?;
-                        let system_prompt = if multi.jitter_seed {
+                        // T6 prompt augment: env=1 + LongHorizonPlanning tier で directive を append
+                        let base_prompt = if multi.jitter_seed {
                             format!(
                                 "{}\n<!-- run:inject:{size_kb}kb:{inject_run_idx} -->",
                                 config.system_prompt
@@ -2201,6 +2205,8 @@ impl BenchmarkSuite {
                         } else {
                             config.system_prompt.clone()
                         };
+                        let system_prompt =
+                            augment_system_prompt(&base_prompt, task.capability_tier);
                         let inject_config = AgentConfig {
                             max_iterations: task.max_iterations,
                             max_retries: config.max_retries,
@@ -2311,11 +2317,14 @@ impl BenchmarkSuite {
                 break;
             }
 
+            // T6 prompt augment: env=1 + LongHorizonPlanning tier で directive を append
+            // env unset の場合は clone のみで副作用ゼロ (backward compat)
+            let system_prompt = augment_system_prompt(&config.system_prompt, task.capability_tier);
             let task_config = AgentConfig {
                 max_iterations: task.max_iterations,
                 max_retries: config.max_retries,
                 max_tools_selected: config.max_tools_selected,
-                system_prompt: config.system_prompt.clone(),
+                system_prompt,
                 advisor: AdvisorConfig {
                     max_uses: 0,
                     ..config.advisor.clone()
