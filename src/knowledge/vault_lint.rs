@@ -1,7 +1,9 @@
 //! Vault lint pass — Knowledge Vault 整合性チェック (項目 246、plan vault-lint-coverage-check.md).
 //!
-//! Karpathy LLM Wiki Lint パターン (Zenn 記事 tsurubee 著) を bonsai-agent の Vault
-//! (`crate::knowledge::vault::Vault`) に拡張。項目 244 KG lint と同形の env-gated 補助 lint。
+//! Karpathy LLM Wiki Lint パターン (Zenn 記事 tsurubee 著、
+//! <https://zenn.dev/tsurubee/articles/llm-wiki-connecting-knowledge>) を
+//! bonsai-agent の Vault (`crate::knowledge::vault::Vault`) に拡張。
+//! 項目 244 KG lint と同形の env-gated 補助 lint。
 //!
 //! 検出軸 (plan §3.1):
 //! - duplicate_entries: 同 cat 内で content[0..50] prefix が >1 回出現
