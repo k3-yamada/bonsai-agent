@@ -61,6 +61,15 @@ else
     echo "Phase 3: FAIL"
 fi
 
+# Phase 4: cargo llvm-cov coverage (summary-only).
+echo "=== Phase 4: cargo llvm-cov ==="
+if bash "${SCRIPT_DIR}/coverage.sh"; then
+    echo "Phase 4: OK"
+else
+    overall_status=1
+    echo "Phase 4: FAIL"
+fi
+
 # Summary footer.
 {
     echo ""
