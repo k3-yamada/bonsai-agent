@@ -61,8 +61,18 @@ def check_claude_archive_crossref() -> tuple[bool, str]:
     # "**252**: ..." or "**256**: ..." pattern を grep
     claude_items = sorted(set(int(m) for m in re.findall(r"\*\*(\d{3})\*\*:", claude_text)))
 
+    # critic HIGH #1 fix: silent regression bypass 防止.
+    # CLAUDE.md が non-trivial (>100 行) で項目 0 検出は marker 変更等の suspicious signal、FAIL.
+    line_count = len(claude_text.splitlines())
     if not claude_items:
-        return True, "INFO: No `**NNN**:` items found in CLAUDE.md"
+        if line_count > 100:
+            return False, (
+                f"⚠️ **CLAUDE.md non-trivial ({line_count} 行) だが `**NNN**:` 形式の項目が 0 件**. "
+                "marker 変更 / format drift の可能性. 修正方法: CLAUDE.md の直近項目 section が "
+                "`**NNN**:` 形式を維持しているか確認、または regex を新 marker に更新. "
+                "参照: docs/architecture/module-layer-rules.md"
+            )
+        return True, f"INFO: No `**NNN**:` items found in CLAUDE.md (line_count={line_count}, trivial OK)"
 
     if not ARCHIVE.exists():
         return False, (
@@ -72,10 +82,15 @@ def check_claude_archive_crossref() -> tuple[bool, str]:
         )
 
     archive_text = ARCHIVE.read_text(encoding="utf-8")
-    # archive 形式: "NNN. 🎉 **..." / "NNN. 🟡 **..." / "NNN. **..." / "NNN. **(欠番)**" 等、
-    # 絵文字 (status marker) や直接 ** で開始する 3 桁項目を catch.
-    # 単純 "^NNN. " (3-digit + dot + space) で開始する line を全件項目として扱う.
-    archive_items = sorted(set(int(m) for m in re.findall(r"^(\d{3})\.\s", archive_text, re.MULTILINE)))
+    # archive 形式: "NNN. 🎉 **..." / "NNN. 🟡 **..." / "NNN. **..." / "NNN. **(欠番)**" 等.
+    # critic HIGH #2 fix: regex robustness — leading whitespace (bullet indent) + tab/全角空白許容.
+    # `^\s*(\d{3})[.)]\s+` で indent / 数字 / `.` or `)` / 1+ 任意空白 (tab、全角含む) を catch.
+    archive_items = sorted(
+        set(
+            int(m)
+            for m in re.findall(r"^\s*(\d{3})[.)]\s+", archive_text, re.MULTILINE)
+        )
+    )
 
     missing = [n for n in claude_items if n not in archive_items]
 

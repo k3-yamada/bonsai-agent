@@ -6,6 +6,11 @@
 
 set -uo pipefail
 
+# critic HIGH #3 fix: standalone 実行時の PWD 依存解消、必ず PROJECT_ROOT に cd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "$PROJECT_ROOT"
+
 DATE=$(date +%Y%m%d)
 REPORT="docs/quality/drift-${DATE}.md"
 SECTION="## Dead Code (cargo +nightly udeps)"
