@@ -52,6 +52,15 @@ else
     echo "Phase 2: drift detected"
 fi
 
+# Phase 3: cargo outdated (root deps only).
+echo "=== Phase 3: cargo outdated ==="
+if bash "${SCRIPT_DIR}/outdated.sh"; then
+    echo "Phase 3: OK"
+else
+    overall_status=1
+    echo "Phase 3: FAIL"
+fi
+
 # Summary footer.
 {
     echo ""
