@@ -622,97 +622,10 @@ pub fn compact_level1_with_scorer(
 }
 
 pub fn compact_level1(messages: &mut [Message], config: &CompactionConfig) {
-    let t = messages.len();
-    if t <= config.placeholder_keep_recent {
-        return;
-    }
-    // Prune保護範囲: 直近N件 or 直近Nトークン分のどちらか広い方を保護（OpenCode知見）
-    let keep_by_count = config.placeholder_keep_recent;
-    let keep_by_tokens = {
-        let mut acc = 0usize;
-        let mut keep = 0usize;
-        for msg in messages.iter().rev() {
-            acc += msg.content.len().div_ceil(4);
-            if acc > config.prune_protect_tokens {
-                break;
-            }
-            keep += 1;
-        }
-        keep
-    };
-    let boundary = t.saturating_sub(keep_by_count.max(keep_by_tokens));
-    if boundary == 0 {
-        return;
-    }
-    let pairs = find_ai_tool_pairs(messages);
-    let protected: std::collections::HashSet<usize> = pairs
-        .iter()
-        .flat_map(|&(a, b)| {
-            if a >= boundary || b >= boundary {
-                vec![a, b]
-            } else {
-                vec![]
-            }
-        })
-        .collect();
-
-    // 重要度ベース適応的削除（GLM-5.1 DSA知見）:
-    // 最初と最後のUserメッセージは絶対保護
-    let first_user_idx = messages[..boundary]
-        .iter()
-        .position(|m| matches!(m.role, Role::User));
-    let last_user_idx = messages[..boundary]
-        .iter()
-        .rposition(|m| matches!(m.role, Role::User));
-
-    // 重要度スコアが低い順にソートした削除候補
-    let mut candidates: Vec<(usize, f64)> = (0..boundary)
-        .filter(|&i| {
-            !protected.contains(&i) && Some(i) != first_user_idx && Some(i) != last_user_idx
-        })
-        .map(|i| (i, score_message_importance(&messages[i])))
-        .collect();
-    candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    for (i, _score) in &candidates {
-        let msg = &mut messages[*i];
-        if matches!(msg.role, Role::Tool) && msg.content.len() > config.prune_minimum_chars {
-            let id = msg.tool_call_id.as_deref().unwrap_or("?");
-            msg.content = format!("[prev:{id}]");
-        }
-    }
+    compact_level1_with_budget(messages, config, None);
 }
 pub fn compact_level2(messages: &mut [Message], config: &CompactionConfig) {
-    let t = messages.len();
-    if t <= config.placeholder_keep_recent {
-        return;
-    }
-    let boundary = t - config.placeholder_keep_recent;
-    // Preserved Thinking: 削除対象から思考サマリーを抽出してから要約
-    let thinking_summaries = extract_thinking_summary(&messages[..boundary]);
-    for msg in messages[..boundary].iter_mut() {
-        if matches!(msg.role, Role::Assistant) && msg.content.len() > config.summary_max_chars {
-            let s: String = msg.content.chars().take(config.summary_max_chars).collect();
-            msg.content = format!("{s}...[summarized]");
-        }
-    }
-    // 思考サマリーを最後の要約済みAssistantメッセージに追加
-    if !thinking_summaries.is_empty() {
-        let thinking_text = thinking_summaries
-            .iter()
-            .map(|s| format!("- {s}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if let Some(last_assistant) = messages[..boundary]
-            .iter_mut()
-            .rev()
-            .find(|m| matches!(m.role, Role::Assistant))
-        {
-            last_assistant
-                .content
-                .push_str(&format!("\n[Preserved Thinking]\n{thinking_text}"));
-        }
-    }
+    compact_level2_with_budget(messages, config, None);
 }
 pub fn compact_level3(messages: &mut Vec<Message>, config: &CompactionConfig) {
     if messages.len() <= config.emergency_keep + 1 {
@@ -874,10 +787,9 @@ pub fn compact_if_needed(
     (lv, off)
 }
 
-// ========== Phase 5 — 4 軸個別 prune stub (項目 248 Phase 5、plan §3 Phase 1 Red) ==========
+// ========== Phase 5 — 4 軸個別 prune (項目 248 Phase 5、plan §3 Phase 2 Green) ==========
 
 /// メモリ種別タグ (prefix-based 判別、Phase 5 plan §1.2)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemoryKind {
     Buffer,
@@ -887,20 +799,7 @@ pub(crate) enum MemoryKind {
     Unclassified,
 }
 
-/// 単一 Message の種別判別 (prefix + role + tool_call_id ベース、O(1))
-/// Phase 1 Red: stub (常に Unclassified return)
-#[allow(dead_code)]
-pub(crate) fn classify_memory_kind(
-    _msg: &crate::agent::conversation::Message,
-    _idx: usize,
-    _total: usize,
-    _keep_recent: usize,
-) -> MemoryKind {
-    MemoryKind::Unclassified
-}
-
 /// 4 軸 token 消費集計
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AxisUsage {
     pub buffer: usize,
@@ -910,53 +809,271 @@ pub(crate) struct AxisUsage {
     pub unclassified: usize,
 }
 
+/// 単一 Message の種別判別 (prefix + role + tool_call_id ベース、O(1))
+///
+/// 判定優先順位:
+/// 1. 末尾 keep_recent 件の User/Assistant → Buffer
+/// 2. Assistant で [summarized] / [Preserved Thinking] / [Handoff Summary] prefix → Summary
+/// 3. Tool の tool_call_id prefix → Entities (agenther_) / Kg (memory_search/kg_query/graph_search)
+/// 4. Tool の content prefix `[entities:` → Entities
+/// 5. それ以外 → Unclassified
+pub(crate) fn classify_memory_kind(
+    msg: &Message,
+    idx: usize,
+    total: usize,
+    keep_recent: usize,
+) -> MemoryKind {
+    // (1) 末尾 keep_recent 件の User/Assistant は Buffer
+    if idx >= total.saturating_sub(keep_recent) && matches!(msg.role, Role::User | Role::Assistant)
+    {
+        return MemoryKind::Buffer;
+    }
+    // (2) Assistant の summary prefix 判別
+    if matches!(msg.role, Role::Assistant) {
+        let c = &msg.content;
+        if c.contains("[Preserved Thinking]")
+            || c.contains("...[summarized]")
+            || c.starts_with("[Handoff Summary]")
+        {
+            return MemoryKind::Summary;
+        }
+    }
+    // (3) Tool の tool_call_id prefix 判別
+    if matches!(msg.role, Role::Tool) {
+        if let Some(id) = &msg.tool_call_id {
+            if id.starts_with("agenther_") {
+                return MemoryKind::Entities;
+            }
+            if id.starts_with("memory_search")
+                || id.starts_with("kg_query")
+                || id.starts_with("graph_search")
+            {
+                return MemoryKind::Kg;
+            }
+        }
+        // (3b) content prefix で entities 補助判別
+        if msg.content.starts_with("[entities:") {
+            return MemoryKind::Entities;
+        }
+    }
+    MemoryKind::Unclassified
+}
+
 /// messages 全体の 4 軸 token 消費を集計
-/// Phase 1 Red: stub (常に Default return)
-#[allow(dead_code)]
-pub(crate) fn measure_axis_usage(
-    _messages: &[crate::agent::conversation::Message],
-    _keep_recent: usize,
-) -> AxisUsage {
-    AxisUsage::default()
+///
+/// estimate_tokens と整合する 1 token ≈ 4 chars 推定 (`len().div_ceil(4)`) を使用。
+pub(crate) fn measure_axis_usage(messages: &[Message], keep_recent: usize) -> AxisUsage {
+    let mut u = AxisUsage::default();
+    let total = messages.len();
+    for (idx, msg) in messages.iter().enumerate() {
+        let kind = classify_memory_kind(msg, idx, total, keep_recent);
+        let tok = msg.content.len().div_ceil(4);
+        match kind {
+            MemoryKind::Buffer => u.buffer += tok,
+            MemoryKind::Summary => u.summary += tok,
+            MemoryKind::Entities => u.entities += tok,
+            MemoryKind::Kg => u.kg += tok,
+            MemoryKind::Unclassified => u.unclassified += tok,
+        }
+    }
+    u
 }
 
 /// allocated との差分で overflow 軸を返す (超過量降順)
-/// Phase 1 Red: stub (常に空 Vec return)
-#[allow(dead_code)]
+///
+/// usage >= allocated の軸を overflow と見なす。
+/// usage == allocated の場合は overflow 量 0 として記録し、prune 優先軸として扱う。
+/// これにより allocate の float→usize 切捨による 1 token 誤差を吸収する。
 pub(crate) fn overflow_axes(
-    _usage: &AxisUsage,
-    _allocated: &AllocatedBudget,
+    usage: &AxisUsage,
+    allocated: &AllocatedBudget,
 ) -> Vec<(MemoryKind, usize)> {
-    Vec::new()
+    let mut result: Vec<(MemoryKind, usize)> = Vec::new();
+    if usage.buffer >= allocated.buffer {
+        result.push((
+            MemoryKind::Buffer,
+            usage.buffer.saturating_sub(allocated.buffer),
+        ));
+    }
+    if usage.summary >= allocated.summary {
+        result.push((
+            MemoryKind::Summary,
+            usage.summary.saturating_sub(allocated.summary),
+        ));
+    }
+    if usage.entities >= allocated.entities {
+        result.push((
+            MemoryKind::Entities,
+            usage.entities.saturating_sub(allocated.entities),
+        ));
+    }
+    if usage.kg >= allocated.kg {
+        result.push((MemoryKind::Kg, usage.kg.saturating_sub(allocated.kg)));
+    }
+    // 超過量降順
+    result.sort_by(|a, b| b.1.cmp(&a.1));
+    result
 }
 
 /// compact_level1 + budget 軸統合版
-/// Phase 1 Red: stub (compact_level1 即委譲、budget 無視)
+///
+/// `allocated=None` のとき既存 `compact_level1` と完全同一の動作 (backward compat)。
+/// `allocated=Some(a)` のとき overflow 軸のメッセージを優先 prune する。
 pub fn compact_level1_with_budget(
     messages: &mut [Message],
     config: &CompactionConfig,
-    _allocated: Option<&AllocatedBudget>,
+    allocated: Option<&AllocatedBudget>,
 ) {
-    compact_level1(messages, config);
+    let t = messages.len();
+    if t <= config.placeholder_keep_recent {
+        return;
+    }
+    let keep_by_count = config.placeholder_keep_recent;
+    let keep_by_tokens = {
+        let mut acc = 0usize;
+        let mut keep = 0usize;
+        for msg in messages.iter().rev() {
+            acc += msg.content.len().div_ceil(4);
+            if acc > config.prune_protect_tokens {
+                break;
+            }
+            keep += 1;
+        }
+        keep
+    };
+    let boundary = t.saturating_sub(keep_by_count.max(keep_by_tokens));
+    if boundary == 0 {
+        return;
+    }
+    let pairs = find_ai_tool_pairs(messages);
+    let protected: std::collections::HashSet<usize> = pairs
+        .iter()
+        .flat_map(|&(a, b)| {
+            if a >= boundary || b >= boundary {
+                vec![a, b]
+            } else {
+                vec![]
+            }
+        })
+        .collect();
+
+    let first_user_idx = messages[..boundary]
+        .iter()
+        .position(|m| matches!(m.role, Role::User));
+    let last_user_idx = messages[..boundary]
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User));
+
+    // Phase 5: overflow 軸計算 (allocated=None のとき空 Vec = backward compat)
+    let overflow_kinds: Vec<MemoryKind> = match allocated {
+        Some(a) => {
+            let usage = measure_axis_usage(&messages[..boundary], config.placeholder_keep_recent);
+            overflow_axes(&usage, a)
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    // candidates: (idx, score, is_overflow)
+    // overflow=true のものを先頭に、次に score 低位順
+    let mut candidates: Vec<(usize, f64, bool)> = (0..boundary)
+        .filter(|&i| {
+            !protected.contains(&i) && Some(i) != first_user_idx && Some(i) != last_user_idx
+        })
+        .map(|i| {
+            let kind = classify_memory_kind(&messages[i], i, t, config.placeholder_keep_recent);
+            let is_overflow = overflow_kinds.contains(&kind);
+            let score = score_message_importance(&messages[i]);
+            (i, score, is_overflow)
+        })
+        .collect();
+
+    // overflow=true が先 (true > false)、次に score 低位順
+    candidates.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    for (i, _score, _) in &candidates {
+        let msg = &mut messages[*i];
+        if matches!(msg.role, Role::Tool) && msg.content.len() > config.prune_minimum_chars {
+            let id = msg.tool_call_id.as_deref().unwrap_or("?");
+            msg.content = format!("[prev:{id}]");
+        }
+    }
 }
 
 /// compact_level2 + budget 軸統合版
-/// Phase 1 Red: stub (compact_level2 即委譲、budget 無視)
+///
+/// `allocated=None` のとき既存 `compact_level2` と完全同一の動作 (backward compat)。
+/// `allocated=Some(a)` で summary 軸 overflow のとき切詰量を 0.7x 増強。
 pub fn compact_level2_with_budget(
     messages: &mut [Message],
     config: &CompactionConfig,
-    _allocated: Option<&AllocatedBudget>,
+    allocated: Option<&AllocatedBudget>,
 ) {
-    compact_level2(messages, config);
+    let t = messages.len();
+    if t <= config.placeholder_keep_recent {
+        return;
+    }
+    let boundary = t - config.placeholder_keep_recent;
+
+    // summary 軸 overflow チェック (allocated=None のとき overflow なし)
+    let summary_overflow = match allocated {
+        Some(a) => {
+            let usage = measure_axis_usage(messages, config.placeholder_keep_recent);
+            usage.summary > a.summary
+        }
+        None => false,
+    };
+    let summary_max = if summary_overflow {
+        // 30% さらに圧縮
+        (config.summary_max_chars as f64 * 0.7) as usize
+    } else {
+        config.summary_max_chars
+    };
+
+    // Preserved Thinking: 削除対象から思考サマリーを抽出してから要約
+    let thinking_summaries = extract_thinking_summary(&messages[..boundary]);
+    for msg in messages[..boundary].iter_mut() {
+        if matches!(msg.role, Role::Assistant) && msg.content.len() > summary_max {
+            let s: String = msg.content.chars().take(summary_max).collect();
+            msg.content = format!("{s}...[summarized]");
+        }
+    }
+    // 思考サマリーを最後の要約済みAssistantメッセージに追加
+    if !thinking_summaries.is_empty() {
+        let thinking_text = thinking_summaries
+            .iter()
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(last_assistant) = messages[..boundary]
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m.role, Role::Assistant))
+        {
+            last_assistant
+                .content
+                .push_str(&format!("\n[Preserved Thinking]\n{thinking_text}"));
+        }
+    }
 }
 
 /// 直近 messages から MemoryRelevance を粗推定
-/// Phase 1 Red: stub (Default return)
-pub fn memory_relevance_from_messages(
-    _messages: &[Message],
-    _keep_recent: usize,
-) -> MemoryRelevance {
-    MemoryRelevance::default()
+///
+/// 各軸の token 比率から relevance を粗推定。buffer は常に 1.0 (最優先保護)。
+pub fn memory_relevance_from_messages(messages: &[Message], keep_recent: usize) -> MemoryRelevance {
+    let usage = measure_axis_usage(messages, keep_recent);
+    let total = (usage.buffer + usage.summary + usage.entities + usage.kg).max(1) as f32;
+    MemoryRelevance {
+        buffer: 1.0,
+        summary: (usage.summary as f32 / total).clamp(0.0, 1.0),
+        entities: (usage.entities as f32 / total).clamp(0.0, 1.0),
+        kg: (usage.kg as f32 / total).clamp(0.0, 1.0),
+    }
 }
 
 #[cfg(test)]
