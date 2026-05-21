@@ -810,7 +810,9 @@ pub(crate) struct AxisUsage {
 ///
 /// 判定優先順位:
 /// 1. 末尾 keep_recent 件の User/Assistant → Buffer
-/// 2. Assistant で [summarized] / [Preserved Thinking] / [Handoff Summary] prefix → Summary
+/// 2. Assistant で [summarized] / [Preserved Thinking] prefix → Summary
+///    (注: [Context handoff] は System role で emit されるため Assistant 分岐では届かない、
+///     System 軸での classify は将来 phase で検討)
 /// 3. Tool の tool_call_id prefix → Entities (agenther_) / Kg (memory_search/kg_query/graph_search)
 /// 4. Tool の content prefix `[entities:` → Entities
 /// 5. それ以外 → Unclassified
@@ -826,12 +828,11 @@ pub(crate) fn classify_memory_kind(
         return MemoryKind::Buffer;
     }
     // (2) Assistant の summary prefix 判別
+    // rust-reviewer L-1 fix: [Handoff Summary] は System role で emit されるため Assistant
+    // 分岐では届かず dead branch だったので削除。残 2 marker のみで Summary 判定。
     if matches!(msg.role, Role::Assistant) {
         let c = &msg.content;
-        if c.contains("[Preserved Thinking]")
-            || c.contains("...[summarized]")
-            || c.starts_with("[Handoff Summary]")
-        {
+        if c.contains("[Preserved Thinking]") || c.contains("...[summarized]") {
             return MemoryKind::Summary;
         }
     }
