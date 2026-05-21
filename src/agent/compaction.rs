@@ -811,8 +811,7 @@ pub(crate) struct AxisUsage {
 /// 判定優先順位:
 /// 1. 末尾 keep_recent 件の User/Assistant → Buffer
 /// 2. Assistant で [summarized] / [Preserved Thinking] prefix → Summary
-///    (注: [Context handoff] は System role で emit されるため Assistant 分岐では届かない、
-///     System 軸での classify は将来 phase で検討)
+///    (注: [Context handoff] は System role 経由のため Assistant 分岐では届かず、将来 phase で検討)
 /// 3. Tool の tool_call_id prefix → Entities (agenther_) / Kg (memory_search/kg_query/graph_search)
 /// 4. Tool の content prefix `[entities:` → Entities
 /// 5. それ以外 → Unclassified
