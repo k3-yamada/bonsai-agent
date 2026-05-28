@@ -56,6 +56,12 @@ export BONSAI_LAB_SMOKE=1
 # Phase C: T=0 greedy 化で sampling noise 排除
 export BONSAI_LAB_TEMP=0
 
+# 項目 263 follow-up: Lab v22 paired の wall time 暴走 (18h51m / unbounded 60 task) 防止.
+# default 5 task で cycle ≤ ~30 min × 10 cycle ≈ 5h target に bound.
+# operator が override したい場合は事前に `export BONSAI_LAB_TASK_LIMIT=N` で上書き可.
+: "${BONSAI_LAB_TASK_LIMIT:=5}"
+export BONSAI_LAB_TASK_LIMIT
+
 run_cycle() {
     local label="$1"
     local logfile="$LOG_DIR/${label}.log"
