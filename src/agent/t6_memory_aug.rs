@@ -96,7 +96,8 @@ pub fn t6_memory_aug_mode() -> T6AugMode {
 /// task input string を Jaccard 計算用の lowercase whitespace token に分解.
 ///
 /// `pick_top_k_in_session` の補助 helper (Phase 3 Refactor で extract したものを Phase 2 Green で先行配置).
-fn tokenize_task_input(input: &str) -> Vec<String> {
+/// Phase 4 wiring (benchmark.rs) からも T6SuccessRecord 構築時に呼出されるため `pub(crate)`.
+pub(crate) fn tokenize_task_input(input: &str) -> Vec<String> {
     input.split_whitespace().map(|s| s.to_lowercase()).collect()
 }
 
@@ -294,6 +295,79 @@ mod tests {
             block.contains("final_keywords"),
             "marker 3: final_keywords prefix"
         );
+    }
+
+    /// Phase 4 wiring integration test (`benchmark.rs` の T6 append + augment data flow を模擬).
+    ///
+    /// benchmark.rs::run_with_multi_config / run() 内で行う以下を simulate:
+    /// 1. 初回 T6 task 完了時 score>=0.7 で `t6_history.push(record)` (append 経路)
+    /// 2. 後続 T6 task の system prompt 構築時に `augment_system_prompt_with_memory` 呼出
+    /// 3. augmented prompt が `[T6 Past Success Examples]` header + 前回 task の trajectory を含む
+    ///
+    /// LLM mock を伴う benchmark.rs end-to-end test は scope 外 (大規模な infra 要)、
+    /// 本 test は in-session data flow contract を最小コストで確証する.
+    #[test]
+    fn t_benchmark_suite_t6_memory_aug_appends_history_in_session() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: single-threaded via ENV_LOCK、test 専用
+        unsafe {
+            std::env::set_var("BONSAI_T6_MEMORY_AUG", "1");
+        }
+
+        // Step 1: 初期 history 空 (run 開始時の状態).
+        let mut history: Vec<T6SuccessRecord> = Vec::new();
+        let base_system = "You are a T6 planning agent.";
+
+        // 第 1 T6 task augment (history 空、pass-through 期待).
+        let first_input = "Plan refactor of src files using repo_map and file_read.";
+        let first_prompt = augment_system_prompt_with_memory(
+            base_system,
+            CapabilityTier::LongHorizonPlanning,
+            &history,
+            first_input,
+        );
+        assert_eq!(
+            first_prompt, base_system,
+            "第 1 T6 task は history 空で pass-through (cold start contract)"
+        );
+
+        // Step 2: 第 1 task 完了 simulation — append 経路 (benchmark.rs Ok-branch append logic 模擬).
+        let first_record = T6SuccessRecord {
+            task_id: "lh_plan_refactor_5files".to_string(),
+            input_keywords: tokenize_task_input(first_input),
+            tool_chain: vec!["repo_map".to_string(), "file_read".to_string()],
+            final_keywords: tokenize_task_input("Refactor plan completed successfully."),
+            score: 0.85, // >= 0.7 → append 条件 OK
+        };
+        history.push(first_record);
+        assert_eq!(history.len(), 1, "append 1 件後 history.len == 1");
+
+        // Step 3: 第 2 T6 task augment (history 非空、enhanced prompt 期待).
+        let second_input = "Plan refactor of test files using repo_map.";
+        let second_prompt = augment_system_prompt_with_memory(
+            base_system,
+            CapabilityTier::LongHorizonPlanning,
+            &history,
+            second_input,
+        );
+        assert_ne!(
+            second_prompt, base_system,
+            "第 2 T6 task は history 経由で augment される (in-session example inject)"
+        );
+        assert!(
+            second_prompt.contains("[T6 Past Success Examples]"),
+            "augmented prompt は header marker を含む"
+        );
+        assert!(
+            second_prompt.contains("repo_map"),
+            "augmented prompt は前回 tool_chain を含む (cross-task knowledge transfer 確証)"
+        );
+
+        // cleanup
+        // SAFETY: single-threaded via ENV_LOCK、test 専用
+        unsafe {
+            std::env::remove_var("BONSAI_T6_MEMORY_AUG");
+        }
     }
 
     #[test]
