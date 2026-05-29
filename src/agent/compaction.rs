@@ -83,9 +83,21 @@ impl CompactionConfig {
     /// 項目 264 follow-up: smoke 時のみ max_context_tokens を縮小し
     /// compact_level1/2 を強制発火させる factory.
     ///
-    /// 優先順位: `BONSAI_LAB_MAX_CTX` env (1..=14000) > `BONSAI_LAB_SMOKE=1` で
-    /// `SMOKE_DEFAULT_MAX_CTX` (6000) > 既存 default 14000 維持。
-    /// 上書き時は `prune_protect_tokens` も `max_context_tokens / 2` に clamp.
+    /// # 優先順位
+    /// 1. `BONSAI_LAB_MAX_CTX=N` (`N ∈ 1..=14000`、parse 不能 / 範囲外 = ignore)
+    /// 2. `BONSAI_LAB_SMOKE ∈ {1, true, TRUE, yes, YES}` → [`SMOKE_DEFAULT_MAX_CTX`] (6000)
+    /// 3. 両 env unset → 既存 default (14000) 維持 = backward compat
+    ///
+    /// # contract
+    /// override 適用後は `prune_protect_tokens = min(現在値, max_context_tokens / 2)`
+    /// で clamp (圧縮余地確保、[`Self::from_n_ctx_budget`] と同 logic).
+    ///
+    /// # 経緯
+    /// 項目 264 G-T6-D-1/2 smoke で `compaction.budget` emit は多数だが
+    /// `[prev:` / `[summarized]` / `[saved:` marker 全て 0 を観測 (実 prune 不発火)。
+    /// max_context_tokens=14000 では smoke session token が 75%=10500 に届かない構造的
+    /// dead code path。本 factory で smoke 時 6000 (level1=4500/level2=5400/level3=6000)
+    /// に縮小し全 run で prune 強制発火させ、項目 263 ratio tune 真効果測定を可能化。
     ///
     /// plan: `.claude/plan/max-context-tokens-reduction-force-prune.md`
     pub fn with_smoke_or_env_override(mut self) -> Self {

@@ -243,15 +243,27 @@ impl CompactionMiddleware {
     ///
     /// 項目 248 Phase 4: `.with_dynamic_budget_from_env()` で env-driven budget_ratios を統合
     /// (env unset で None 維持 = backward compat、env on で Some 設定 + log emit hook 起動).
+    ///
+    /// 項目 264 follow-up: `.with_smoke_or_env_override()` で smoke/env-driven max_context 縮小
+    /// (両 env unset で 14000 維持、smoke=1 で 6000、env=N で N override).
     pub fn with_n_ctx_budget(n_ctx_budget: Option<u32>) -> Self {
-        Self::new(CompactionConfig::from_n_ctx_budget(n_ctx_budget).with_dynamic_budget_from_env())
+        Self::new(
+            CompactionConfig::from_n_ctx_budget(n_ctx_budget)
+                .with_smoke_or_env_override()
+                .with_dynamic_budget_from_env(),
+        )
     }
 }
 
 impl Default for CompactionMiddleware {
     fn default() -> Self {
         // 項目 248 Phase 4: env-driven dynamic budget wiring (env unset で従来挙動 backward compat).
-        Self::new(CompactionConfig::default().with_dynamic_budget_from_env())
+        // 項目 264 follow-up: env-driven max_context override (smoke=1 で 6000 → compact_level1/2 強制発火).
+        Self::new(
+            CompactionConfig::default()
+                .with_smoke_or_env_override()
+                .with_dynamic_budget_from_env(),
+        )
     }
 }
 
@@ -869,6 +881,38 @@ mod tests {
         assert_eq!(
             mw.config.max_context_tokens, 5734,
             "from_n_ctx_budget の派生計算も維持 (factory chain 順序保護)"
+        );
+    }
+
+    // ── 項目 264 follow-up Phase 3 wiring: smoke=1 で middleware.config.max_context=6000 ──
+    //
+    // plan: `.claude/plan/max-context-tokens-reduction-force-prune.md` §6 Wiring
+    // CompactionMiddleware::default() chain に `.with_smoke_or_env_override()` 統合確証.
+    // smoke=1 で max_context=6000 (SMOKE_DEFAULT_MAX_CTX)、prune_protect=3000 clamp.
+
+    /// CompactionMiddleware::default() で smoke=1 → max_context=6000 反映確証.
+    #[test]
+    fn t_compaction_middleware_default_applies_smoke_override() {
+        let _g = crate::agent::compaction::DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("BONSAI_DYNAMIC_BUDGET");
+            std::env::remove_var("BONSAI_LAB_MAX_CTX");
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        }
+        let mw = CompactionMiddleware::default();
+        unsafe {
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+        }
+        assert_eq!(
+            mw.config.max_context_tokens,
+            crate::agent::compaction::SMOKE_DEFAULT_MAX_CTX,
+            "smoke=1 で middleware default() chain が max_context=6000 反映 (wiring active)"
+        );
+        assert_eq!(
+            mw.config.prune_protect_tokens, 3000,
+            "smoke override 後 prune_protect=6000/2=3000 に clamp"
         );
     }
 }
