@@ -1037,12 +1037,13 @@ pub fn compact_level2_with_budget(
     let boundary = t - config.placeholder_keep_recent;
 
     // summary 軸 overflow チェック (allocated=None のとき overflow なし)
-    // rust-reviewer M-2 fix: overflow_axes と同一 `>=` 判定で contract 統一
-    // (float→usize 切捨 1 token 誤差吸収)
+    // 項目 263 follow-up (ecc:rust-reviewer MEDIUM 1): overflow_axes の新 contract
+    // (`>` strict + tolerance) と統一、項目 261 残置の `>=` を解消.
+    // tolerance で float→usize 切捨 1-10 token 誤差を吸収しつつ真の overflow のみ検出.
     let summary_overflow = match allocated {
         Some(a) => {
             let usage = measure_axis_usage(messages, config.placeholder_keep_recent);
-            usage.summary >= a.summary
+            usage.summary > a.summary + overflow_tolerance(a.total)
         }
         None => false,
     };
@@ -1778,11 +1779,12 @@ mod tests {
     fn t_allocate_distributes_total() {
         let r = BudgetRatios::default();
         let alloc = r.allocate(10000);
-        // Phase 2 Green: buffer=4000, summary=3000, entities=2000, kg=1000
+        // 項目 263 default 30/30/15/25: buffer≈3000+remainder, summary=3000, entities=1500, kg=2500
+        // (本 test は sum == total のみ assert、各軸の正確値は別 test で確証)
         assert_eq!(
             alloc.buffer + alloc.summary + alloc.entities + alloc.kg,
             10000,
-            "Phase 2 Green: total 全消費 (allocate sum == 10000)"
+            "default ratio 配分: 4 軸 sum == total (10000) 保証"
         );
         assert_eq!(alloc.total, 10000);
     }
@@ -1796,6 +1798,11 @@ mod tests {
         assert_eq!(sum, 10003, "Phase 2 Green: 余り含めて total 一致");
     }
 
+    /// MEDIUM 3 follow-up (ecc:rust-reviewer): 本 test は env unset (default alpha=0.2) を前提.
+    /// `BONSAI_DYNAMIC_BUDGET_ALPHA=0.0` env override 時は alpha=0 で boost 0 となり
+    /// `base * 1.01` を満たさず false negative の可能性。`DYNAMIC_BUDGET_ENV_TEST_LOCK` を
+    /// 取得していないため他 test の alpha env 設定と競合する場合あり (現状未発生).
+    /// 将来 default_alpha 変更時は本 test の 1.01 倍 margin も再評価必要.
     #[test]
     fn t_adjusted_increases_high_relevance() {
         let r = BudgetRatios::default();
@@ -1859,8 +1866,9 @@ mod tests {
         );
     }
 
-    /// Phase 1 Red 核心 1: env=1 + with_dynamic_budget_from_env → Some(default 40/30/20/10).
-    /// stub は self 返却 → budget_ratios None のまま → FAIL 期待.
+    /// Phase 1 Red 核心 1: env=1 + with_dynamic_budget_from_env → Some(default 30/30/15/25).
+    /// (旧 Phase 1 Red は default 40/30/20/10、項目 263 で 30/30/15/25 へ変更.)
+    /// 本 test は is_some() のみ assert、配分値は別 test 参照.
     #[test]
     fn t_with_dynamic_budget_from_env_set_returns_some() {
         let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
@@ -1871,7 +1879,7 @@ mod tests {
         unsafe { std::env::remove_var("BONSAI_DYNAMIC_BUDGET") };
         assert!(
             c.budget_ratios.is_some(),
-            "env=1 で BudgetRatios (40/30/20/10) を budget_ratios に設定 (Phase 2 Green PASS 期待)"
+            "env=1 で BudgetRatios (30/30/15/25、項目 263) を budget_ratios に設定"
         );
     }
 
@@ -2161,6 +2169,11 @@ mod tests {
 
     /// overflow_axes 境界等量 = 不含 (案 D `>=` → `>` strict 化).
     /// rust-reviewer M-1 解消、float→usize 切捨 1-token 誤差は tolerance で吸収.
+    ///
+    /// MEDIUM 2 follow-up (ecc:rust-reviewer): total=200 で
+    /// `overflow_tolerance(200) = max(200/1000, 1) = 1` が暗黙に効き、
+    /// 等量 (usage == allocated) は `usage > allocated + 1` = false で overflow 不含.
+    /// `OVERFLOW_TOLERANCE_FLOOR` を 0 へ変更した場合は本 test の前提も再評価必要.
     #[test]
     fn t_overflow_axes_strict_greater_than() {
         let usage = AxisUsage {
@@ -2180,7 +2193,7 @@ mod tests {
         let result = overflow_axes(&usage, &allocated);
         assert!(
             result.is_empty(),
-            "境界等量は overflow ではない (案 D: `>=` → `>` strict、項目 263)"
+            "境界等量は overflow ではない (案 D: `>=` → `>` strict + tolerance=1 双方確証、項目 263)"
         );
     }
 
