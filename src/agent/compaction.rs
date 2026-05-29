@@ -87,10 +87,17 @@ impl CompactionConfig {
     /// `SMOKE_DEFAULT_MAX_CTX` (6000) > 既存 default 14000 維持。
     /// 上書き時は `prune_protect_tokens` も `max_context_tokens / 2` に clamp.
     ///
-    /// Phase 1 Red: stub. Phase 2 Green で本実装.
     /// plan: `.claude/plan/max-context-tokens-reduction-force-prune.md`
-    pub fn with_smoke_or_env_override(self) -> Self {
-        unimplemented!("Phase 2 Green で本実装")
+    pub fn with_smoke_or_env_override(mut self) -> Self {
+        // 優先順位: env > smoke > default
+        if let Some(n) = lab_max_ctx_from_env() {
+            self.max_context_tokens = n;
+        } else if is_lab_smoke_mode_for_compaction() {
+            self.max_context_tokens = SMOKE_DEFAULT_MAX_CTX;
+        }
+        // override 後は prune_protect を max_context/2 に clamp (圧縮余地確保).
+        self.prune_protect_tokens = self.prune_protect_tokens.min(self.max_context_tokens / 2);
+        self
     }
 }
 
@@ -247,10 +254,11 @@ pub fn is_lab_smoke_mode_for_compaction() -> bool {
 /// `BONSAI_LAB_MAX_CTX=N` で max_context_tokens を明示 override.
 ///
 /// 受理範囲: `1..=14000` (legacy default 上限)。範囲外 / parse 不能 / 未設定で `None`.
-/// Phase 1 Red: stub 常に None. Phase 2 Green で env parse 本実装.
 pub fn lab_max_ctx_from_env() -> Option<usize> {
-    let _ = std::env::var("BONSAI_LAB_MAX_CTX"); // Phase 1 Red: stub, ignore env
-    None
+    std::env::var("BONSAI_LAB_MAX_CTX")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| (1..=14000).contains(n))
 }
 
 /// `BONSAI_DYNAMIC_BUDGET_RATIOS="0.4,0.3,0.2,0.1"` で ratio override.
@@ -1996,17 +2004,15 @@ mod tests {
         );
     }
 
-    // ── 項目 264 follow-up Phase 1 Red: with_smoke_or_env_override 4 failing test ──
+    // ── 項目 264 follow-up Phase 2 Green: with_smoke_or_env_override 4 PASS test ──
     //
     // plan: `.claude/plan/max-context-tokens-reduction-force-prune.md` §6
-    // Phase 1 Red: with_smoke_or_env_override は unimplemented!() のため 4 件 panic 期待.
-    // Phase 2 Green で env parse 本実装 → 全 PASS.
+    // Phase 2 Green: env parse + clamp 本実装、4 件 PASS.
     // 既存 DYNAMIC_BUDGET_ENV_TEST_LOCK を流用 (process-wide env race 防止、env 変数は別だが
     // 同 test process で BONSAI_LAB_* env も serialize される).
 
-    /// Phase 1 Red 核心 1: env BONSAI_LAB_SMOKE=1 で max_context_tokens=SMOKE_DEFAULT_MAX_CTX (6000) + prune_protect=3000.
+    /// 核心 1: BONSAI_LAB_SMOKE=1 で max_context=SMOKE_DEFAULT_MAX_CTX (6000) + prune_protect=3000.
     #[test]
-    #[should_panic(expected = "Phase 2 Green")]
     fn t_smoke_override_reduces_max_context() {
         let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
             .lock()
@@ -2015,16 +2021,22 @@ mod tests {
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
             std::env::remove_var("BONSAI_LAB_MAX_CTX");
         }
-        // Phase 1 Red: unimplemented!() panic 期待 (Phase 2 で max=6000/protect=3000 assert).
-        let _ = CompactionConfig::default().with_smoke_or_env_override();
+        let config = CompactionConfig::default().with_smoke_or_env_override();
         unsafe {
             std::env::remove_var("BONSAI_LAB_SMOKE");
         }
+        assert_eq!(
+            config.max_context_tokens, SMOKE_DEFAULT_MAX_CTX,
+            "smoke=1 で max_context=6000 (SMOKE_DEFAULT_MAX_CTX)"
+        );
+        assert_eq!(
+            config.prune_protect_tokens, 3000,
+            "smoke override 後 prune_protect=6000/2=3000 に clamp"
+        );
     }
 
-    /// Phase 1 Red 核心 2: env BONSAI_LAB_MAX_CTX=4000 が smoke より優先 (max=4000).
+    /// 核心 2: BONSAI_LAB_MAX_CTX=4000 が smoke より優先 (max=4000).
     #[test]
-    #[should_panic(expected = "Phase 2 Green")]
     fn t_env_override_takes_precedence() {
         let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
             .lock()
@@ -2033,16 +2045,19 @@ mod tests {
             std::env::set_var("BONSAI_LAB_MAX_CTX", "4000");
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
         }
-        let _ = CompactionConfig::default().with_smoke_or_env_override();
+        let config = CompactionConfig::default().with_smoke_or_env_override();
         unsafe {
             std::env::remove_var("BONSAI_LAB_MAX_CTX");
             std::env::remove_var("BONSAI_LAB_SMOKE");
         }
+        assert_eq!(
+            config.max_context_tokens, 4000,
+            "env=4000 が smoke=1 より優先"
+        );
     }
 
-    /// Phase 1 Red 核心 3: 両 env unset で 14000 維持 (backward compat).
+    /// 核心 3: 両 env unset で 14000 維持 (backward compat).
     #[test]
-    #[should_panic(expected = "Phase 2 Green")]
     fn t_no_override_preserves_default() {
         let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
             .lock()
@@ -2051,12 +2066,15 @@ mod tests {
             std::env::remove_var("BONSAI_LAB_MAX_CTX");
             std::env::remove_var("BONSAI_LAB_SMOKE");
         }
-        let _ = CompactionConfig::default().with_smoke_or_env_override();
+        let config = CompactionConfig::default().with_smoke_or_env_override();
+        assert_eq!(
+            config.max_context_tokens, 14000,
+            "両 env unset で default 14000 維持 (backward compat)"
+        );
     }
 
-    /// Phase 1 Red 核心 4: override 後 prune_protect <= max_context/2 (clamp).
+    /// 核心 4: override 後 prune_protect <= max_context/2 (clamp).
     #[test]
-    #[should_panic(expected = "Phase 2 Green")]
     fn t_prune_protect_clamped_after_override() {
         let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
             .lock()
@@ -2064,10 +2082,17 @@ mod tests {
         unsafe {
             std::env::set_var("BONSAI_LAB_MAX_CTX", "5000");
         }
-        let _ = CompactionConfig::default().with_smoke_or_env_override();
+        let config = CompactionConfig::default().with_smoke_or_env_override();
         unsafe {
             std::env::remove_var("BONSAI_LAB_MAX_CTX");
         }
+        assert!(
+            config.prune_protect_tokens <= config.max_context_tokens / 2,
+            "override 後 prune_protect ({}) <= max/2 ({}/2={})",
+            config.prune_protect_tokens,
+            config.max_context_tokens,
+            config.max_context_tokens / 2,
+        );
     }
 
     // ========== Phase 5 — 4 軸個別 prune (項目 248 Phase 5、plan §3 Phase 1 Red) ==========
