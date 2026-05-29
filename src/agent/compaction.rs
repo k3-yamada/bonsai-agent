@@ -1913,13 +1913,14 @@ mod tests {
         let r = c
             .budget_ratios
             .expect("env=1 で Some (override 不正でも default fallback)");
+        // 項目 263 Phase 1 Red: default 40/30/20/10 → 30/30/15/25 (KG 救済).
         assert!(
-            (r.recent_buffer - 0.4).abs() < 1e-6,
-            "invalid override → BudgetRatios::default 40/30/20/10 fallback (buffer=0.4)"
+            (r.recent_buffer - 0.30).abs() < 1e-6,
+            "invalid override → BudgetRatios::default 30/30/15/25 fallback (項目 263、buffer=0.30)"
         );
         assert!(
-            (r.knowledge_graph - 0.1).abs() < 1e-6,
-            "invalid override → kg=0.1 default"
+            (r.knowledge_graph - 0.25).abs() < 1e-6,
+            "invalid override → kg=0.25 default (項目 263、smoke KG 救済)"
         );
     }
 
@@ -2086,6 +2087,119 @@ mod tests {
         assert_eq!(
             total_axis, expected_total,
             "measure_axis_usage: 全 token が 4 軸 + unclassified に集約される (stub: 0 で FAIL)"
+        );
+    }
+
+    // ========== 項目 263 Phase 1 Red — Dynamic Budget ratio tune (plan §3.1) ==========
+    //
+    // 起点: G-RT2 拡張 (BONSAI_DYNAMIC_BUDGET=1 + smoke 5 task × k=3) で
+    //   score 0.8298 → 0.7542 = -9.1% regression 観測 (項目 261 Phase 5 完了後).
+    // 仮説 H1 (kg=10% allocation が smoke の KG 使用量に低すぎ) + H2 (overflow `>=` 不要発火).
+    // 案 A + 案 D atomic combo: default 30/30/15/25 + overflow `>=` → `>` strict + tolerance.
+
+    /// default ratio が KG-heavy (kg=0.25) に変更されている事を確証.
+    /// kg 10% は smoke 5 task × k=3 で KG `[memory_search]` 1-2 件で overflow 発火、
+    /// 25% に引き上げて KG 救済 (rust-reviewer M-1 + plan §1.2 H1 対応).
+    #[test]
+    fn t_budget_ratios_default_is_kg_heavy() {
+        let r = BudgetRatios::default();
+        assert!(
+            (r.knowledge_graph - 0.25).abs() < 1e-6,
+            "default kg ratio = 0.25 (smoke KG 救済、項目 263 plan §3.1)"
+        );
+        assert!(
+            (r.recent_buffer - 0.30).abs() < 1e-6,
+            "default buffer ratio = 0.30 (kg 譲渡)"
+        );
+        assert!(
+            (r.conversation_summary - 0.30).abs() < 1e-6,
+            "default summary ratio = 0.30 (維持)"
+        );
+        assert!(
+            (r.relevant_entities - 0.15).abs() < 1e-6,
+            "default entities ratio = 0.15"
+        );
+    }
+
+    /// default ratio sum が 1.0 ±ε (is_normalized 経路の sanity 確証).
+    #[test]
+    fn t_budget_ratios_default_sum_is_one() {
+        let r = BudgetRatios::default();
+        assert!(
+            r.is_normalized(),
+            "default ratio sum = 1.0 ±ε かつ全 finite + ≥ 0.0 (項目 263)"
+        );
+    }
+
+    /// overflow_axes 境界等量 = 不含 (案 D `>=` → `>` strict 化).
+    /// rust-reviewer M-1 解消、float→usize 切捨 1-token 誤差は tolerance で吸収.
+    #[test]
+    fn t_overflow_axes_strict_greater_than() {
+        let usage = AxisUsage {
+            buffer: 100,
+            summary: 50,
+            entities: 30,
+            kg: 20,
+            unclassified: 0,
+        };
+        let allocated = AllocatedBudget {
+            total: 200,
+            buffer: 100,
+            summary: 50,
+            entities: 30,
+            kg: 20,
+        };
+        let result = overflow_axes(&usage, &allocated);
+        assert!(
+            result.is_empty(),
+            "境界等量は overflow ではない (案 D: `>=` → `>` strict、項目 263)"
+        );
+    }
+
+    /// float→usize 切捨 1-token 誤差は overflow 扱いしない (tolerance = max(total/1000, 1)).
+    /// total=10000 のとき tolerance=10、9 token 超過は overflow 不含.
+    #[test]
+    fn t_overflow_axes_epsilon_tolerance() {
+        let usage = AxisUsage {
+            buffer: 4009,
+            summary: 3000,
+            entities: 1500,
+            kg: 2500,
+            unclassified: 0,
+        };
+        let allocated = AllocatedBudget {
+            total: 10000,
+            buffer: 4000,
+            summary: 3000,
+            entities: 1500,
+            kg: 2500,
+        };
+        // tolerance = max(10000/1000, 1) = 10、9 超過は不含
+        let result = overflow_axes(&usage, &allocated);
+        assert!(
+            !result.iter().any(|(k, _)| *k == MemoryKind::Buffer),
+            "buffer 9 超過は tolerance=10 内で不含 (項目 263)"
+        );
+    }
+
+    /// smoke fixture で KG 2400 token に default 25% (= 3000) allocate で no overflow.
+    /// 旧 default kg=10% (= 1200) では overflow 発火 → 新 default 25% で救済.
+    #[test]
+    fn t_default_ratio_no_kg_overflow_in_smoke_fixture() {
+        // smoke fixture 想定: 全 12000 token、KG 使用量 2400 (≈20%).
+        let r = BudgetRatios::default();
+        let allocated = r.allocate(12000);
+        let usage = AxisUsage {
+            buffer: 3600,
+            summary: 3600,
+            entities: 1800,
+            kg: 2400,
+            unclassified: 600,
+        };
+        let result = overflow_axes(&usage, &allocated);
+        assert!(
+            !result.iter().any(|(k, _)| *k == MemoryKind::Kg),
+            "新 default 30/30/15/25 で smoke KG 2400 は overflow 救済 (項目 263 plan §1.2 H1)"
         );
     }
 }
