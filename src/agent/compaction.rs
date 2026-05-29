@@ -97,12 +97,17 @@ pub struct BudgetRatios {
 
 impl Default for BudgetRatios {
     fn default() -> Self {
-        // Phase 2 Green: plan §3.1 base ratio 40/30/20/10
+        // 項目 263 Phase 2 Green: plan §3.1 案 A — kg-heavy 30/30/15/25 (smoke KG 救済).
+        // 起点: G-RT2 拡張 (BONSAI_DYNAMIC_BUDGET=1 + smoke 5 task × k=3) で
+        //   score 0.8298 → 0.7542 = -9.1% regression 観測 (項目 261 Phase 5 完了後).
+        // 仮説 H1: kg=10% は smoke の KG 使用量 (`[memory_search]` 1-2 件) に対し
+        //   低すぎ overflow 連発 → 25% に引き上げて smoke fixture (KG ≈ 20%) を救済.
+        // buffer を譲渡 (0.4 → 0.3)、summary 維持、entities 縮小 (0.2 → 0.15) で sum=1.0.
         Self {
-            recent_buffer: 0.4,
-            conversation_summary: 0.3,
-            relevant_entities: 0.2,
-            knowledge_graph: 0.1,
+            recent_buffer: 0.30,
+            conversation_summary: 0.30,
+            relevant_entities: 0.15,
+            knowledge_graph: 0.25,
         }
     }
 }
@@ -876,40 +881,41 @@ pub(crate) fn measure_axis_usage(messages: &[Message], keep_recent: usize) -> Ax
     u
 }
 
-/// allocated との差分で overflow 軸を返す (超過量降順)
+/// allocated との差分で overflow 軸を返す (超過量降順).
 ///
-/// usage >= allocated の軸を overflow と見なす。
-/// usage == allocated の場合は overflow 量 0 として記録し、prune 優先軸として扱う。
-/// これにより allocate の float→usize 切捨による 1 token 誤差を吸収する。
+/// 項目 263 Phase 2 Green (plan §3.1 案 D): `>=` → `>` strict + tolerance.
+/// 旧 `>=` 判定では境界等量 (usage == allocated) で overflow 発火 → 不要 prune
+/// (rust-reviewer M-1)。新仕様: `usage > allocated + tolerance` でのみ真の overflow 検出。
+/// tolerance = `max(allocated.total / 1000, 1)` で float→usize 切捨による 1-10 token
+/// 誤差を吸収しつつ、真の容量超過のみ捕捉。
 pub(crate) fn overflow_axes(
     usage: &AxisUsage,
     allocated: &AllocatedBudget,
 ) -> Vec<(MemoryKind, usize)> {
+    let tol = overflow_tolerance(allocated.total);
     let mut result: Vec<(MemoryKind, usize)> = Vec::new();
-    if usage.buffer >= allocated.buffer {
-        result.push((
-            MemoryKind::Buffer,
-            usage.buffer.saturating_sub(allocated.buffer),
-        ));
+    if usage.buffer > allocated.buffer + tol {
+        result.push((MemoryKind::Buffer, usage.buffer - allocated.buffer));
     }
-    if usage.summary >= allocated.summary {
-        result.push((
-            MemoryKind::Summary,
-            usage.summary.saturating_sub(allocated.summary),
-        ));
+    if usage.summary > allocated.summary + tol {
+        result.push((MemoryKind::Summary, usage.summary - allocated.summary));
     }
-    if usage.entities >= allocated.entities {
-        result.push((
-            MemoryKind::Entities,
-            usage.entities.saturating_sub(allocated.entities),
-        ));
+    if usage.entities > allocated.entities + tol {
+        result.push((MemoryKind::Entities, usage.entities - allocated.entities));
     }
-    if usage.kg >= allocated.kg {
-        result.push((MemoryKind::Kg, usage.kg.saturating_sub(allocated.kg)));
+    if usage.kg > allocated.kg + tol {
+        result.push((MemoryKind::Kg, usage.kg - allocated.kg));
     }
     // 超過量降順
     result.sort_by(|a, b| b.1.cmp(&a.1));
     result
+}
+
+/// overflow 判定の許容誤差 (項目 263 Phase 2 Green、plan §3.2).
+/// `max(total / 1000, 1)` = 0.1% (最小 1 token) で float→usize 切捨 + KG round-up を吸収。
+#[inline]
+fn overflow_tolerance(total: usize) -> usize {
+    (total / 1000).max(1)
 }
 
 /// compact_level1 + budget 軸統合版
@@ -1780,6 +1786,7 @@ mod tests {
     #[test]
     fn t_adjusted_increases_high_relevance() {
         let r = BudgetRatios::default();
+        let base_entities = r.relevant_entities;
         let relevance = MemoryRelevance {
             buffer: 1.0,
             summary: 0.3,
@@ -1787,10 +1794,13 @@ mod tests {
             kg: 0.2,
         };
         let adjusted = r.adjusted(&relevance);
-        // Phase 2 Green: entities が base 0.2 より大きくなる
+        // 項目 263 Phase 2 Green: default 値変更耐性のため絶対値ではなく base からの delta で比較.
+        // intent: high relevance で entities ratio が base からの正の boost を受ける.
         assert!(
-            adjusted.relevant_entities > 0.2,
-            "Phase 2 Green: high relevance で entities ratio 増 (Phase 1 Red FAIL 期待)"
+            adjusted.relevant_entities > base_entities * 1.01,
+            "high relevance で entities ratio が base ({}) から 1% 以上 boost (got {})",
+            base_entities,
+            adjusted.relevant_entities
         );
     }
 
@@ -2013,7 +2023,12 @@ mod tests {
         let msgs = vec![
             Message::user("q"),
             Message::assistant("a"),
-            Message::tool("kg result content", "memory_search_1"),
+            // 項目 263 Phase 2 Green: tolerance=max(total/1000,1)=1 を超える kg overflow
+            // を確実に発火させるため content を拡張 (旧 5 token → 11 token、`>` strict 用).
+            Message::tool(
+                "kg result content needs more padding text",
+                "memory_search_1",
+            ),
         ];
         let usage = measure_axis_usage(&msgs, 1);
         // Phase 2 Green では kg > 0 になるが stub では kg == 0
@@ -2029,7 +2044,7 @@ mod tests {
             entities: 20,
             kg: 5,
         };
-        // usage.kg > allocated.kg なら overflow
+        // 項目 263: usage.kg > allocated.kg + tolerance(1) なら overflow.
         let overflows = overflow_axes(&usage, &allocated);
         assert!(
             overflows.iter().any(|(k, _)| *k == MemoryKind::Kg),
