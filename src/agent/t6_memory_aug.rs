@@ -48,6 +48,12 @@ const T6_AUG_BLOCK_HEADER: &str = "[T6 Past Success Examples]";
 /// in-session augment は最大 ~1500 token に制限。超過時は truncation marker 付与。
 const T6_AUG_MAX_TOKEN_BUDGET: usize = 1500;
 
+/// `augment_system_prompt_with_memory` で history から取り出す top-K (Phase 2a 既定値).
+///
+/// Gemini 案 = K=2 で smoke 先行検証 (過剰 example 注入による hallucination/dilution 回避).
+/// Phase 2b で K 動的化検討 (e.g., 残 token budget に応じた可変 K).
+const T6_AUG_TOP_K: usize = 2;
+
 /// T6 LongHorizonPlanning task の成功 trajectory record (in-session scope).
 ///
 /// `score >= 0.7` の T6 task 完了時に `Vec<T6SuccessRecord>` に append され、
@@ -199,7 +205,7 @@ pub fn augment_system_prompt_with_memory(
     if history.is_empty() {
         return system.to_string();
     }
-    let top = pick_top_k_in_session(history, current_input, 2);
+    let top = pick_top_k_in_session(history, current_input, T6_AUG_TOP_K);
     if top.is_empty() {
         return system.to_string();
     }
