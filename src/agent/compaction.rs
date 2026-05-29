@@ -911,12 +911,25 @@ pub(crate) fn overflow_axes(
     result
 }
 
-/// overflow 判定の許容誤差 (項目 263 Phase 2 Green、plan §3.2).
-/// `max(total / 1000, 1)` = 0.1% (最小 1 token) で float→usize 切捨 + KG round-up を吸収。
+/// overflow 判定の許容誤差 (項目 263 Phase 3 Refactor、plan §3.2).
+///
+/// 0.1% (= total / 1000) を許容、最小 1 token。float→usize 切捨 + KG round-up
+/// による 1-10 token 誤差を吸収し、真の容量超過のみ overflow 検出。const SSOT 化で
+/// 将来 tolerance 調整時の漏れ排除 (rust-reviewer L-2 follow-up 含む)。
 #[inline]
 fn overflow_tolerance(total: usize) -> usize {
-    (total / 1000).max(1)
+    (total / OVERFLOW_TOLERANCE_DIVISOR).max(OVERFLOW_TOLERANCE_FLOOR)
 }
+
+/// overflow tolerance 計算の SSOT (項目 263 Phase 3 Refactor).
+///
+/// `total / DIVISOR` = 1 promille = 0.1% (e.g. total=10000 → 10 token).
+/// 起点: G-RT2 拡張で float→usize 切捨 1-2 token 誤差が `>=` 判定で overflow 偽陽性化、
+/// `>` strict + 0.1% tolerance で吸収 (rust-reviewer M-1 解消).
+const OVERFLOW_TOLERANCE_DIVISOR: usize = 1000;
+
+/// overflow tolerance の下限 (total が小さい test fixture 等で 0 にならないよう保証).
+const OVERFLOW_TOLERANCE_FLOOR: usize = 1;
 
 /// compact_level1 + budget 軸統合版
 ///
