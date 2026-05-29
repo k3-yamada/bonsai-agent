@@ -29,3 +29,5 @@ lab-v21-smoke-logs/
 lab-v22-aa-logs/
 lab-v22-logs/
 lab-v22-full-logs/
+# Lab 項目別 smoke logs (lab-{item}-smoke-logs/、項目 263/264 G-DB-R/G-T6-D series)
+lab-*-smoke-logs/
