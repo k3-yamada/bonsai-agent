@@ -1,6 +1,46 @@
 # Dynamic Budget Ratio Phase 6 — KG Micro-Tune (項目 263 follow-up 候補)
 
-**状態**: planning-only (2026-05-30 起票)
+**状態**: planning-only (2026-05-30 起票) **⚠️ 前提崩壊の可能性あり、§9 参照**
+**推奨度**: ★★ (G-DB-R-2 borderline -0.32% 解消狙いだが、本 plan §9 の root cause finding により効果限定の可能性)
+
+## §9. ⚠️ **前提崩壊 finding (2026-05-30 本 session 追加調査)**
+
+本 plan §1.2 で「**H6-1: kg=25% は smoke の KG 使用量に対しまだ若干低く、marginal overflow が残存**」を仮定したが、本 session の追加 log 解析で**実 prune 機構そのものが発火していない**事が判明:
+
+| smoke | compaction.budget emit | `[prev:` (level1 Tool prune) | `[summarized]` (level2 Summary) |
+|-------|------------------------|-------------------------------|------------------------------------|
+| G-DB-R-2 mixed (本 plan ACCEPT target) | 48 | **0** | **0** |
+| G-DB-R-3 T6 | 42 | **0** | **0** |
+| G-T6-D-1 (項目 264) | 45 | **0** | **0** |
+
+`compact_if_needed` (compaction.rs:756-790) source 確認:
+- `compact_level1_with_budget` 発火条件: `tokens > 75% of max_context_tokens`
+- `compact_level2_with_budget` 発火条件: `tokens > 90% of max_context_tokens`
+- G-DB-R-2/3/T6-D-1 すべて **75% 閾値を超えなかった** = 実 prune 一切なし
+
+→ **項目 263 BUDGET 経路の実 score 効果 (G-DB-R-3 T6 +9.5% / G-DB-R-2 -0.32%) は prune 経由ではない**:
+- (a) Measurement noise (paired design なしで run-to-run variance)
+- (b) `compact_level0` (常時実行、allocated 引数受けず) の subtle effect
+- (c) `dynamic_budget_for_compaction` 計算 overhead
+- (d) 隠れた env coupling (他の code path が BONSAI_DYNAMIC_BUDGET 参照)
+
+**Phase 6 plan への含意**:
+- 本 plan の kg 25→30% 変更は `compact_level1_with_budget` が発火しない限り **smoke score に影響しない**
+- G-DB-R-2-v2 で Δ ≥ +0.005 ACCEPT が **達成困難** な可能性
+- ACCEPT 失敗時の rollback path (§6) は valid だが、改善幅 0 の可能性に備えて **measurement noise as floor** を accept criteria に組込推奨
+
+**推奨対応 (本 plan 起票後の修正候補)**:
+- (i) Phase 4 Smoke 前に **n_ctx_budget 縮小** (例: max_context_tokens を 12,288 → 8,000 で prune 強制発火) を試行する別 plan を起票し、prune 発火条件下で初めて ratio tune の真効果を測定可能化
+- (ii) または本 plan を保留し、**項目 264 G-T6-D-2 結果待ち** で AUGMENT × BUDGET 真因確定後に Phase 6 必要性を再評価
+- (iii) measurement noise 範囲確認のため A/A test (BUDGET=1 を 2 回連続 run、σ_Δ 測定) を Phase 6 実装前に推奨
+
+**Cross-reference**:
+- `~/.claude/projects/-Users-keizo-bonsai-agent/memory/compaction_budget_static_finding_2026_05_30.md` の §3.5 CRITICAL REFINEMENT に詳細記録
+- 項目 264 G-T6-D-2 完了後、本 plan §1.2 仮説の有効性を最終評価して plan ACCEPT/REJECT 決定
+
+---
+
+**状態**: planning-only (2026-05-30 起票) — original sections below
 **推奨度**: ★★ (項目 263 G-DB-R-2 borderline -0.32% 解消、Lab v22+ paired blocker の最終 polish)
 **推定工数**: ~30 min plan review + ~45 min TDD strict Phase 1-3 + ~30 min Phase 4 smoke (G-DB-R-2-v2 / G-DB-R-3-v2)
 **起点**:
