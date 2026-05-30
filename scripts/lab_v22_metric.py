@@ -352,11 +352,17 @@ def collect_cycles(log_dir: Path, n_pairs: int) -> tuple[list, list, list, list,
     missing = 0
 
     for i in range(1, n_pairs + 1):
+        # 後方互換 = test_on/test_off (A/A test 形式)
+        # 新規 = cycle_a/cycle_b (g_paired_*_v2.sh 形式、ON=B / OFF=A)
         on_path = log_dir / f"test_on_{i}.log"
         off_path = log_dir / f"test_off_{i}.log"
         if not on_path.exists() or not off_path.exists():
-            missing += 1
-            continue
+            # fallback: cycle_b (variant=ON) / cycle_a (baseline=OFF)
+            on_path = log_dir / f"cycle_b_{i}.log"
+            off_path = log_dir / f"cycle_a_{i}.log"
+            if not on_path.exists() or not off_path.exists():
+                missing += 1
+                continue
         on_text = on_path.read_text(encoding="utf-8", errors="replace")
         off_text = off_path.read_text(encoding="utf-8", errors="replace")
 
