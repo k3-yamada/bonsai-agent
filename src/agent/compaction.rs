@@ -2107,6 +2107,76 @@ mod tests {
         );
     }
 
+    /// 核心 5 (integration): smoke=1 で compact_if_needed が実 prune を発火する
+    /// end-to-end 確証 (config → middleware-equivalent chain → compact_if_needed →
+    /// `[prev:` marker emit) = G-MCT2 実機検証の unit test 等価版。
+    ///
+    /// シナリオ:
+    /// 1. BONSAI_LAB_SMOKE=1 → CompactionConfig::default().with_smoke_or_env_override()
+    ///    → max_context_tokens=6000、level1=4500 threshold
+    /// 2. 5000 tokens 相当の Tool message を含む messages を compact_if_needed に渡す
+    /// 3. level1 が発火し Tool message が `[prev:` 化される事を assert
+    ///
+    /// このテストは項目 265 chain (env → factory → middleware → compact_if_needed)
+    /// 全体が壊れた場合に最初に FAIL する regression guard.
+    #[test]
+    fn t_smoke_override_triggers_level1_prune_end_to_end() {
+        let _g = DYNAMIC_BUDGET_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("BONSAI_LAB_MAX_CTX");
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        }
+        let config = CompactionConfig::default().with_smoke_or_env_override();
+        unsafe {
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+        }
+
+        // 前提: smoke=1 で max=6000、level1=4500 threshold
+        assert_eq!(config.max_context_tokens, 6000);
+
+        // 5000+ tokens 相当 (level1=4500 超え) の session を構築:
+        // 各 Tool は large_output_threshold (5000 chars) **未満** で level0 offload を回避、
+        // 合算で level1 threshold (4500 tokens = ~18000 chars) を超える設計。
+        // 末尾 placeholder_keep_recent (6 件) は Buffer 保護されるので 先頭側 Tool が prune 対象。
+        let mut messages = vec![
+            Message::user("turn 1: simulate long context"),
+            Message::tool("a".repeat(4000), "memory_search_1"),
+            Message::user("turn 2"),
+            Message::tool("b".repeat(4000), "memory_search_2"),
+            Message::user("turn 3"),
+            Message::tool("c".repeat(4000), "memory_search_3"),
+            Message::user("turn 4"),
+            Message::tool("d".repeat(4000), "memory_search_4"),
+            Message::user("turn 5"),
+            Message::tool("e".repeat(4000), "memory_search_5"),
+            Message::user("turn 6 (most recent)"),
+            Message::assistant("ok3"),
+        ];
+
+        let before_total = estimate_tokens(&messages);
+        assert!(
+            before_total > 4500,
+            "前提: before tokens ({before_total}) > level1 threshold (4500)",
+        );
+
+        let (lv, _offloaded) = compact_if_needed(&mut messages, &config);
+
+        // chain が成立すれば level1 以上発火
+        assert!(
+            lv >= 1,
+            "smoke override + threshold 超え session で compact_level1 必発火 (lv={lv})",
+        );
+
+        // Tool message が prune されて [prev:...] placeholder 化を確証
+        let has_prev_marker = messages.iter().any(|m| m.content.starts_with("[prev:"));
+        assert!(
+            has_prev_marker,
+            "compact_level1 発火後は Tool content が [prev: 化される (G-MCT2 ACCEPT 条件 (a) と等価)",
+        );
+    }
+
     // ========== Phase 5 — 4 軸個別 prune (項目 248 Phase 5、plan §3 Phase 1 Red) ==========
 
     #[test]
