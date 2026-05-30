@@ -121,8 +121,7 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_DYNAMIC_BUDGET_ALPHA` | 0.2 | 0.0..=1.0 | relevance 反映係数 |
 | `BONSAI_LAB_SMOKE` | OFF | bool | smoke task pool (5 件) 使用 + 項目 265 max_context 自動縮小 (14000→6000) |
 | `BONSAI_LAB_MAX_CTX` | None | 1..=14000 | max_context_tokens 明示 override (項目 265、smoke より優先) |
-| `BONSAI_T6_PROMPT_AUGMENT` | OFF | bool | T6 LongHorizonPlanning system prompt augment (項目 262、+14.4% strong ACCEPT) |
-| `BONSAI_T6_MEMORY_AUG` | OFF | bool | T6 in-session memory aug (項目 264 案 D-2、paired re-eval 待ち default OFF) |
+| `BONSAI_T6_PROMPT_AUGMENT` | OFF | bool | T6 LongHorizonPlanning system prompt augment (項目 262、+14.4% strong ACCEPT、paired re-eval 待ち) |
 
 ## 注意事項 (Phase 5 で「絶対に守るルール」化)
 

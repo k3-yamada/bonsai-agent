@@ -3,9 +3,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
-use crate::agent::t6_memory_aug::{
-    T6SuccessRecord, augment_system_prompt_with_memory, tokenize_task_input,
-};
 use crate::agent::t6_prompt_augment::augment_system_prompt;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
@@ -2068,10 +2065,6 @@ impl BenchmarkSuite {
     ) -> Result<MultiRunBenchmarkResult> {
         let start = std::time::Instant::now();
         let mut task_scores = Vec::new();
-        // 項目 264 Phase 4 wiring: T6 in-session success history (案 D-2、Phase 2a).
-        // run_with_multi_config 1 回の呼出 = 1 session、終了で破棄.
-        // 後続 T6 task の system prompt に top-K (Jaccard 降順) として inject される.
-        let mut t6_history: Vec<T6SuccessRecord> = Vec::new();
         // 項目 225 (arxiv 2604.14877): PASS@(k,T) 閾値は env 経由で 1 度だけ解析。
         // 未指定時は空 Vec が返り、`from_scores_with_metrics_v2` の T 軸計算が空 Vec
         // になることで既存挙動 (env 未設定環境) と 100% 互換になる。
@@ -2109,14 +2102,6 @@ impl BenchmarkSuite {
                     config.system_prompt.clone()
                 };
                 let system_prompt = augment_system_prompt(&base_prompt, task.capability_tier);
-                // 項目 264 Phase 4 wiring: T6 memory aug (案 D-2 in-session top-K).
-                // env unset / non-T6 / history 空のいずれかで pass-through (副作用ゼロ).
-                let system_prompt = augment_system_prompt_with_memory(
-                    &system_prompt,
-                    task.capability_tier,
-                    &t6_history,
-                    &task.input,
-                );
 
                 let task_config = AgentConfig {
                     max_iterations: task.max_iterations,
@@ -2160,22 +2145,7 @@ impl BenchmarkSuite {
                         iterations_per_run.push(loop_result.iterations_used);
                         // 項目 225: 成功 run の wallclock を T_seconds 軸計算用に収集
                         durations_per_run.push(run_duration_secs);
-                        let s = evaluate_task_response(task, loop_result).score();
-                        // 項目 264 Phase 4 wiring: T6 first-success append (案 D-2、Phase 2a).
-                        // 同一 task は最初の success run のみ記録 (重複防止)。
-                        if task.capability_tier == CapabilityTier::LongHorizonPlanning
-                            && s >= 0.7
-                            && !t6_history.iter().any(|r| r.task_id == task.id)
-                        {
-                            t6_history.push(T6SuccessRecord {
-                                task_id: task.id.clone(),
-                                input_keywords: tokenize_task_input(&task.input),
-                                tool_chain: loop_result.tools_called.clone(),
-                                final_keywords: tokenize_task_input(&loop_result.answer),
-                                score: s,
-                            });
-                        }
-                        s
+                        evaluate_task_response(task, loop_result).score()
                     }
                     Err(_) => {
                         // 失敗 run は budget 完全消費とみなす (RDC で late-iteration fail 扱い)
@@ -2248,13 +2218,6 @@ impl BenchmarkSuite {
                         };
                         let system_prompt =
                             augment_system_prompt(&base_prompt, task.capability_tier);
-                        // 項目 264 Phase 4 wiring: T6 memory aug (read-only、inject runs は append しない).
-                        let system_prompt = augment_system_prompt_with_memory(
-                            &system_prompt,
-                            task.capability_tier,
-                            &t6_history,
-                            &task.input,
-                        );
                         let inject_config = AgentConfig {
                             max_iterations: task.max_iterations,
                             max_retries: config.max_retries,
@@ -2359,8 +2322,6 @@ impl BenchmarkSuite {
     ) -> Result<BenchmarkResult> {
         let start = std::time::Instant::now();
         let mut task_scores = Vec::new();
-        // 項目 264 Phase 4 wiring: T6 in-session success history (案 D-2、Phase 2a、run() 単独 session scope).
-        let mut t6_history: Vec<T6SuccessRecord> = Vec::new();
 
         for task in &self.tasks {
             if cancel.is_cancelled() {
@@ -2370,13 +2331,6 @@ impl BenchmarkSuite {
             // T6 prompt augment: env=1 + LongHorizonPlanning tier で directive を append
             // env unset の場合は clone のみで副作用ゼロ (backward compat)
             let system_prompt = augment_system_prompt(&config.system_prompt, task.capability_tier);
-            // 項目 264 Phase 4 wiring: T6 memory aug (案 D-2 in-session top-K).
-            let system_prompt = augment_system_prompt_with_memory(
-                &system_prompt,
-                task.capability_tier,
-                &t6_history,
-                &task.input,
-            );
             let task_config = AgentConfig {
                 max_iterations: task.max_iterations,
                 max_retries: config.max_retries,
@@ -2408,26 +2362,8 @@ impl BenchmarkSuite {
                 Some(&store),
             );
 
-            // 項目 264 Phase 4 wiring: T6 first-success append capture (案 D-2、Phase 2a).
-            // score 評価と append 用 record 構築を Ok branch 内で同時に行う.
-            let mut t6_record: Option<T6SuccessRecord> = None;
             let score = match result {
-                Ok(ref loop_result) => {
-                    let s = evaluate_task_response(task, loop_result);
-                    if task.capability_tier == CapabilityTier::LongHorizonPlanning
-                        && s.score() >= 0.7
-                        && !t6_history.iter().any(|r| r.task_id == task.id)
-                    {
-                        t6_record = Some(T6SuccessRecord {
-                            task_id: task.id.clone(),
-                            input_keywords: tokenize_task_input(&task.input),
-                            tool_chain: loop_result.tools_called.clone(),
-                            final_keywords: tokenize_task_input(&loop_result.answer),
-                            score: s.score(),
-                        });
-                    }
-                    s
-                }
+                Ok(ref loop_result) => evaluate_task_response(task, loop_result),
                 Err(_) => TaskScore {
                     task_id: task.id.clone(),
                     completed: false,
@@ -2439,9 +2375,6 @@ impl BenchmarkSuite {
             };
 
             task_scores.push(score);
-            if let Some(rec) = t6_record {
-                t6_history.push(rec);
-            }
         }
 
         Ok(BenchmarkResult {
