@@ -326,13 +326,17 @@ def judge_accept_v22(
         )
     if not sanity_passed:
         # (d) は補助、主判定の否定理由には含めるが optional
-        reasons.append(
-            f"(d) factcheck sanity gate FAIL: "
-            f"mt_mean={sanity_detail['mt_mean']:.4f} "
-            f"ut_mean={sanity_detail['ut_mean']:.4f} "
-            f"total_min={sanity_detail['total_min']} "
-            "(補助、主判定への影響は (a)(b)(c) 次第)"
-        )
+        # paired re-eval (factcheck OFF) で summaries が空の場合は "no summaries" detail のみ
+        if "reason" in sanity_detail:
+            reasons.append(f"(d) factcheck sanity gate FAIL: {sanity_detail['reason']}")
+        else:
+            reasons.append(
+                f"(d) factcheck sanity gate FAIL: "
+                f"mt_mean={sanity_detail['mt_mean']:.4f} "
+                f"ut_mean={sanity_detail['ut_mean']:.4f} "
+                f"total_min={sanity_detail['total_min']} "
+                "(補助、主判定への影響は (a)(b)(c) 次第)"
+            )
 
     # 主判定 = (a) AND (b) AND (c)、(d) は補助なので reason には載せるが accept には不要
     accepted = gate_a and gate_b and gate_c
