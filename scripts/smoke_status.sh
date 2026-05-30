@@ -43,14 +43,15 @@ fi
 
 echo "=== Smoke Status: $TARGET ==="
 
-# 経過時間 (smoke runner PID の推測)
-if pgrep -f "g_mct2_smoke\|g_paired_\|lab_v22_aa_test" > /tmp/.smoke_pids 2>/dev/null; then
-    while read -r pid; do
-        if [[ -n "$pid" ]]; then
-            ps -p "$pid" -o pid,etime,command 2>/dev/null | tail -n +1
-        fi
-    done < /tmp/.smoke_pids
-fi
+# 経過時間 (smoke runner PID の推測、macOS pgrep ERE alternation 不対応のため
+# pattern 毎に separate invocation)
+for pattern in "g_mct2_smoke" "g_paired_" "lab_v22_aa_test"; do
+    # set -e tolerance: pgrep returns 1 if no match, prevent early exit
+    PIDS=$(pgrep -f "$pattern" 2>/dev/null || true)
+    for pid in $PIDS; do
+        ps -p "$pid" -o pid,etime,command 2>/dev/null || true
+    done
+done
 
 echo ""
 echo "Markers (smoke 進行の reliable signal):"
