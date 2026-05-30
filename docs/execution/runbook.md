@@ -52,6 +52,27 @@ BONSAI_LAB_TASK_LIMIT=5 \            # task pool 削減 (smoke 用)
 # ACCEPT 基準: cycle wall ≤ 35 min (Lab v22 paired 5h 完走 prerequisite)
 ```
 
+### Phase 2 Paired Re-evaluation (G-MCT2 ACCEPT 後)
+
+`lab-v22-paired-metric-mandatory.md` §3 Phase 2 の 3 target を runner script として完備:
+
+```bash
+# Phase 1 σ_noise 確立 (A/A test、~5h)
+nohup ./scripts/lab_v22_aa_test.sh > /tmp/aa_run.log 2>&1 &
+python3 scripts/lab_v22_metric.py ./lab-v22-aa-logs --mode aa
+
+# Phase 2 target #1: 項目 263 BUDGET ratio tune 真効果 (~12h)
+nohup ./scripts/g_paired_263_v2.sh > /tmp/p263_run.log 2>&1 &
+
+# Phase 2 target #2: 項目 264 案 D-2 MEMORY_AUG 真効果 (~12h)
+nohup ./scripts/g_paired_265_v2.sh > /tmp/p265_run.log 2>&1 &
+
+# Phase 2 target #3: 項目 262 PROMPT_AUGMENT 真効果 (~12h)
+nohup ./scripts/g_paired_262_v2.sh > /tmp/p262_run.log 2>&1 &
+```
+
+ACCEPT 条件 (各 target 共通): Δ ≥ max(0.010, σ_noise × 2) かつ Wilcoxon p < 0.05 かつ Cohen's dz ≥ 0.3
+
 ### Smoke G-MCT2 (項目 265 max_context_tokens reduction 効果検証)
 ```bash
 cargo build --release  # ~30s (Phase 1-3 反映後の binary 必須)
