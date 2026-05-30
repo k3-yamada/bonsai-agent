@@ -80,8 +80,10 @@ run_cycle() {
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${label} END (duration=${dur}s) ===" | tee -a "$logfile"
 }
 
-# 5 paired = 10 cycle (ABAB...AB)
-for i in 1 2 3 4 5; do
+# N paired = 2N cycle (ABAB...AB)、N は BONSAI_PAIRED_COUNT で override 可 (default 5)
+PAIRED_COUNT="${BONSAI_PAIRED_COUNT:-5}"
+echo "PAIRED_COUNT=${PAIRED_COUNT} (env BONSAI_PAIRED_COUNT で override 可、default 5)"
+for i in $(seq 1 "$PAIRED_COUNT"); do
     run_cycle "cycle_a_${i}" "0"
     run_cycle "cycle_b_${i}" "1"
 done
