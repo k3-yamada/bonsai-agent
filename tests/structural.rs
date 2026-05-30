@@ -94,7 +94,6 @@ const WHITELIST_EPRINTLN: &[&str] = &[
     "src/knowledge/vault_lint.rs",    // 項目 246 implementation の意図的 eprintln
     "src/memory/store.rs",            // memory store warning
     "src/eval/longmemeval/runner.rs", // longmemeval runner trace
-    "src/agent/compaction.rs", // 項目 248 Phase 4 budget log emit (旧 in_test logic で hidden、HIGH #2 fix で検出)
 ];
 
 /// src/ 配下の全 .rs ファイルを再帰収集.

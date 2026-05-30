@@ -810,7 +810,13 @@ pub fn flush_before_compaction(messages: &[Message], store: Option<&MemoryStore>
     }
     let combined = flushed.join("\n---\n");
     if let Err(e) = store.save_memory(&combined, "context_flush", &["compaction".to_string()]) {
-        eprintln!("[flush] メモリ保存失敗: {e}");
+        // Z-4 LOG-001 cleanup: eprintln → log_event 統一 (structured logging 経路化、
+        // operator visibility 維持しつつ tail -f grep -E "compaction\." 等で一括観測可能化).
+        log_event(
+            LogLevel::Warn,
+            "compaction.flush",
+            &format!("メモリ保存失敗: {e}"),
+        );
     }
 }
 #[allow(clippy::possible_missing_else)]
