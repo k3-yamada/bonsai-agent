@@ -52,6 +52,33 @@ BONSAI_LAB_TASK_LIMIT=5 \            # task pool 削減 (smoke 用)
 # ACCEPT 基準: cycle wall ≤ 35 min (Lab v22 paired 5h 完走 prerequisite)
 ```
 
+### Smoke G-MCT2 (項目 265 max_context_tokens reduction 効果検証)
+```bash
+cargo build --release  # ~30s (Phase 1-3 反映後の binary 必須)
+# MLX server 起動 (port 8000、prism-ml/Ternary-Bonsai-8B-mlx-2bit)
+./scripts/start-mlx-server.sh &
+
+mkdir -p lab-265-smoke-logs
+BONSAI_LAB_LONG_SSE=1 \
+BONSAI_LAB_MLX_ONLY=1 \
+BONSAI_LAB_MLX_WARMUP=1 \
+BONSAI_LAB_TEMP=0 \
+BONSAI_LAB_TASK_LIMIT=5 \
+BONSAI_LAB_SMOKE=1 \              # 項目 265: 自動 max_context=6000 → level1=4500 強制発火
+BONSAI_T6_PROMPT_AUGMENT=1 \      # 項目 262 stack
+BONSAI_DYNAMIC_BUDGET=1 \         # 項目 263 + 261 Phase 5 axis-priority prune
+./target/release/bonsai --lab --lab-experiments 0 \
+  > lab-265-smoke-logs/g_mct2_smoke.log 2>&1
+
+# ACCEPT 条件:
+# (a) [prev: marker count >= 5 (15 run 中、80%+ 発火率)
+grep -c "\[prev:" lab-265-smoke-logs/g_mct2_smoke.log
+# (b) compaction.budget emit と prune marker の time window 整合
+grep -E "compaction.budget|\[prev:" lab-265-smoke-logs/g_mct2_smoke.log | head -20
+# (c) 既存 cargo test --lib 1377 passed retention
+cargo test --lib 2>&1 | tail -3
+```
+
 ## env 一覧 (項目 246/249/252/254)
 
 | Env | Default | 範囲 | 効果 |
@@ -69,8 +96,12 @@ BONSAI_LAB_TASK_LIMIT=5 \            # task pool 削減 (smoke 用)
 | `BONSAI_LAB_TEMP` | model default | float | temperature override (項目 247) |
 | `BONSAI_FACTCHECK_ALL_TRAJECTORIES` | OFF | bool | factcheck scope 拡張 (項目 235) |
 | `BONSAI_DYNAMIC_BUDGET` | OFF | bool | Compaction dynamic budget (項目 248) |
-| `BONSAI_DYNAMIC_BUDGET_RATIOS` | 40/30/20/10 | 4 要素 sum=1.0 | 4 軸配分 |
+| `BONSAI_DYNAMIC_BUDGET_RATIOS` | 30/30/15/25 | 4 要素 sum=1.0 | 4 軸配分 (default 項目 263) |
 | `BONSAI_DYNAMIC_BUDGET_ALPHA` | 0.2 | 0.0..=1.0 | relevance 反映係数 |
+| `BONSAI_LAB_SMOKE` | OFF | bool | smoke task pool (5 件) 使用 + 項目 265 max_context 自動縮小 (14000→6000) |
+| `BONSAI_LAB_MAX_CTX` | None | 1..=14000 | max_context_tokens 明示 override (項目 265、smoke より優先) |
+| `BONSAI_T6_PROMPT_AUGMENT` | OFF | bool | T6 LongHorizonPlanning system prompt augment (項目 262、+14.4% strong ACCEPT) |
+| `BONSAI_T6_MEMORY_AUG` | OFF | bool | T6 in-session memory aug (項目 264 案 D-2、paired re-eval 待ち default OFF) |
 
 ## 注意事項 (Phase 5 で「絶対に守るルール」化)
 
