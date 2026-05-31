@@ -19,6 +19,9 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
 ### 設計判断 (ADR)
 - [docs/decisions/README.md](decisions/README.md) — ADR (Architecture Decision Records) template + 起票方針。Z-1 Phase 6 で 30-40 件 ADR 化予定。
 
+### 運用 / メンテナンス
+- [docs/maintenance/claudemd-curation.md](maintenance/claudemd-curation.md) — CLAUDE.md 運用ルール (FIFO 直近 N 項目 / 1 行サマリー template / Section header 同期 / Z-3 enforcement、Item 255 規模再現 plan 由来)
+
 ### 既存 docs
 - [docs/DESIGN_SPEC.md](DESIGN_SPEC.md) — Bonsai-8B agent 設計仕様 (オリジナル設計書)
 - [docs/THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) — 第三者ライブラリのライセンス
@@ -27,7 +30,7 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
 
 ### memory/ (`~/.claude/projects/-Users-keizo-bonsai-agent/memory/`、project root **外部**、Claude Code session memory dir)
 - `MEMORY.md` — 全 memory ファイルのインデックス
-- `harness_patterns_archive.md` — ハーネスパターン項目 1-254 verbatim アーカイブ
+- `harness_patterns_archive.md` — ハーネスパターン項目 1-268 verbatim アーカイブ (FIFO flush 先、SSOT)
 - `qiita_2do_brain_learnings.md` — Qiita YushiYamamoto 記事 (2do BRAIN) 深掘り
 - `zenn_codex_harness_learnings.md` — Zenn dragon1208 記事 (Codex Harness Engineering) 深掘り
 - `session_2026_*_handoff.md` — session 引継ぎ documents
