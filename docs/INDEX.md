@@ -19,6 +19,8 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
 ### 設計判断 (ADR)
 - [docs/decisions/README.md](decisions/README.md) — ADR (Architecture Decision Records) template + 起票方針。Z-1 Phase 6 で 30-40 件 ADR 化予定。
   - [ADR-001](decisions/ADR-001-claudemd-size-governance.md) — CLAUDE.md Size Governance & docs/ SSOT (Accepted 2026-05-31)
+  - [ADR-002](decisions/ADR-002-scaffolding-over-model.md) — 「Scaffolding > Model」設計原則 (Accepted 2026-05-31)
+  - [ADR-003](decisions/ADR-003-paired-evidence-over-unpaired.md) — Lab 判定は Paired Evidence 必須 (Accepted 2026-05-31)
 
 ### 運用 / メンテナンス
 - [docs/maintenance/claudemd-curation.md](maintenance/claudemd-curation.md) — CLAUDE.md 運用ルール (FIFO 直近 N 項目 / 1 行サマリー template / Section header 同期 / Z-3 enforcement、Item 255 規模再現 plan 由来)
