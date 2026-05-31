@@ -25,8 +25,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# 項目行検出: `NUM. body...` 形式 (NUM = 3 digit、bullet list の `-` で始まらない)
-ITEM_START_RE = re.compile(r"^(\d{2,4})\.\s+(.+)$")
+# 項目行検出: CLAUDE.md format = `- **NNN**: body` markdown bullet (Item 255 以降)
+# Item 255 で CLAUDE.md trim 形式が archive-style numbered list (`NNN. body`) から
+# markdown bullet 形式に shift。本 regex は現行 CLAUDE.md format に追随。
+# 出力 (generate_one_line_summary) は archive 形式 `NNN. ` を維持。
+ITEM_START_RE = re.compile(r"^-\s+\*\*(\d{2,4})\*\*:\s+(.+)$")
 
 # `**強調**` 抽出 (タイトル候補、最初の match)
 EMPHASIS_RE = re.compile(r"\*\*([^*]+?)\*\*")
