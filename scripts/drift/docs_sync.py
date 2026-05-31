@@ -5,6 +5,10 @@
 1. CLAUDE.md「直近項目」 ↔ memory/harness_patterns_archive.md cross-ref
    - 直近項目で言及される項目番号が archive にも存在するか
 2. docs/architecture/module-layer-rules.md の LAYER_ORDER ↔ tests/structural.rs の LAYER_ORDER 整合性
+3. CLAUDE.md「### 直近 N 項目」 header N ↔ section 内 `**NNN**:` 実数整合
+   - header と実態の乖離 (例: 「直近 5 項目」と銘打って 21 項目蓄積) を機械検出
+   - 起源: .claude/plan/claudemd-size-reduction-item-255-recreate.md (Item 255 規模再現 plan)
+   - 再肥大の mechanical enforcement、FIFO 運用ルール違反を CI で catch 可能化
 
 出力: docs/quality/drift-YYYYMMDD.md に append.
 Read-only: 検出のみ、auto-fix なし.
@@ -180,6 +184,66 @@ def check_layer_order_sync() -> tuple[bool, str]:
     )
 
 
+def check_recent_items_section_count() -> tuple[bool, str]:
+    """CLAUDE.md「### 直近 N 項目」 header N ↔ section 内 `**NNN**:` 実数整合.
+
+    - header pattern: `### 直近 (\\d+) 項目` (例: `### 直近 5 項目 (詳細は archive 参照)`)
+    - section 範囲: 該当 header 直後から次の `## ` or `### ` header または EOF まで
+    - 実数 count: 該当 section 内の `**NNN**:` 形式項目番号 (重複除く)
+    - PASS 条件: header N == 実数 (section 不在は INFO graceful)
+    - 自己調整: header を「直近 10 項目」に変更すれば閾値 10 で再検証 (rule source = header 自身)
+    """
+    if not CLAUDE_MD.exists():
+        return False, "**FAIL**: CLAUDE.md not found"
+
+    claude_text = CLAUDE_MD.read_text(encoding="utf-8")
+    lines = claude_text.splitlines()
+
+    header_re = re.compile(r"^###\s+直近\s+(\d+)\s+項目")
+    next_header_re = re.compile(r"^#{2,3}\s+")
+    item_re = re.compile(r"\*\*(\d{3})\*\*:")
+
+    header_idx = None
+    expected_n = None
+    for i, line in enumerate(lines):
+        m = header_re.match(line)
+        if m:
+            header_idx = i
+            expected_n = int(m.group(1))
+            break
+
+    if header_idx is None:
+        return True, (
+            "INFO: `### 直近 N 項目` header not found in CLAUDE.md "
+            "(section absent or renamed — graceful skip)"
+        )
+
+    end_idx = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        if next_header_re.match(lines[j]):
+            end_idx = j
+            break
+
+    section_text = "\n".join(lines[header_idx + 1 : end_idx])
+    actual_items = sorted(set(int(m) for m in item_re.findall(section_text)))
+    actual_n = len(actual_items)
+
+    if actual_n == expected_n:
+        return True, (
+            f"✅ Recent items section header (N={expected_n}) matches actual count "
+            f"({actual_n} items: {actual_items})"
+        )
+    diff = actual_n - expected_n
+    direction = "肥大" if diff > 0 else "不足"
+    return False, (
+        f"⚠️ **Recent items section header/actual mismatch ({direction})**: "
+        f"header「直近 {expected_n} 項目」だが実数 {actual_n} 項目 (Δ={diff:+d}).\n"
+        f"  - actual items: {actual_items}\n"
+        f"修正方法: {'最古項目を harness_patterns_archive.md に flush (FIFO 運用ルール)' if diff > 0 else 'header N を実数に合わせるか、不足分を再追加'}. "
+        f"参照: .claude/plan/claudemd-size-reduction-item-255-recreate.md"
+    )
+
+
 def main() -> int:
     ensure_report_initialized()
     overall_pass = True
@@ -193,6 +257,11 @@ def main() -> int:
     overall_pass &= ok
     append_section("Docs ↔ Code: LAYER_ORDER (docs ↔ tests/structural.rs)", msg)
     print(f"{'PASS' if ok else 'FAIL'}: layer_order_sync")
+
+    ok, msg = check_recent_items_section_count()
+    overall_pass &= ok
+    append_section("Docs ↔ Code: CLAUDE.md 直近 N 項目 header ↔ actual count", msg)
+    print(f"{'PASS' if ok else 'FAIL'}: recent_items_section_count")
 
     return 0 if overall_pass else 1
 
