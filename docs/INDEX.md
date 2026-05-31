@@ -21,6 +21,9 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
   - [ADR-001](decisions/ADR-001-claudemd-size-governance.md) — CLAUDE.md Size Governance & docs/ SSOT (Accepted 2026-05-31)
   - [ADR-002](decisions/ADR-002-scaffolding-over-model.md) — 「Scaffolding > Model」設計原則 (Accepted 2026-05-31)
   - [ADR-003](decisions/ADR-003-paired-evidence-over-unpaired.md) — Lab 判定は Paired Evidence 必須 (Accepted 2026-05-31)
+  - [ADR-004](decisions/ADR-004-defaulted-mutations.md) — デフォルト化済み変異 (Accepted 2026-05-31)
+  - [ADR-005](decisions/ADR-005-sqlite-vec-adopt-then-reject.md) — sqlite-vec 採用検討 → REJECT (Accepted 2026-05-31)
+  - [ADR-006](decisions/ADR-006-backend-fallback-chain.md) — 推論バックエンド戦略 (Accepted 2026-05-31)
 
 ### 運用 / メンテナンス
 - [docs/maintenance/claudemd-curation.md](maintenance/claudemd-curation.md) — CLAUDE.md 運用ルール (FIFO 直近 N 項目 / 1 行サマリー template / Section header 同期 / Z-3 enforcement、Item 255 規模再現 plan 由来)
