@@ -24,6 +24,8 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
   - [ADR-004](decisions/ADR-004-defaulted-mutations.md) — デフォルト化済み変異 (Accepted 2026-05-31)
   - [ADR-005](decisions/ADR-005-sqlite-vec-adopt-then-reject.md) — sqlite-vec 採用検討 → REJECT (Accepted 2026-05-31)
   - [ADR-006](decisions/ADR-006-backend-fallback-chain.md) — 推論バックエンド戦略 (Accepted 2026-05-31)
+  - [ADR-007](decisions/ADR-007-kg-factcheck-anti-hallucination.md) — KG Fact-Check Anti-Hallucination (Accepted 2026-05-31)
+  - [ADR-008](decisions/ADR-008-compaction-strategy.md) — Context Compaction 戦略 (Accepted 2026-05-31)
 
 ### 運用 / メンテナンス
 - [docs/maintenance/claudemd-curation.md](maintenance/claudemd-curation.md) — CLAUDE.md 運用ルール (FIFO 直近 N 項目 / 1 行サマリー template / Section header 同期 / Z-3 enforcement、Item 255 規模再現 plan 由来)
