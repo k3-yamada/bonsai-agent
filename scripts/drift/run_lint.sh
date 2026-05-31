@@ -70,6 +70,32 @@ else
     echo "Phase 4: FAIL"
 fi
 
+# Phase 5: curation tooling 自己テスト (claudemd_archive regex + drift recent_items check).
+# regression test を drift cycle に組込み、手動実行依存を解消 (ADR-001 enforcement loop を閉じる).
+echo "=== Phase 5: curation tooling self-test ==="
+if [[ -f "${PROJECT_ROOT}/scripts/tests/test_claudemd_tooling.py" ]]; then
+    if python3 -m unittest scripts.tests.test_claudemd_tooling >/dev/null 2>&1; then
+        echo "Phase 5: OK"
+        {
+            echo ""
+            echo "## Curation Tooling Self-Test"
+            echo ""
+            echo "✅ scripts/tests/test_claudemd_tooling.py 全 test PASS (claudemd_archive regex + drift recent_items check)."
+        } >> "$REPORT"
+    else
+        overall_status=1
+        echo "Phase 5: FAIL"
+        {
+            echo ""
+            echo "## Curation Tooling Self-Test"
+            echo ""
+            echo "⚠️ **scripts/tests/test_claudemd_tooling.py FAIL**. 修正方法: \`python3 -m unittest scripts.tests.test_claudemd_tooling\` で詳細確認、claudemd_archive.py ITEM_START_RE / docs_sync.py check_recent_items_section_count の regression を疑う. 参照: docs/decisions/ADR-001-claudemd-size-governance.md"
+        } >> "$REPORT"
+    fi
+else
+    echo "Phase 5: SKIP (test file not found)"
+fi
+
 # Summary footer.
 {
     echo ""
