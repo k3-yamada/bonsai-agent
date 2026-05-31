@@ -1,7 +1,12 @@
 # Dynamic Budget Ratio Phase 6 — KG Micro-Tune (項目 263 follow-up 候補)
 
-**状態**: planning-only (2026-05-30 起票) **⚠️ 前提崩壊の可能性あり、§9 参照**
-**推奨度**: ★★ (G-DB-R-2 borderline -0.32% 解消狙いだが、本 plan §9 の root cause finding により効果限定の可能性)
+**状態**: 🚫 **WITHDRAWN (2026-05-31)** = 項目 268 paired evidence で BUDGET=1 自体が REJECT 確定 (mean Δ=-0.0683 / Cohen's dz=-0.8620、5/5 paired)、kg ratio 微調整は前提 (BUDGET=1 ACCEPT) 自体が崩壊 = 二重否定で **plan 廃案**
+**推奨度**: なし (廃案)
+**廃案理由**: §9 前提崩壊 + 項目 268 paired evidence REJECT 二重否定、`BONSAI_DYNAMIC_BUDGET` env default OFF 確定後の ratio 内部調整は意味なし
+
+---
+
+**(以下、historical record として保持。新規実装は不要)**
 
 ## §9. ⚠️ **前提崩壊 finding (2026-05-30 本 session 追加調査)**
 
