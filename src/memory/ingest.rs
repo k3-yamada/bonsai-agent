@@ -119,6 +119,29 @@ mod tests {
     }
 
     #[test]
+    fn t_ingest_idempotent_skips_duplicate_chunks() {
+        // 同一ファイルの再 ingest は重複 chunk を保存しない (content 完全一致 dedup)。
+        let store = MemoryStore::in_memory().unwrap();
+        let dir = std::env::temp_dir();
+        let fpath = dir.join(format!(
+            "bonsai_ingest_idem_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&fpath, "alpha note\n\nbeta note").unwrap();
+
+        let first = ingest_path(&store, &fpath).unwrap();
+        assert_eq!(first, 2, "初回は 2 段落保存");
+        let second = ingest_path(&store, &fpath).unwrap();
+        assert_eq!(second, 0, "再 ingest は重複を保存しない (新規 0 件)");
+        assert_eq!(store.memory_count().unwrap(), 2, "総数は 2 のまま");
+        let _ = std::fs::remove_file(&fpath);
+    }
+
+    #[test]
     fn t_ingest_dir_recurses_target_files_only() {
         let store = MemoryStore::in_memory().unwrap();
         let base = std::env::temp_dir().join(format!("bonsai_ingest_dir_{}", std::process::id()));
