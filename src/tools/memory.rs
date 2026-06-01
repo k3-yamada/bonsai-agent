@@ -196,7 +196,9 @@ enum CharClass {
 }
 
 fn classify_char(c: char) -> CharClass {
-    if c.is_ascii_alphanumeric() {
+    // '_' は snake_case 識別子 (agent_loop / model_router 等) を 1 token に保つため
+    // Ascii 扱いとする。LIKE では escape_like で `_` ワイルドカードを無効化する。
+    if c.is_ascii_alphanumeric() || c == '_' {
         CharClass::Ascii
     } else if matches!(c as u32,
         0x3040..=0x309F |   // ひらがな
@@ -280,6 +282,13 @@ fn tokenize_recall_query(query: &str) -> Vec<String> {
 /// raw count (一致 token 数) では `使い方` 等の頻出汎用語が低関連 chunk を引き上げる
 /// ノイズが出る (実 vault 9079 chunk で観測)。各 token の希少度 (IDF = ln((N+1)/(df+1))+1)
 /// で重み付けし、稀な語の一致を高評価することで関連度を改善する。
+/// LIKE パターン用に metacharacter (`\` `%` `_`) をエスケープする (ESCAPE '\' と併用)。
+/// `_` を Ascii token に含めた結果 (snake_case 対応)、LIKE のワイルドカードとして
+/// 誤展開し candidate set を広げる / 病的に全表走査するのを防ぐ。
+fn escape_like(s: &str) -> String {
+    s.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_")
+}
+
 fn recall_scored(
     conn: &rusqlite::Connection,
     tokens: &[String],
@@ -293,7 +302,7 @@ fn recall_scored(
 
     // OR 連結の where 句を動的生成 (パラメータは tokens の 2 倍 = content/tags 各 1)。
     let conditions: Vec<&str> = (0..tokens.len())
-        .map(|_| "content LIKE ? OR tags LIKE ?")
+        .map(|_| "content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\'")
         .collect();
     let where_clause = conditions.join(" OR ");
     let sql = format!(
@@ -302,7 +311,7 @@ fn recall_scored(
     let mut stmt = conn.prepare(&sql)?;
     let mut params: Vec<String> = Vec::with_capacity(tokens.len() * 2);
     for t in tokens {
-        let pat = format!("%{t}%");
+        let pat = format!("%{}%", escape_like(t));
         params.push(pat.clone());
         params.push(pat);
     }
@@ -356,9 +365,9 @@ fn compute_idf_weights(conn: &rusqlite::Connection, tokens: &[String]) -> Result
     let n = n as f64;
     let mut weights = Vec::with_capacity(tokens.len());
     for t in tokens {
-        let pat = format!("%{t}%");
+        let pat = format!("%{}%", escape_like(t));
         let df: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE content LIKE ?1 OR tags LIKE ?1",
+            "SELECT COUNT(*) FROM memories WHERE content LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'",
             rusqlite::params![pat],
             |row| row.get(0),
         )?;
