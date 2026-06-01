@@ -56,10 +56,13 @@ pub fn ingest_path(store: &MemoryStore, path: &Path) -> Result<usize> {
 
 /// 単一ファイルを取り込む。返り値は**新規**保存した chunk 数。
 ///
-/// 冪等性: content が完全一致する既存メモリがあれば保存をスキップする。
-/// これにより `--ingest` の再実行で recall が重複汚染されない。
-/// 注意: ファイル編集で段落内容が変わった場合、旧版 chunk は残存する
-/// (content 一致 dedup のため)。完全な置換が必要なら別途 purge が必要。
+/// 編集追従 sync: 当該 filename タグの既存 ingest chunk を現ファイルの段落集合と
+/// 突き合わせ、(a) 現ファイルに無い既存 chunk を purge (編集/削除された段落)、
+/// (b) 既存に無い現 chunk を新規保存、(c) 不変 chunk は維持する。
+///
+/// これにより未変更ファイルの再 ingest は冪等 (0 新規・0 削除)、編集ファイルは
+/// 旧版 chunk が残存せず最新状態を反映する。purge は `memories_ad` トリガで
+/// FTS index も同期削除される。
 fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
     let content = std::fs::read_to_string(path)?;
     let filename = path
@@ -68,25 +71,53 @@ fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
         .unwrap_or("unknown")
         .to_string();
     let chunks = chunk_text(&content);
+    let current: std::collections::HashSet<&str> = chunks.iter().map(String::as_str).collect();
+
+    // 当該 filename タグを持つ既存 ingest chunk (id, content)。
+    let existing = existing_ingest_chunks(store, &filename)?;
+    let existing_contents: std::collections::HashSet<&str> =
+        existing.iter().map(|(_, c)| c.as_str()).collect();
+
+    // (a) purge: 現ファイルに存在しない既存 chunk を削除する。
+    for (id, c) in &existing {
+        if !current.contains(c.as_str()) {
+            store
+                .conn()
+                .execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
+        }
+    }
+    // (b) add: 既存に無い現 chunk のみ保存する ((c) 不変 chunk は再保存しない = 冪等)。
     let mut saved = 0;
     for chunk in &chunks {
-        if content_exists(store, chunk)? {
-            continue;
+        if !existing_contents.contains(chunk.as_str()) {
+            store.save_memory(chunk, "ingest", std::slice::from_ref(&filename))?;
+            saved += 1;
         }
-        store.save_memory(chunk, "ingest", std::slice::from_ref(&filename))?;
-        saved += 1;
     }
     Ok(saved)
 }
 
-/// content が完全一致する既存メモリの有無を返す (ingest 冪等化用)。
-fn content_exists(store: &MemoryStore, content: &str) -> Result<bool> {
-    let n: i64 = store.conn().query_row(
-        "SELECT COUNT(*) FROM memories WHERE content = ?1",
-        rusqlite::params![content],
-        |row| row.get(0),
+/// 指定 filename タグを持つ category='ingest' の既存 chunk (id, content) を返す。
+/// tags は JSON 配列文字列 (例 `["notes.md"]`) のため `"filename"` で部分一致する。
+/// filename 中の LIKE メタ文字 (`%` `_` `\`) は ESCAPE で無効化し、`a_.md` が
+/// `a1.md` 等を誤マッチして他ファイルの chunk を purge するのを防ぐ。
+fn existing_ingest_chunks(store: &MemoryStore, filename: &str) -> Result<Vec<(i64, String)>> {
+    let escaped = filename
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pat = format!("%\"{escaped}\"%");
+    let mut stmt = store.conn().prepare(
+        "SELECT id, content FROM memories WHERE category = 'ingest' AND tags LIKE ?1 ESCAPE '\\'",
     )?;
-    Ok(n > 0)
+    let rows = stmt.query_map(rusqlite::params![pat], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 fn has_ingest_extension(path: &Path) -> bool {
