@@ -91,26 +91,13 @@ impl TypedTool for RecallTool {
     fn execute(&self, args: RecallArgs) -> Result<ToolResult> {
         let store = crate::memory::store::MemoryStore::open(&self.db_path)?;
         let limit = args.limit.unwrap_or(5);
-        // FTS5(unicode61)は日本語の部分一致を tokenize できない(空白区切り前提で
-        // 連続CJKを1トークン化する)ため、言語非依存の LIKE 部分一致で想起する。
-        // 個人用途では memories 件数が小さくフルスキャンを許容。FTS5/hybrid による
-        // 関連度ランキングは後続フェーズ。
-        let pattern = format!("%{}%", args.query);
-        let conn = store.conn();
-        let mut stmt = conn.prepare(
-            "SELECT category, content
-             FROM memories
-             WHERE content LIKE ?1 OR tags LIKE ?1
-             ORDER BY id DESC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut hits: Vec<(String, String)> = Vec::new();
-        for row in rows {
-            hits.push(row?);
-        }
+        // FTS5(unicode61) は CJK を 1 トークン化するため LIKE 部分一致で想起する
+        // (CJK 後方互換を維持)。多 token クエリでは literal 一致が極稀になるため、
+        // whitespace で分割した各 token を OR で union 検索 → Rust 側で
+        // overlap スコアリング (一致 token 数 desc、同点は id desc) で
+        // 関連度を擬似 hybrid 風に近似する (Phase 3、項目 270)。
+        let tokens = tokenize_recall_query(&args.query);
+        let hits = recall_scored(store.conn(), &tokens, limit)?;
         if hits.is_empty() {
             return Ok(ToolResult {
                 output: format!("「{}」に該当する記憶なし", args.query),
@@ -128,21 +115,100 @@ impl TypedTool for RecallTool {
     }
 }
 
+/// クエリを whitespace で分割し、空 token を除去した検索 token 配列を返す。
+/// 単一 token (CJK 含む) のときは長さ 1 配列となり従来 LIKE 挙動と等価。
+fn tokenize_recall_query(query: &str) -> Vec<String> {
+    let raw = query.trim();
+    if raw.is_empty() {
+        // 空クエリは元の単一 token (空文字) 1 件として扱い、呼出側で 0 件 fallback。
+        return vec![String::new()];
+    }
+    let parts: Vec<String> = raw
+        .split_whitespace()
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect();
+    if parts.is_empty() {
+        vec![raw.to_string()]
+    } else {
+        parts
+    }
+}
+
+/// per-token LIKE の OR で候補を集め、各候補の overlap (token 一致数) で
+/// 降順ソート、同点は id desc (recency) で安定化する。
+fn recall_scored(
+    conn: &rusqlite::Connection,
+    tokens: &[String],
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    if tokens.is_empty() || tokens.iter().all(|t| t.is_empty()) {
+        return Ok(Vec::new());
+    }
+    // OR 連結の where 句を動的生成 (パラメータは tokens の 2 倍 = content/tags 各 1)。
+    let conditions: Vec<&str> = (0..tokens.len())
+        .map(|_| "content LIKE ? OR tags LIKE ?")
+        .collect();
+    let where_clause = conditions.join(" OR ");
+    let sql = format!(
+        "SELECT id, category, content, tags FROM memories WHERE {where_clause} ORDER BY id DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut params: Vec<String> = Vec::with_capacity(tokens.len() * 2);
+    for t in tokens {
+        let pat = format!("%{t}%");
+        params.push(pat.clone());
+        params.push(pat);
+    }
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut scored: Vec<(i64, usize, String, String)> = Vec::new();
+    for row in rows {
+        let (id, category, content, tags) = row?;
+        let score = tokens
+            .iter()
+            .filter(|t| !t.is_empty() && (content.contains(t.as_str()) || tags.contains(t.as_str())))
+            .count();
+        if score > 0 {
+            scored.push((id, score, category, content));
+        }
+    }
+    // (score desc, id desc) で安定ソート。
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    scored.truncate(limit);
+    Ok(scored
+        .into_iter()
+        .map(|(_id, _score, cat, content)| (cat, content))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools::Tool;
 
     /// 一時 DB ファイルパスを生成(プロセス内ユニーク、file-backed)。
+    /// nanos のみでは並列テストで時刻衝突し同一 DB を共有→ SQL ロックで flaky 化するため、
+    /// プロセス単調増加 atomic counter を併用して衝突を排除する。
     fn temp_db_path() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir();
         let unique = format!(
-            "bonsai_mem_tool_test_{}_{}.db",
+            "bonsai_mem_tool_test_{}_{}_{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            seq
         );
         dir.join(unique).to_string_lossy().to_string()
     }
