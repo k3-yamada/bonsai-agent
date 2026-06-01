@@ -6,6 +6,7 @@ pub mod factcheck;
 pub mod feedback;
 pub mod graph;
 pub mod heuristics;
+pub mod ingest;
 pub mod mocks;
 pub mod review;
 pub mod search;

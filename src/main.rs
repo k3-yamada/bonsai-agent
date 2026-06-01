@@ -110,6 +110,10 @@ struct Cli {
     /// スキルをMarkdownにエクスポート（デフォルト: SKILLS.md）
     #[arg(long)]
     skills_export: bool,
+
+    /// ファイル/ディレクトリ(.md/.txt)を memory に取り込む（①知識デーモン Phase 2）
+    #[arg(long, value_name = "PATH")]
+    ingest: Option<std::path::PathBuf>,
 }
 
 /// 共有コンテキスト（各モードハンドラに渡す）
@@ -252,6 +256,11 @@ fn main() -> Result<()> {
     // DB必要モード
     let store = MemoryStore::open(&get_db_path())?;
 
+    if let Some(path) = &cli.ingest {
+        let n = bonsai_agent::memory::ingest::ingest_path(&store, path)?;
+        println!("ingest 完了: {n} chunk を保存しました ({})", path.display());
+        return Ok(());
+    }
     if cli.skills_export {
         return handle_skills_export_mode(&store);
     }
