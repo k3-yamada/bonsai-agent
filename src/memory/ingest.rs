@@ -33,6 +33,14 @@ pub fn ingest_path(store: &MemoryStore, path: &Path) -> Result<usize> {
         let mut total = 0;
         let mut entries: Vec<_> = std::fs::read_dir(path)?
             .filter_map(|e| e.ok().map(|e| e.path()))
+            // 隠しエントリ (.obsidian/.git/.claude 等の設定 dir、.DS_Store 等) は
+            // 個人知識ではないため再帰取り込みから除外する。
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(false)
+            })
             .collect();
         entries.sort();
         for entry in entries {
@@ -134,6 +142,32 @@ mod tests {
             "ingest した chunk が検索できるべき"
         );
         let _ = std::fs::remove_file(&fpath);
+    }
+
+    #[test]
+    fn t_ingest_skips_hidden_dirs() {
+        // 隠しディレクトリ (.obsidian/.git/.claude 等の設定 dir) は再帰取り込みしない。
+        let store = MemoryStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "bonsai_ingest_hidden_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+        std::fs::write(base.join("visible.md"), "visible knowledge").unwrap();
+        std::fs::write(base.join(".hidden").join("config.md"), "hidden config noise").unwrap();
+
+        let n = ingest_path(&store, &base).unwrap();
+        assert_eq!(n, 1, "隠しdir内は取り込まず visible.md の 1 件のみ");
+        assert!(
+            store.search_memories("config", 5).unwrap().is_empty(),
+            "隠しdir内の content は保存されないべき"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
