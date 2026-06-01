@@ -74,20 +74,13 @@ fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
         .to_string();
     let chunks = chunk_text(&content);
 
-    // purge + add を 1 トランザクションで原子的に行う。途中エラー時は ROLLBACK し、
-    // 「旧 chunk 削除済・新 chunk 未保存」の部分状態によるデータ損失を防ぐ
-    // (ecc review HIGH)。
-    store.conn().execute_batch("BEGIN")?;
-    match sync_file_chunks(store, &filename, &chunks) {
-        Ok(saved) => {
-            store.conn().execute_batch("COMMIT")?;
-            Ok(saved)
-        }
-        Err(e) => {
-            let _ = store.conn().execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
+    // purge + add を RAII トランザクションで原子化。`?` による早期 return や panic 時は
+    // `Transaction` の drop で自動 ROLLBACK され、「旧 chunk 削除済・新 chunk 未保存」の
+    // 部分状態によるデータ損失を防ぐ (ecc review HIGH、unchecked_transaction で &self のまま)。
+    let tx = store.conn().unchecked_transaction()?;
+    let saved = sync_file_chunks(store, &filename, &chunks)?;
+    tx.commit()?;
+    Ok(saved)
 }
 
 /// 当該 filename の既存 ingest chunk を現ファイル段落と突き合わせ purge/add する。
@@ -214,28 +207,18 @@ pub fn purge_orphans(
     if orphan_tags.is_empty() {
         return Ok(0);
     }
-    // 削除を 1 トランザクションで原子化 (memories_ad トリガで FTS も同期削除)。
-    store.conn().execute_batch("BEGIN")?;
-    let result = (|| -> Result<usize> {
-        let mut purged = 0;
-        for tag_json in &orphan_tags {
-            purged += store.conn().execute(
-                "DELETE FROM memories WHERE category = 'ingest' AND tags = ?1",
-                rusqlite::params![tag_json],
-            )?;
-        }
-        Ok(purged)
-    })();
-    match result {
-        Ok(purged) => {
-            store.conn().execute_batch("COMMIT")?;
-            Ok(purged)
-        }
-        Err(e) => {
-            let _ = store.conn().execute_batch("ROLLBACK");
-            Err(e)
-        }
+    // 削除を RAII トランザクションで原子化 (memories_ad トリガで FTS も同期削除)。
+    // 途中の `?` 早期 return / panic では Transaction drop で自動 ROLLBACK。
+    let tx = store.conn().unchecked_transaction()?;
+    let mut purged = 0;
+    for tag_json in &orphan_tags {
+        purged += store.conn().execute(
+            "DELETE FROM memories WHERE category = 'ingest' AND tags = ?1",
+            rusqlite::params![tag_json],
+        )?;
     }
+    tx.commit()?;
+    Ok(purged)
 }
 
 /// root を走査して現存ファイル集合を作り、削除済ファイルの孤児 ingest chunk を purge する。
