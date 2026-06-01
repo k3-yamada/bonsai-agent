@@ -65,20 +65,41 @@ pub fn ingest_path(store: &MemoryStore, path: &Path) -> Result<usize> {
 /// FTS index も同期削除される。
 fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
     let content = std::fs::read_to_string(path)?;
+    // ファイル名は per-file sync のキー。取得不能 (非 UTF-8 等) なら全ファイルが
+    // 同一タグに退化し他ファイルを誤 purge し得るため bail する (ecc review MEDIUM)。
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
+        .ok_or_else(|| anyhow::anyhow!("ingest: ファイル名を取得できません: {}", path.display()))?
         .to_string();
     let chunks = chunk_text(&content);
-    let current: std::collections::HashSet<&str> = chunks.iter().map(String::as_str).collect();
 
-    // 当該 filename タグを持つ既存 ingest chunk (id, content)。
-    let existing = existing_ingest_chunks(store, &filename)?;
-    let existing_contents: std::collections::HashSet<&str> =
-        existing.iter().map(|(_, c)| c.as_str()).collect();
+    // purge + add を 1 トランザクションで原子的に行う。途中エラー時は ROLLBACK し、
+    // 「旧 chunk 削除済・新 chunk 未保存」の部分状態によるデータ損失を防ぐ
+    // (ecc review HIGH)。
+    store.conn().execute_batch("BEGIN")?;
+    match sync_file_chunks(store, &filename, &chunks) {
+        Ok(saved) => {
+            store.conn().execute_batch("COMMIT")?;
+            Ok(saved)
+        }
+        Err(e) => {
+            let _ = store.conn().execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
 
-    // (a) purge: 現ファイルに存在しない既存 chunk を削除する。
+/// 当該 filename の既存 ingest chunk を現ファイル段落と突き合わせ purge/add する。
+/// 返り値は新規保存した chunk 数。呼出側 (`ingest_file`) のトランザクション内で実行される。
+fn sync_file_chunks(store: &MemoryStore, filename: &str, chunks: &[String]) -> Result<usize> {
+    use std::collections::HashSet;
+    let current: HashSet<&str> = chunks.iter().map(String::as_str).collect();
+
+    let existing = existing_ingest_chunks(store, filename)?;
+    let existing_contents: HashSet<&str> = existing.iter().map(|(_, c)| c.as_str()).collect();
+
+    // (a) purge: 現ファイルに存在しない既存 chunk を削除 (memories_ad トリガで FTS も同期)。
     for (id, c) in &existing {
         if !current.contains(c.as_str()) {
             store
@@ -86,11 +107,12 @@ fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
                 .execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![id])?;
         }
     }
-    // (b) add: 既存に無い現 chunk のみ保存する ((c) 不変 chunk は再保存しない = 冪等)。
+    // (b) add: 既存に無い現 chunk のみ保存 ((c) 不変 chunk は再保存しない = 冪等)。
+    let tags = [filename.to_string()];
     let mut saved = 0;
-    for chunk in &chunks {
+    for chunk in chunks {
         if !existing_contents.contains(chunk.as_str()) {
-            store.save_memory(chunk, "ingest", std::slice::from_ref(&filename))?;
+            store.save_memory(chunk, "ingest", &tags)?;
             saved += 1;
         }
     }
@@ -98,26 +120,21 @@ fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
 }
 
 /// 指定 filename タグを持つ category='ingest' の既存 chunk (id, content) を返す。
-/// tags は JSON 配列文字列 (例 `["notes.md"]`) のため `"filename"` で部分一致する。
-/// filename 中の LIKE メタ文字 (`%` `_` `\`) は ESCAPE で無効化し、`a_.md` が
-/// `a1.md` 等を誤マッチして他ファイルの chunk を purge するのを防ぐ。
+/// tags は `save_memory` が `serde_json::to_string(&[filename])` で直列化した
+/// JSON 配列文字列 (例 `["notes.md"]`)。同じ直列化で expected tag を再構築し
+/// **完全一致** (`tags = ?`) で照合することで、LIKE substring の wildcard/JSON
+/// アンカー破綻 (filename 中の `_`/`%`/`"` 等による他ファイル誤マッチ) を排除する
+/// (ecc review CRITICAL)。
 fn existing_ingest_chunks(store: &MemoryStore, filename: &str) -> Result<Vec<(i64, String)>> {
-    let escaped = filename
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    let pat = format!("%\"{escaped}\"%");
-    let mut stmt = store.conn().prepare(
-        "SELECT id, content FROM memories WHERE category = 'ingest' AND tags LIKE ?1 ESCAPE '\\'",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![pat], |row| {
+    let tag_json = serde_json::to_string(&[filename])?;
+    let mut stmt = store
+        .conn()
+        .prepare("SELECT id, content FROM memories WHERE category = 'ingest' AND tags = ?1")?;
+    let rows = stmt.query_map(rusqlite::params![tag_json], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
     })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 fn has_ingest_extension(path: &Path) -> bool {
@@ -293,6 +310,53 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a1.md の chunk は wildcard 誤マッチで purge されないべき"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t_ingest_filename_with_quote_exact_match() {
+        // filename に `"` を含んでも自身の chunk のみ同期する (exact JSON tag match)。
+        // LIKE substring match では JSON アンカー (") が壊れ他ファイルを誤 purge し得る
+        // (ecc review CRITICAL)。exact match なら serde の quote escape が両側で整合。
+        let store = MemoryStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "bonsai_ingest_quote_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("normal.md"), "normal file content").unwrap();
+        std::fs::write(base.join("q\"x.md"), "quote file original").unwrap();
+        assert_eq!(ingest_path(&store, &base).unwrap(), 2, "2 ファイル取り込み");
+
+        // quote ファイルのみ編集して再 ingest。
+        std::fs::write(base.join("q\"x.md"), "quote file edited").unwrap();
+        ingest_path(&store, &base.join("q\"x.md")).unwrap();
+        assert!(
+            !store
+                .search_memories("normal file content", 5)
+                .unwrap()
+                .is_empty(),
+            "他ファイル (normal.md) の chunk は維持されるべき"
+        );
+        assert!(
+            store
+                .search_memories("quote file original", 5)
+                .unwrap()
+                .is_empty(),
+            "編集前の chunk は purge されるべき"
+        );
+        assert!(
+            !store
+                .search_memories("quote file edited", 5)
+                .unwrap()
+                .is_empty(),
+            "編集後の chunk は想起できるべき"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
