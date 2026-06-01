@@ -264,4 +264,70 @@ mod tests {
         assert!(hit_lines <= 2, "limit=2 を超過: {}", r.output);
         let _ = std::fs::remove_file(&path);
     }
+
+    // ---------- Phase 3 Red: 関連度ランキング (token overlap scoring) ----------
+
+    #[test]
+    fn t_recall_ranks_multi_token_higher() {
+        // 2 token 一致が 1 token 一致より上位に来るべき。
+        // 現状: LIKE %apple banana% は literal 一致しないため空 → Red 確証。
+        let path = temp_db_path();
+        let r = RememberTool::new(&path);
+        r.call(serde_json::json!({"content": "apple only"})).unwrap();
+        r.call(serde_json::json!({"content": "apple and banana together"}))
+            .unwrap();
+        r.call(serde_json::json!({"content": "banana only"})).unwrap();
+        let recall = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "apple banana", "limit": 10}))
+            .expect("recall 成功");
+        let out = &recall.output;
+        let pos_both = out.find("apple and banana together").unwrap_or(usize::MAX);
+        let pos_apple = out.find("apple only").unwrap_or(usize::MAX);
+        let pos_banana = out.find("banana only").unwrap_or(usize::MAX);
+        assert!(
+            pos_both < pos_apple && pos_both < pos_banana,
+            "2-token 一致が先頭に来るべき: {out}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t_recall_multi_token_cjk_ranking() {
+        // CJK 多 token クエリでも overlap で ranking されるべき (日本語実利用)。
+        let path = temp_db_path();
+        let r = RememberTool::new(&path);
+        r.call(serde_json::json!({"content": "金曜日は会議"})).unwrap();
+        r.call(serde_json::json!({"content": "金曜日に締切がある会議"}))
+            .unwrap();
+        r.call(serde_json::json!({"content": "土曜日に予定"})).unwrap();
+        let recall = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "金曜 締切", "limit": 10}))
+            .expect("recall 成功");
+        let out = &recall.output;
+        let pos_both = out.find("金曜日に締切がある会議").unwrap_or(usize::MAX);
+        let pos_one = out.find("金曜日は会議").unwrap_or(usize::MAX);
+        assert!(
+            pos_both < pos_one,
+            "CJK 2-token 一致が先頭に来るべき: {out}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t_recall_cjk_single_token_preserved() {
+        // 単一 token (CJK 部分一致) は後方互換: 従来の LIKE %query% と同等にヒット。
+        let path = temp_db_path();
+        RememberTool::new(&path)
+            .call(serde_json::json!({"content": "今週の予定は会議"}))
+            .unwrap();
+        let r = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "予定"}))
+            .expect("recall 成功");
+        assert!(
+            r.output.contains("今週の予定は会議"),
+            "単一 CJK token 部分一致が動くべき: {}",
+            r.output
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 }
