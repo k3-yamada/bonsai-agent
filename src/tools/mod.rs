@@ -71,6 +71,8 @@ pub enum TaskType {
     CodeExecution,
     /// リサーチ: web_search, web_fetch, arxiv_search
     Research,
+    /// 記憶操作: remember, recall (①パーソナル知識デーモン)
+    Memory,
     /// 全ツール使用可能（フィルタなし）
     General,
 }
@@ -140,6 +142,7 @@ impl TaskType {
             TaskType::FileOperation => Some(&["file_read", "file_write", "multi_edit", "repo_map"]),
             TaskType::CodeExecution => Some(&["shell", "git"]),
             TaskType::Research => Some(&["web_search", "web_fetch", "arxiv_search"]),
+            TaskType::Memory => None, // Red stub: Green で [remember, recall] に
             TaskType::General => None,
         }
     }
@@ -995,6 +998,36 @@ mod tests {
     fn test_detect_task_type_general() {
         assert_eq!(detect_task_type("天気を教えて"), TaskType::General);
         assert_eq!(detect_task_type("こんにちは"), TaskType::General);
+    }
+
+    #[test]
+    fn test_detect_task_type_memory() {
+        assert_eq!(detect_task_type("これを覚えておいて"), TaskType::Memory);
+        assert_eq!(
+            detect_task_type("さっきの内容を思い出して"),
+            TaskType::Memory
+        );
+        assert_eq!(detect_task_type("私の好みを記憶して"), TaskType::Memory);
+        assert_eq!(detect_task_type("remember this fact"), TaskType::Memory);
+        assert_eq!(detect_task_type("recall my preferences"), TaskType::Memory);
+    }
+
+    #[test]
+    fn test_memory_intent_beats_file_keyword() {
+        // 「書いた内容を覚えて」は書(File)を含むが記憶意図が優先されるべき
+        assert_eq!(
+            detect_task_type("さっき書いた内容を覚えておいて"),
+            TaskType::Memory
+        );
+    }
+
+    #[test]
+    fn test_memory_allowed_prefixes() {
+        assert_eq!(
+            TaskType::Memory.allowed_prefixes(),
+            Some(&["remember", "recall"][..]),
+            "Memory タスクは remember/recall のみ提示すべき"
+        );
     }
 
     #[test]

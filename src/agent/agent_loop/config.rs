@@ -63,8 +63,8 @@ impl Default for AgentConfig {
 pub fn inference_for_task(task_type: TaskType, base: &InferenceParams) -> InferenceParams {
     let mut params = base.clone();
     match task_type {
-        TaskType::FileOperation | TaskType::CodeExecution => {
-            params.temperature = 0.3; // 精密操作
+        TaskType::FileOperation | TaskType::CodeExecution | TaskType::Memory => {
+            params.temperature = 0.3; // 精密操作(記憶の保存/想起も構造化呼び出しで低温)
         }
         TaskType::Research => {
             params.temperature = 0.6; // 探索的
