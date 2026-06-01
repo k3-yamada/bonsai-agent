@@ -244,15 +244,21 @@ fn recall_scored(
             row.get::<_, String>(3)?,
         ))
     })?;
+    // token を小文字化して保持 (SQL LIKE の ASCII 大小無視と scoring を整合させる)。
+    // CJK の to_lowercase は no-op のため CJK 一致挙動は不変。
+    let tokens_lc: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
     let mut scored: Vec<(i64, f64, String, String)> = Vec::new();
     for row in rows {
         let (id, category, content, tags) = row?;
+        // 行ごとに content/tags を 1 度だけ小文字化して case-insensitive 比較する。
+        let content_lc = content.to_lowercase();
+        let tags_lc = tags.to_lowercase();
         // idf 重みは常に有限・正値 (compute_idf_weights 参照)。一致 token が無ければ
         // sum() == 0.0 となり下の guard で除外される (NaN は発生しない)。
-        let score: f64 = tokens
+        let score: f64 = tokens_lc
             .iter()
             .zip(idf.iter())
-            .filter(|(t, _)| content.contains(t.as_str()) || tags.contains(t.as_str()))
+            .filter(|(t, _)| content_lc.contains(t.as_str()) || tags_lc.contains(t.as_str()))
             .map(|(_, w)| *w)
             .sum();
         if score > 0.0 {
