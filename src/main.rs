@@ -263,9 +263,13 @@ fn main() -> Result<()> {
     if let Some(path) = &cli.ingest {
         let n = bonsai_agent::memory::ingest::ingest_path(&store, path)?;
         println!("ingest 完了: {n} chunk を保存しました ({})", path.display());
-        if cli.ingest_prune && path.is_dir() {
-            let purged = bonsai_agent::memory::ingest::reconcile_ingested_files(&store, path)?;
-            println!("prune 完了: 削除済ファイルの孤児 chunk {purged} 件を掃除しました");
+        if cli.ingest_prune {
+            if path.is_dir() {
+                let purged = bonsai_agent::memory::ingest::reconcile_ingested_files(&store, path)?;
+                println!("prune 完了: 削除済ファイルの孤児 chunk {purged} 件を掃除しました");
+            } else {
+                eprintln!("警告: --ingest-prune はディレクトリ取込時のみ有効です (スキップ)");
+            }
         }
         return Ok(());
     }

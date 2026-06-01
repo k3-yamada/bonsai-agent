@@ -174,6 +174,8 @@ fn collect_ingest_filenames_into(
         && has_ingest_extension(path)
         && let Some(name) = path.file_name().and_then(|n| n.to_str())
     {
+        // file 判定は `ingest_path` の file arm と対称 (隠しdir 除外 + 対象拡張子)。
+        // 片方を変更したら他方も意識的に揃えること (現存判定の不一致は誤 purge を招く)。
         set.insert(name.to_string());
     }
     Ok(())
@@ -238,6 +240,11 @@ pub fn purge_orphans(
 
 /// root を走査して現存ファイル集合を作り、削除済ファイルの孤児 ingest chunk を purge する。
 /// `ingest_file` の編集追従 (既存ファイルの段落 sync) を補完し、ファイル削除にも追従させる。
+///
+/// 注意: タグは basename のみで保持するため、別 subdir に同名ファイル
+/// (例 `2025/note.md` と `2026/note.md`) が存在すると 1 ファイル扱いになる。
+/// その場合、片方を削除しても basename が現存集合に残るため orphan 掃除は抑止される
+/// (安全側 = 誤削除しない方向の挙動)。
 pub fn reconcile_ingested_files(store: &MemoryStore, root: &Path) -> Result<usize> {
     let existing = collect_ingest_filenames(root)?;
     purge_orphans(store, &existing)
