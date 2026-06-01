@@ -115,24 +115,17 @@ impl TypedTool for RecallTool {
     }
 }
 
-/// クエリを whitespace で分割し、空 token を除去した検索 token 配列を返す。
+/// クエリを whitespace で分割し、重複・空 token を除去した検索 token 配列を返す。
 /// 単一 token (CJK 含む) のときは長さ 1 配列となり従来 LIKE 挙動と等価。
+/// 重複除去により同一語の連続入力 ("apple apple") がスコアを不当に増幅しない。
+/// 空/空白のみクエリは空配列を返し、呼出側 (`recall_scored`) で 0 件にフォールバックする。
 fn tokenize_recall_query(query: &str) -> Vec<String> {
-    let raw = query.trim();
-    if raw.is_empty() {
-        // 空クエリは元の単一 token (空文字) 1 件として扱い、呼出側で 0 件 fallback。
-        return vec![String::new()];
-    }
-    let parts: Vec<String> = raw
+    let mut seen = std::collections::HashSet::new();
+    query
         .split_whitespace()
-        .filter(|t| !t.is_empty())
+        .filter(|t| !t.is_empty() && seen.insert(*t))
         .map(|t| t.to_string())
-        .collect();
-    if parts.is_empty() {
-        vec![raw.to_string()]
-    } else {
-        parts
-    }
+        .collect()
 }
 
 /// per-token LIKE の OR で候補を集め、各候補の overlap (token 一致数) で
@@ -142,7 +135,7 @@ fn recall_scored(
     tokens: &[String],
     limit: usize,
 ) -> Result<Vec<(String, String)>> {
-    if tokens.is_empty() || tokens.iter().all(|t| t.is_empty()) {
+    if tokens.is_empty() {
         return Ok(Vec::new());
     }
     // OR 連結の where 句を動的生成 (パラメータは tokens の 2 倍 = content/tags 各 1)。
@@ -173,7 +166,7 @@ fn recall_scored(
         let (id, category, content, tags) = row?;
         let score = tokens
             .iter()
-            .filter(|t| !t.is_empty() && (content.contains(t.as_str()) || tags.contains(t.as_str())))
+            .filter(|t| content.contains(t.as_str()) || tags.contains(t.as_str()))
             .count();
         if score > 0 {
             scored.push((id, score, category, content));
@@ -339,10 +332,12 @@ mod tests {
         // 現状: LIKE %apple banana% は literal 一致しないため空 → Red 確証。
         let path = temp_db_path();
         let r = RememberTool::new(&path);
-        r.call(serde_json::json!({"content": "apple only"})).unwrap();
+        r.call(serde_json::json!({"content": "apple only"}))
+            .unwrap();
         r.call(serde_json::json!({"content": "apple and banana together"}))
             .unwrap();
-        r.call(serde_json::json!({"content": "banana only"})).unwrap();
+        r.call(serde_json::json!({"content": "banana only"}))
+            .unwrap();
         let recall = RecallTool::new(&path)
             .call(serde_json::json!({"query": "apple banana", "limit": 10}))
             .expect("recall 成功");
@@ -362,10 +357,12 @@ mod tests {
         // CJK 多 token クエリでも overlap で ranking されるべき (日本語実利用)。
         let path = temp_db_path();
         let r = RememberTool::new(&path);
-        r.call(serde_json::json!({"content": "金曜日は会議"})).unwrap();
+        r.call(serde_json::json!({"content": "金曜日は会議"}))
+            .unwrap();
         r.call(serde_json::json!({"content": "金曜日に締切がある会議"}))
             .unwrap();
-        r.call(serde_json::json!({"content": "土曜日に予定"})).unwrap();
+        r.call(serde_json::json!({"content": "土曜日に予定"}))
+            .unwrap();
         let recall = RecallTool::new(&path)
             .call(serde_json::json!({"query": "金曜 締切", "limit": 10}))
             .expect("recall 成功");
@@ -377,6 +374,18 @@ mod tests {
             "CJK 2-token 一致が先頭に来るべき: {out}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t_tokenize_recall_query_dedup() {
+        // 重複 token はスコア増幅を防ぐため除去される。
+        let toks = tokenize_recall_query("apple apple banana");
+        assert_eq!(toks.len(), 2, "重複除去後 2 token: {toks:?}");
+        assert!(toks.contains(&"apple".to_string()));
+        assert!(toks.contains(&"banana".to_string()));
+        // 空/空白のみクエリは空配列。
+        assert!(tokenize_recall_query("").is_empty());
+        assert!(tokenize_recall_query("   ").is_empty());
     }
 
     #[test]
