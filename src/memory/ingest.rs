@@ -198,6 +198,75 @@ mod tests {
     }
 
     #[test]
+    fn t_ingest_follows_edits_purges_stale() {
+        // ファイル編集後の再 ingest で旧 chunk を purge し新 chunk へ置換する (編集追従)。
+        // 旧実装は global content dedup のみで旧 chunk が残存 → Red。
+        let store = MemoryStore::in_memory().unwrap();
+        let dir = std::env::temp_dir();
+        let fpath = dir.join(format!(
+            "bonsai_ingest_edit_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&fpath, "keep para\n\nold para").unwrap();
+        assert_eq!(ingest_path(&store, &fpath).unwrap(), 2, "初回 2 段落");
+
+        // old para → new para に編集 (keep para は不変)。
+        std::fs::write(&fpath, "keep para\n\nnew para").unwrap();
+        let saved = ingest_path(&store, &fpath).unwrap();
+        assert_eq!(saved, 1, "新規は new para の 1 件のみ");
+        assert!(
+            store.search_memories("old para", 5).unwrap().is_empty(),
+            "旧 chunk は purge され想起されないべき"
+        );
+        assert!(
+            !store.search_memories("new para", 5).unwrap().is_empty(),
+            "新 chunk は想起できるべき"
+        );
+        assert!(
+            !store.search_memories("keep para", 5).unwrap().is_empty(),
+            "不変 chunk は維持されるべき"
+        );
+        assert_eq!(store.memory_count().unwrap(), 2, "総数は 2 (keep + new)");
+        let _ = std::fs::remove_file(&fpath);
+    }
+
+    #[test]
+    fn t_ingest_filename_like_wildcard_isolation() {
+        // filename の `_` が LIKE wildcard として誤マッチし他ファイルの chunk を
+        // purge しないこと (escape 検証)。a_.md 再 ingest が a1.md を巻き込まない。
+        let store = MemoryStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "bonsai_ingest_wild_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a1.md"), "file one content").unwrap();
+        std::fs::write(base.join("a_.md"), "file two content").unwrap();
+        assert_eq!(ingest_path(&store, &base).unwrap(), 2, "2 ファイル取り込み");
+
+        // a_.md のみ編集して再 ingest。
+        std::fs::write(base.join("a_.md"), "file two edited").unwrap();
+        ingest_path(&store, &base.join("a_.md")).unwrap();
+        assert!(
+            !store
+                .search_memories("file one content", 5)
+                .unwrap()
+                .is_empty(),
+            "a1.md の chunk は wildcard 誤マッチで purge されないべき"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn t_ingest_dir_recurses_target_files_only() {
         let store = MemoryStore::in_memory().unwrap();
         let base = std::env::temp_dir().join(format!("bonsai_ingest_dir_{}", std::process::id()));
