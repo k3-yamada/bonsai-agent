@@ -15,7 +15,7 @@ use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::validate::{Severity, validate_tool_call};
 use crate::tools::ToolResultCache;
-use crate::tools::detect_task_type;
+use crate::tools::{detect_task_type, memory_directive};
 
 use super::config::inference_for_task;
 use super::core::emit_event;
@@ -57,6 +57,18 @@ pub fn execute_step(
     // 2. タスク種別に応じた推論パラメータ導出
     let task_type = detect_task_type(last_user_msg);
     let task_params = inference_for_task(task_type, &ctx.config.base_inference);
+
+    // 2.5 記憶ターンは tool 自発発火を促す directive を注入 (Phase 1.5、CCG 案 C)。
+    // 1bit モデルは自然文記憶意図で tool を選ばず会話応答に流れるため、recency 効果を
+    // 狙い system message として注入。セッション内で重複注入しない。
+    if let Some(directive) = memory_directive(task_type)
+        && !session
+            .messages
+            .iter()
+            .any(|m| matches!(m.role, Role::System) && m.content == directive)
+    {
+        session.add_message(Message::system(directive));
+    }
 
     // 3. LLM呼び出し（ストリーミング対応、タスク別パラメータ）
     let in_think = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

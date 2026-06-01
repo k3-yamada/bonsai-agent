@@ -115,12 +115,19 @@ pub fn detect_task_type(query: &str) -> TaskType {
     let q = query.to_lowercase();
 
     // 記憶操作キーワード（File 等のキーワードより優先: 「書いた内容を覚えて」は記憶意図）
-    if q.contains("覚え")
-        || q.contains("記憶")
-        || q.contains("思い出")
-        || q.contains("メモ")
-        || q.contains("remember")
-        || q.contains("recall")
+    // ただし記憶キーワードを含むが記憶操作でない発話は除外 (CCG Gemini 指摘):
+    //   メモリ(RAM)/記憶領域・記憶容量(ストレージ)/思い出話(雑談)
+    let memory_false_positive = q.contains("メモリ")
+        || q.contains("記憶領域")
+        || q.contains("記憶容量")
+        || q.contains("思い出話");
+    if !memory_false_positive
+        && (q.contains("覚え")
+            || q.contains("記憶")
+            || q.contains("思い出")
+            || q.contains("メモ")
+            || q.contains("remember")
+            || q.contains("recall"))
     {
         return TaskType::Memory;
     }
@@ -143,6 +150,21 @@ pub fn detect_task_type(query: &str) -> TaskType {
     }
 
     TaskType::General
+}
+
+/// 記憶ターン (`TaskType::Memory`) で LLM に注入する per-turn directive。
+/// CCG 統合判断 (2026-06-01): 1bit モデルは自然文記憶意図で tool を自発選択せず
+/// 会話応答に流れる。実機 directive テストで「ツールを使え」と明示すると確実発火する
+/// ことを実証済 → 記憶意図検出時にこの指示を system message として注入する (案 C)。
+pub fn memory_directive(task_type: TaskType) -> Option<&'static str> {
+    match task_type {
+        TaskType::Memory => Some(
+            "ユーザーは記憶の保存または想起を求めています。会話文だけで答えず、必ず \
+             remember(事実・好みを保存) または recall(過去の記憶を検索) のいずれかを \
+             <tool_call> で呼んでください。保存すべき内容や検索語はユーザー発話から抽出します。",
+        ),
+        _ => None,
+    }
 }
 
 impl TaskType {
@@ -1041,6 +1063,39 @@ mod tests {
             detect_task_type("さっき書いた内容を覚えておいて"),
             TaskType::Memory
         );
+    }
+
+    #[test]
+    fn test_memory_false_positives_excluded() {
+        // 記憶キーワードを含むが記憶操作意図でない発話は Memory にしない
+        // (Gemini CCG 指摘: メモリ使用量/記憶領域/思い出話 等)
+        assert_ne!(
+            detect_task_type("メモリ使用量を教えて"),
+            TaskType::Memory,
+            "メモリ(RAM)使用量は記憶ツール対象でない"
+        );
+        assert_ne!(
+            detect_task_type("思い出話を聞かせて"),
+            TaskType::Memory,
+            "思い出話(雑談)は記憶ツール対象でない"
+        );
+        assert_ne!(
+            detect_task_type("記憶領域の空きを確認して"),
+            TaskType::Memory,
+            "記憶領域(ストレージ)は記憶ツール対象でない"
+        );
+    }
+
+    #[test]
+    fn test_memory_directive_only_for_memory() {
+        let d = memory_directive(TaskType::Memory).expect("Memory ターンは directive を持つ");
+        assert!(
+            d.contains("remember") && d.contains("recall"),
+            "両ツール言及"
+        );
+        assert!(memory_directive(TaskType::FileOperation).is_none());
+        assert!(memory_directive(TaskType::General).is_none());
+        assert!(memory_directive(TaskType::Research).is_none());
     }
 
     #[test]
