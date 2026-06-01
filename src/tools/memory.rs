@@ -105,14 +105,30 @@ impl TypedTool for RecallTool {
             });
         }
         let mut o = format!("{}件の記憶:\n", hits.len());
-        for (category, content) in &hits {
-            o.push_str(&format!("- [{category}] {content}\n"));
+        for (category, content, tags) in &hits {
+            // ingest chunk は出典ファイル名を併記し provenance を与える (ccg gemini 推奨)。
+            // 非 ingest (remember fact 等) の tag は topical ラベルのため出典化しない。
+            match (category.as_str(), source_filename(tags)) {
+                ("ingest", Some(src)) => {
+                    o.push_str(&format!("- [{category}] {content} (出典: {src})\n"))
+                }
+                _ => o.push_str(&format!("- [{category}] {content}\n")),
+            }
         }
         Ok(ToolResult {
             output: o,
             success: true,
         })
     }
+}
+
+/// tags (JSON 配列文字列、例 `["notes.md"]`) から出典ファイル名 = 先頭要素を取り出す。
+/// parse 不能/空配列なら None。ingest chunk の provenance 表示に用いる。
+fn source_filename(tags: &str) -> Option<String> {
+    serde_json::from_str::<Vec<String>>(tags)
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .filter(|s| !s.is_empty())
 }
 
 /// 文字を ASCII 英数字 / CJK / 区切り の 3 クラスに分類する。
@@ -214,7 +230,7 @@ fn recall_scored(
     conn: &rusqlite::Connection,
     tokens: &[String],
     limit: usize,
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<(String, String, String)>> {
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
@@ -247,7 +263,7 @@ fn recall_scored(
     // token を小文字化して保持 (SQL LIKE の ASCII 大小無視と scoring を整合させる)。
     // CJK の to_lowercase は no-op のため CJK 一致挙動は不変。
     let tokens_lc: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
-    let mut scored: Vec<(i64, f64, String, String)> = Vec::new();
+    let mut scored: Vec<(i64, f64, String, String, String)> = Vec::new();
     for row in rows {
         let (id, category, content, tags) = row?;
         // 行ごとに content/tags を 1 度だけ小文字化して case-insensitive 比較する。
@@ -262,7 +278,7 @@ fn recall_scored(
             .map(|(_, w)| *w)
             .sum();
         if score > 0.0 {
-            scored.push((id, score, category, content));
+            scored.push((id, score, category, content, tags));
         }
     }
     // (score desc, id desc) で安定ソート。score は f64 なので total_cmp。
@@ -270,7 +286,7 @@ fn recall_scored(
     scored.truncate(limit);
     Ok(scored
         .into_iter()
-        .map(|(_id, _score, cat, content)| (cat, content))
+        .map(|(_id, _score, cat, content, tags)| (cat, content, tags))
         .collect())
 }
 
