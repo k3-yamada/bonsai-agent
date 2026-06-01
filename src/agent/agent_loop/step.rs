@@ -58,16 +58,19 @@ pub fn execute_step(
     let task_type = detect_task_type(last_user_msg);
     let task_params = inference_for_task(task_type, &ctx.config.base_inference);
 
-    // 2.5 記憶ターンは tool 自発発火を促す directive を注入 (Phase 1.5、CCG 案 C)。
-    // 1bit モデルは自然文記憶意図で tool を選ばず会話応答に流れるため、recency 効果を
-    // 狙い system message として注入。セッション内で重複注入しない。
+    // 2.5 記憶ターンは tool 自発発火を促す directive を user 発話末尾に付加 (Phase 1.5、CCG)。
+    // system message 注入は backend が各 system message に tool schema 全文を追記して
+    // directive を希釈 + user の後ろに配置され 1bit が attend しにくく実機で不発だった。
+    // Gemini 案 suffix nudge: user turn 内に埋め込み強く attend させる。重複は部分一致で防止。
     if let Some(directive) = memory_directive(task_type)
-        && !session
+        && let Some(last_user) = session
             .messages
-            .iter()
-            .any(|m| matches!(m.role, Role::System) && m.content == directive)
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+        && !last_user.content.contains(directive)
     {
-        session.add_message(Message::system(directive));
+        last_user.content = format!("{}\n\n[指示] {directive}", last_user.content);
     }
 
     // 3. LLM呼び出し（ストリーミング対応、タスク別パラメータ）
