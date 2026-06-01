@@ -630,6 +630,49 @@ mod tests {
     }
 
     #[test]
+    fn t_recall_dedups_identical_content() {
+        // 同一 content の重複 hit は 1 件に集約される (ccg gemini dedup、limit 枠浪費防止)。
+        let path = temp_db_path();
+        let r = RememberTool::new(&path);
+        r.call(serde_json::json!({"content": "重複する知識ブロック", "category": "ingest", "tags": ["a.md"]}))
+            .unwrap();
+        r.call(serde_json::json!({"content": "重複する知識ブロック", "category": "ingest", "tags": ["b.md"]}))
+            .unwrap();
+        r.call(serde_json::json!({"content": "別の内容ブロック", "category": "ingest", "tags": ["c.md"]}))
+            .unwrap();
+        let recall = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "ブロック", "limit": 10}))
+            .expect("recall 成功");
+        let count = recall.output.matches("重複する知識ブロック").count();
+        assert_eq!(count, 1, "同一 content は 1 件に集約されるべき: {}", recall.output);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t_recall_snippets_long_content() {
+        // 長い content は match 周辺の snippet に短縮される (ccg gemini snippet)。
+        let path = temp_db_path();
+        let long = format!("{}キーワード{}", "あ".repeat(200), "い".repeat(200));
+        RememberTool::new(&path)
+            .call(serde_json::json!({"content": long, "category": "ingest", "tags": ["big.md"]}))
+            .unwrap();
+        let r = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "キーワード"}))
+            .expect("recall 成功");
+        assert!(
+            r.output.contains("キーワード"),
+            "snippet は match 語を含むべき: {}",
+            r.output
+        );
+        assert!(r.output.contains('…'), "短縮は省略記号で示すべき");
+        assert!(
+            !r.output.contains(&"あ".repeat(200)),
+            "全文ではなく snippet 化されるべき"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn t_recall_includes_source_provenance() {
         // ingest chunk の recall 出力に出典ファイル名が含まれる (provenance、ccg gemini 推奨)。
         // 旧出力は `- [category] content` のみで出典なし → Red。
