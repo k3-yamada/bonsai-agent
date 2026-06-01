@@ -144,6 +144,58 @@ fn has_ingest_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// root 配下に現存する ingest 対象ファイルの basename 集合を返す。
+/// `ingest_path` と同じ traversal ルール (隠しdir 再帰除外・対象拡張子のみ)。
+pub fn collect_ingest_filenames(root: &Path) -> Result<std::collections::HashSet<String>> {
+    let mut set = std::collections::HashSet::new();
+    collect_ingest_filenames_into(root, &mut set)?;
+    Ok(set)
+}
+
+fn collect_ingest_filenames_into(
+    path: &Path,
+    set: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    if path.is_dir() {
+        let mut entries: Vec<_> = std::fs::read_dir(path)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(false)
+            })
+            .collect();
+        entries.sort();
+        for entry in entries {
+            collect_ingest_filenames_into(&entry, set)?;
+        }
+    } else if path.is_file() && has_ingest_extension(path) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            set.insert(name.to_string());
+        }
+    }
+    Ok(())
+}
+
+/// `existing` に含まれない filename タグを持つ ingest chunk を全削除し削除数を返す。
+/// DB のみ操作 (filesystem 非依存でテスト容易)。purge は 1 トランザクションで原子化。
+/// tag は `["filename"]` 形式 (ingest_file が付与)。parse 不能/空タグは安全側で温存する。
+pub fn purge_orphans(
+    store: &MemoryStore,
+    existing: &std::collections::HashSet<String>,
+) -> Result<usize> {
+    let _ = (store, existing);
+    Ok(0) // stub (Red)
+}
+
+/// root を走査して現存ファイル集合を作り、削除済ファイルの孤児 ingest chunk を purge する。
+/// `ingest_file` の編集追従 (既存ファイルの段落 sync) を補完し、ファイル削除にも追従させる。
+pub fn reconcile_ingested_files(store: &MemoryStore, root: &Path) -> Result<usize> {
+    let existing = collect_ingest_filenames(root)?;
+    purge_orphans(store, &existing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,6 +409,71 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "編集後の chunk は想起できるべき"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn t_purge_orphans_removes_deleted_file_chunks() {
+        // existing に無い filename タグの ingest chunk のみ削除、非 ingest は温存 (DB のみ)。
+        let store = MemoryStore::in_memory().unwrap();
+        store
+            .save_memory("alpha body", "ingest", &["a.md".to_string()])
+            .unwrap();
+        store
+            .save_memory("beta body", "ingest", &["b.md".to_string()])
+            .unwrap();
+        store
+            .save_memory("manual fact", "fact", &["note".to_string()])
+            .unwrap();
+        let existing: std::collections::HashSet<String> =
+            ["a.md".to_string()].into_iter().collect();
+
+        let purged = purge_orphans(&store, &existing).unwrap();
+        assert_eq!(purged, 1, "孤児 b.md の 1 chunk のみ削除");
+        assert!(
+            !store.search_memories("alpha body", 5).unwrap().is_empty(),
+            "現存 a.md は温存"
+        );
+        assert!(
+            store.search_memories("beta body", 5).unwrap().is_empty(),
+            "孤児 b.md は purge"
+        );
+        assert!(
+            !store.search_memories("manual fact", 5).unwrap().is_empty(),
+            "非 ingest は温存"
+        );
+    }
+
+    #[test]
+    fn t_reconcile_purges_orphans_after_file_deletion() {
+        // ファイル削除後の reconcile で孤児 chunk を掃除する (編集追従の補完)。
+        let store = MemoryStore::in_memory().unwrap();
+        let base = std::env::temp_dir().join(format!(
+            "bonsai_reconcile_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("a.md"), "alpha body").unwrap();
+        std::fs::write(base.join("b.md"), "beta body").unwrap();
+        assert_eq!(ingest_path(&store, &base).unwrap(), 2, "2 ファイル取り込み");
+
+        // b.md をディスクから削除して reconcile。
+        std::fs::remove_file(base.join("b.md")).unwrap();
+        let purged = reconcile_ingested_files(&store, &base).unwrap();
+        assert_eq!(purged, 1, "削除された b.md の chunk を掃除");
+        assert!(
+            !store.search_memories("alpha body", 5).unwrap().is_empty(),
+            "現存 a.md は温存"
+        );
+        assert!(
+            store.search_memories("beta body", 5).unwrap().is_empty(),
+            "削除済 b.md は purge"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
