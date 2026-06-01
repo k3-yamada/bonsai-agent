@@ -114,6 +114,17 @@ impl ModelCapability {
 pub fn detect_task_type(query: &str) -> TaskType {
     let q = query.to_lowercase();
 
+    // 記憶操作キーワード（File 等のキーワードより優先: 「書いた内容を覚えて」は記憶意図）
+    if q.contains("覚え")
+        || q.contains("記憶")
+        || q.contains("思い出")
+        || q.contains("メモ")
+        || q.contains("remember")
+        || q.contains("recall")
+    {
+        return TaskType::Memory;
+    }
+
     // ファイル操作キーワード
     if q.contains("ファイル") || q.contains("読") || q.contains("書") || q.contains("編集")
     {
@@ -142,7 +153,7 @@ impl TaskType {
             TaskType::FileOperation => Some(&["file_read", "file_write", "multi_edit", "repo_map"]),
             TaskType::CodeExecution => Some(&["shell", "git"]),
             TaskType::Research => Some(&["web_search", "web_fetch", "arxiv_search"]),
-            TaskType::Memory => None, // Red stub: Green で [remember, recall] に
+            TaskType::Memory => Some(&["remember", "recall"]),
             TaskType::General => None,
         }
     }
