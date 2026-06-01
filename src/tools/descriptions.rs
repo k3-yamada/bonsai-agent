@@ -22,6 +22,10 @@ pub const REPO_MAP: &str = "コード構造を要約。";
 
 pub const ARXIV_SEARCH: &str = "arxiv論文を検索する。queryパラメータに検索クエリを指定。";
 
+pub const REMEMBER: &str = "ユーザーや会話に関する事実・好み・指示を長期記憶に保存する。contentに覚える内容、任意でcategory(分類)とtags(検索タグ)を指定。次回以降のセッションでも想起可能。";
+
+pub const RECALL: &str = "過去に保存した記憶を検索して想起する。queryに検索キーワード、任意でlimit(最大件数、既定5)を指定。";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,6 +42,8 @@ mod tests {
             WEB_FETCH,
             REPO_MAP,
             ARXIV_SEARCH,
+            REMEMBER,
+            RECALL,
         ];
         for desc in &all {
             assert!(!desc.is_empty(), "空の説明文が存在");
