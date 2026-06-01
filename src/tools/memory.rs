@@ -614,6 +614,50 @@ mod tests {
     }
 
     #[test]
+    fn t_recall_includes_source_provenance() {
+        // ingest chunk の recall 出力に出典ファイル名が含まれる (provenance、ccg gemini 推奨)。
+        // 旧出力は `- [category] content` のみで出典なし → Red。
+        let path = temp_db_path();
+        RememberTool::new(&path)
+            .call(serde_json::json!({
+                "content": "Rust の所有権は重要な概念",
+                "category": "ingest",
+                "tags": ["rust_guide.md"]
+            }))
+            .unwrap();
+        let r = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "所有権"}))
+            .expect("recall 成功");
+        assert!(
+            r.output.contains("rust_guide.md"),
+            "ingest chunk は出典ファイル名を表示すべき: {}",
+            r.output
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn t_recall_non_ingest_no_source_label() {
+        // ingest 以外 (remember fact 等) は出典ラベルを付けない (topical tag を誤って出典化しない)。
+        let path = temp_db_path();
+        RememberTool::new(&path)
+            .call(serde_json::json!({
+                "content": "締切は金曜日",
+                "tags": ["deadline"]
+            }))
+            .unwrap();
+        let r = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "締切"}))
+            .expect("recall 成功");
+        assert!(
+            !r.output.contains("出典"),
+            "非 ingest memory に出典ラベルを付けないべき: {}",
+            r.output
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn t_recall_ascii_case_insensitive() {
         // ASCII クエリは大小無視で想起する (SQL LIKE と scoring の整合、ecc finding)。
         // content 小文字 / query 大文字 → 旧 contains() は case-sensitive で
