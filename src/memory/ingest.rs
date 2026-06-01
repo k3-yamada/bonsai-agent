@@ -255,6 +255,18 @@ mod tests {
     }
 
     #[test]
+    fn t_chunk_text_handles_crlf() {
+        // Windows/同期 vault の CRLF 改行 (\r\n\r\n) も段落区切りとして分割する。
+        // 旧: split("\n\n") のみ → \r\n\r\n が非一致でファイル全体が 1 chunk 化 (Red)。
+        let chunks = chunk_text("first para\r\n\r\nsecond para\r\n\r\nthird para");
+        assert_eq!(
+            chunks,
+            vec!["first para", "second para", "third para"],
+            "CRLF 区切りで 3 chunk に分割すべき: {chunks:?}"
+        );
+    }
+
+    #[test]
     fn t_has_ingest_extension() {
         assert!(has_ingest_extension(Path::new("notes.md")));
         assert!(has_ingest_extension(Path::new("a.TXT")));
