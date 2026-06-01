@@ -170,10 +170,11 @@ fn collect_ingest_filenames_into(
         for entry in entries {
             collect_ingest_filenames_into(&entry, set)?;
         }
-    } else if path.is_file() && has_ingest_extension(path) {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            set.insert(name.to_string());
-        }
+    } else if path.is_file()
+        && has_ingest_extension(path)
+        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+    {
+        set.insert(name.to_string());
     }
     Ok(())
 }
@@ -185,8 +186,54 @@ pub fn purge_orphans(
     store: &MemoryStore,
     existing: &std::collections::HashSet<String>,
 ) -> Result<usize> {
-    let _ = (store, existing);
-    Ok(0) // stub (Red)
+    // 全 ingest chunk の distinct tag を取得し、現存 filename に無いものを削除対象に。
+    let orphan_tags: Vec<String> = {
+        let mut stmt = store
+            .conn()
+            .prepare("SELECT DISTINCT tags FROM memories WHERE category = 'ingest'")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut tags = Vec::new();
+        for r in rows {
+            let tag_json = r?;
+            // tag は ["filename"] 形式。parse 不能/空タグは安全側で温存 (削除しない)。
+            match serde_json::from_str::<Vec<String>>(&tag_json) {
+                Ok(arr) => {
+                    if let Some(fname) = arr.first()
+                        && !existing.contains(fname)
+                    {
+                        tags.push(tag_json);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        tags
+    };
+    if orphan_tags.is_empty() {
+        return Ok(0);
+    }
+    // 削除を 1 トランザクションで原子化 (memories_ad トリガで FTS も同期削除)。
+    store.conn().execute_batch("BEGIN")?;
+    let result = (|| -> Result<usize> {
+        let mut purged = 0;
+        for tag_json in &orphan_tags {
+            purged += store.conn().execute(
+                "DELETE FROM memories WHERE category = 'ingest' AND tags = ?1",
+                rusqlite::params![tag_json],
+            )?;
+        }
+        Ok(purged)
+    })();
+    match result {
+        Ok(purged) => {
+            store.conn().execute_batch("COMMIT")?;
+            Ok(purged)
+        }
+        Err(e) => {
+            let _ = store.conn().execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// root を走査して現存ファイル集合を作り、削除済ファイルの孤児 ingest chunk を purge する。

@@ -114,6 +114,10 @@ struct Cli {
     /// ファイル/ディレクトリ(.md/.txt)を memory に取り込む（①知識デーモン Phase 2）
     #[arg(long, value_name = "PATH")]
     ingest: Option<std::path::PathBuf>,
+
+    /// --ingest と併用: 取込後、対象 dir から削除されたファイルの孤児 chunk を掃除する
+    #[arg(long)]
+    ingest_prune: bool,
 }
 
 /// 共有コンテキスト（各モードハンドラに渡す）
@@ -259,6 +263,10 @@ fn main() -> Result<()> {
     if let Some(path) = &cli.ingest {
         let n = bonsai_agent::memory::ingest::ingest_path(&store, path)?;
         println!("ingest 完了: {n} chunk を保存しました ({})", path.display());
+        if cli.ingest_prune && path.is_dir() {
+            let purged = bonsai_agent::memory::ingest::reconcile_ingested_files(&store, path)?;
+            println!("prune 完了: 削除済ファイルの孤児 chunk {purged} 件を掃除しました");
+        }
         return Ok(());
     }
     if cli.skills_export {
