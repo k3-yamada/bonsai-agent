@@ -159,7 +159,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join(".hidden")).unwrap();
         std::fs::write(base.join("visible.md"), "visible knowledge").unwrap();
-        std::fs::write(base.join(".hidden").join("config.md"), "hidden config noise").unwrap();
+        std::fs::write(
+            base.join(".hidden").join("config.md"),
+            "hidden config noise",
+        )
+        .unwrap();
 
         let n = ingest_path(&store, &base).unwrap();
         assert_eq!(n, 1, "隠しdir内は取り込まず visible.md の 1 件のみ");

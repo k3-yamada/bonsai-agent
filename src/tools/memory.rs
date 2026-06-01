@@ -171,6 +171,8 @@ fn recall_scored(
     let mut scored: Vec<(i64, f64, String, String)> = Vec::new();
     for row in rows {
         let (id, category, content, tags) = row?;
+        // idf 重みは常に有限・正値 (compute_idf_weights 参照)。一致 token が無ければ
+        // sum() == 0.0 となり下の guard で除外される (NaN は発生しない)。
         let score: f64 = tokens
             .iter()
             .zip(idf.iter())
@@ -425,14 +427,16 @@ mod tests {
         let path = temp_db_path();
         let r = RememberTool::new(&path);
         // id=1: rareword 保有 (df=1、最古)
-        r.call(serde_json::json!({"content": "rareword beta"})).unwrap();
+        r.call(serde_json::json!({"content": "rareword beta"}))
+            .unwrap();
         // id=2..=6: common を 5 件 (df を押し上げる)
         for i in 0..5 {
             r.call(serde_json::json!({"content": format!("common filler {i}")}))
                 .unwrap();
         }
         // id=7: common 保有 (最新 = id desc なら raw 同点で先頭)
-        r.call(serde_json::json!({"content": "common gamma"})).unwrap();
+        r.call(serde_json::json!({"content": "common gamma"}))
+            .unwrap();
 
         let recall = RecallTool::new(&path)
             .call(serde_json::json!({"query": "common rareword", "limit": 3}))
