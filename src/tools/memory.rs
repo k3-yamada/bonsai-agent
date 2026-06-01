@@ -128,8 +128,12 @@ fn tokenize_recall_query(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// per-token LIKE の OR で候補を集め、各候補の overlap (token 一致数) で
+/// per-token LIKE の OR で候補を集め、各候補を **IDF 重み付き overlap** で
 /// 降順ソート、同点は id desc (recency) で安定化する。
+///
+/// raw count (一致 token 数) では `使い方` 等の頻出汎用語が低関連 chunk を引き上げる
+/// ノイズが出る (実 vault 9079 chunk で観測)。各 token の希少度 (IDF = ln((N+1)/(df+1))+1)
+/// で重み付けし、稀な語の一致を高評価することで関連度を改善する。
 fn recall_scored(
     conn: &rusqlite::Connection,
     tokens: &[String],
@@ -138,6 +142,9 @@ fn recall_scored(
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
+    // 各 token の IDF 重みを事前計算 (corpus 全体の df を基準)。
+    let idf = compute_idf_weights(conn, tokens)?;
+
     // OR 連結の where 句を動的生成 (パラメータは tokens の 2 倍 = content/tags 各 1)。
     let conditions: Vec<&str> = (0..tokens.len())
         .map(|_| "content LIKE ? OR tags LIKE ?")
@@ -161,24 +168,46 @@ fn recall_scored(
             row.get::<_, String>(3)?,
         ))
     })?;
-    let mut scored: Vec<(i64, usize, String, String)> = Vec::new();
+    let mut scored: Vec<(i64, f64, String, String)> = Vec::new();
     for row in rows {
         let (id, category, content, tags) = row?;
-        let score = tokens
+        let score: f64 = tokens
             .iter()
-            .filter(|t| content.contains(t.as_str()) || tags.contains(t.as_str()))
-            .count();
-        if score > 0 {
+            .zip(idf.iter())
+            .filter(|(t, _)| content.contains(t.as_str()) || tags.contains(t.as_str()))
+            .map(|(_, w)| *w)
+            .sum();
+        if score > 0.0 {
             scored.push((id, score, category, content));
         }
     }
-    // (score desc, id desc) で安定ソート。
-    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    // (score desc, id desc) で安定ソート。score は f64 なので total_cmp。
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
     scored.truncate(limit);
     Ok(scored
         .into_iter()
         .map(|(_id, _score, cat, content)| (cat, content))
         .collect())
+}
+
+/// 各 token の IDF 重み `ln((N+1)/(df+1)) + 1.0` を返す (token と同順)。
+/// N = memories 総数、df = その token を content/tags に含む memory 数。
+/// 平滑化 (+1) により df=0 や N=0 でも有限・正値を保つ。頻出語ほど重みが小さくなる。
+fn compute_idf_weights(conn: &rusqlite::Connection, tokens: &[String]) -> Result<Vec<f64>> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+    let n = n as f64;
+    let mut weights = Vec::with_capacity(tokens.len());
+    for t in tokens {
+        let pat = format!("%{t}%");
+        let df: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE content LIKE ?1 OR tags LIKE ?1",
+            rusqlite::params![pat],
+            |row| row.get(0),
+        )?;
+        let idf = ((n + 1.0) / (df as f64 + 1.0)).ln() + 1.0;
+        weights.push(idf);
+    }
+    Ok(weights)
 }
 
 #[cfg(test)]
@@ -386,6 +415,36 @@ mod tests {
         // 空/空白のみクエリは空配列。
         assert!(tokenize_recall_query("").is_empty());
         assert!(tokenize_recall_query("   ").is_empty());
+    }
+
+    #[test]
+    fn t_recall_idf_ranks_rare_token_higher() {
+        // IDF 重み付け: 稀な語の一致を頻出語の一致より高評価する。
+        // raw count では全候補 score=1 で同点 → id desc tiebreak で common 側 (後挿入) が上位になる。
+        // IDF では rareword (df=1) >> common (df=6) のため rareword 保有 chunk が上位に来るべき。
+        let path = temp_db_path();
+        let r = RememberTool::new(&path);
+        // id=1: rareword 保有 (df=1、最古)
+        r.call(serde_json::json!({"content": "rareword beta"})).unwrap();
+        // id=2..=6: common を 5 件 (df を押し上げる)
+        for i in 0..5 {
+            r.call(serde_json::json!({"content": format!("common filler {i}")}))
+                .unwrap();
+        }
+        // id=7: common 保有 (最新 = id desc なら raw 同点で先頭)
+        r.call(serde_json::json!({"content": "common gamma"})).unwrap();
+
+        let recall = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "common rareword", "limit": 3}))
+            .expect("recall 成功");
+        let out = &recall.output;
+        let pos_rare = out.find("rareword beta").unwrap_or(usize::MAX);
+        let pos_common = out.find("common gamma").unwrap_or(usize::MAX);
+        assert!(
+            pos_rare < pos_common,
+            "稀な語 rareword 保有 chunk が頻出語 common chunk より上位に来るべき (IDF): {out}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
