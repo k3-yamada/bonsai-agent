@@ -47,8 +47,15 @@ impl TypedTool for RememberTool {
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = false;
 
-    fn execute(&self, _args: RememberArgs) -> Result<ToolResult> {
-        anyhow::bail!("unimplemented: RememberTool::execute")
+    fn execute(&self, args: RememberArgs) -> Result<ToolResult> {
+        let store = crate::memory::store::MemoryStore::open(&self.db_path)?;
+        let category = args.category.as_deref().unwrap_or("fact");
+        let tags = args.tags.unwrap_or_default();
+        let id = store.save_memory(&args.content, category, &tags)?;
+        Ok(ToolResult {
+            output: format!("記憶を保存しました (id={id}, category={category})"),
+            success: true,
+        })
     }
 }
 
@@ -81,8 +88,43 @@ impl TypedTool for RecallTool {
     const PERMISSION: Permission = Permission::Auto;
     const READ_ONLY: bool = true;
 
-    fn execute(&self, _args: RecallArgs) -> Result<ToolResult> {
-        anyhow::bail!("unimplemented: RecallTool::execute")
+    fn execute(&self, args: RecallArgs) -> Result<ToolResult> {
+        let store = crate::memory::store::MemoryStore::open(&self.db_path)?;
+        let limit = args.limit.unwrap_or(5);
+        // FTS5(unicode61)は日本語の部分一致を tokenize できない(空白区切り前提で
+        // 連続CJKを1トークン化する)ため、言語非依存の LIKE 部分一致で想起する。
+        // 個人用途では memories 件数が小さくフルスキャンを許容。FTS5/hybrid による
+        // 関連度ランキングは後続フェーズ。
+        let pattern = format!("%{}%", args.query);
+        let conn = store.conn();
+        let mut stmt = conn.prepare(
+            "SELECT category, content
+             FROM memories
+             WHERE content LIKE ?1 OR tags LIKE ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pattern, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            hits.push(row?);
+        }
+        if hits.is_empty() {
+            return Ok(ToolResult {
+                output: format!("「{}」に該当する記憶なし", args.query),
+                success: true,
+            });
+        }
+        let mut o = format!("{}件の記憶:\n", hits.len());
+        for (category, content) in &hits {
+            o.push_str(&format!("- [{category}] {content}\n"));
+        }
+        Ok(ToolResult {
+            output: o,
+            success: true,
+        })
     }
 }
 

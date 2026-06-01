@@ -19,6 +19,7 @@ use bonsai_agent::tools::ToolRegistry;
 use bonsai_agent::tools::arxiv::ArxivTool;
 use bonsai_agent::tools::file::{FileReadTool, FileWriteTool, MultiEditTool};
 use bonsai_agent::tools::git::GitTool;
+use bonsai_agent::tools::memory::{RecallTool, RememberTool};
 use bonsai_agent::tools::repomap::RepoMapTool;
 use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
@@ -435,6 +436,9 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
     tools.register(Box::new(WebFetchTool));
     tools.register(Box::new(ArxivTool));
     tools.register(Box::new(RepoMapTool));
+    // 能動的記憶ツール (①パーソナル知識デーモン Phase 1)
+    tools.register(Box::new(RememberTool::new(get_db_path())));
+    tools.register(Box::new(RecallTool::new(get_db_path())));
 
     // MCPサーバー起動・ツール登録
     for server_cfg in &app_config.mcp.servers {
