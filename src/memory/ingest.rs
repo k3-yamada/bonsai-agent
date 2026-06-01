@@ -13,8 +13,11 @@ const INGEST_EXTENSIONS: &[&str] = &["md", "txt", "markdown", "text"];
 
 /// テキストを段落 (空行区切り) 単位の chunk に分割する。
 /// 各 chunk は trim され、空 chunk は除外される。
+/// CRLF (Windows/同期 vault) は LF に正規化してから分割する。正規化しないと
+/// `\r\n\r\n` が `"\n\n"` に一致せず、ファイル全体が 1 巨大 chunk 化して recall 品質が落ちる。
 pub fn chunk_text(content: &str) -> Vec<String> {
     content
+        .replace("\r\n", "\n")
         .split("\n\n")
         .map(|p| p.trim())
         .filter(|p| !p.is_empty())
