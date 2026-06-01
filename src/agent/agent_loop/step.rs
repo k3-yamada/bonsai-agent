@@ -68,8 +68,10 @@ pub fn execute_step(
     let llm_messages: &[Message] = match memory_directive(task_type) {
         Some(directive) => {
             let mut cloned = session.messages.clone();
-            if let Some(last_user) =
-                cloned.iter_mut().rev().find(|m| matches!(m.role, Role::User))
+            if let Some(last_user) = cloned
+                .iter_mut()
+                .rev()
+                .find(|m| matches!(m.role, Role::User))
             {
                 last_user.content = format!("{}\n\n[指示] {directive}", last_user.content);
             }

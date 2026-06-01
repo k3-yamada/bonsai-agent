@@ -966,16 +966,16 @@ const SMOKE_TASK_IDS: &[&str] = &[
     // 項目 261 T6 案 A Phase 4 wiring follow-up (2026-05-22): SMOKE_TASK_IDS 先頭に T6 5 task 追加。
     // BONSAI_LAB_SMOKE=1 + BONSAI_LAB_TASK_LIMIT=5 で T6 のみ smoke を可能化、
     // BONSAI_T6_PROMPT_AUGMENT=1 の G-T6-1/G-T6-2 paired 計測 hook 点。
-    "lh_plan_refactor_5files",         // T6 LongHorizonPlanning: RepoMap → file_read × 3+ → リファクタ計画
-    "lh_test_red_green",               // T6: benchmark.rs 読取 → test 2 件提案
-    "lh_dependency_chain",             // T6: mod.rs 読取 → 各 module file_read → 依存グラフ
-    "lh_plan_then_revise",             // T6: Cargo.toml 読取 → 計画 → リスク改訂
-    "lh_multi_modal_audit",            // T6: shell(git log) + ファイル数 + Cargo.toml
-    "file_read_simple",                // ToolUse: 単純ファイル読み取り
-    "multi_step_write_read",           // MultiStep: 書込→読込
-    "error_recovery",                  // ErrorRecovery: エラー後の代替試行
-    "tool_selection_git",              // ToolSelection: 適切なツール選択
-    "code_gen_fizzbuzz",               // CodeGeneration: コード生成
+    "lh_plan_refactor_5files", // T6 LongHorizonPlanning: RepoMap → file_read × 3+ → リファクタ計画
+    "lh_test_red_green",       // T6: benchmark.rs 読取 → test 2 件提案
+    "lh_dependency_chain",     // T6: mod.rs 読取 → 各 module file_read → 依存グラフ
+    "lh_plan_then_revise",     // T6: Cargo.toml 読取 → 計画 → リスク改訂
+    "lh_multi_modal_audit",    // T6: shell(git log) + ファイル数 + Cargo.toml
+    "file_read_simple",        // ToolUse: 単純ファイル読み取り
+    "multi_step_write_read",   // MultiStep: 書込→読込
+    "error_recovery",          // ErrorRecovery: エラー後の代替試行
+    "tool_selection_git",      // ToolSelection: 適切なツール選択
+    "code_gen_fizzbuzz",       // CodeGeneration: コード生成
     "smoke_failure_chain_pair", // ErrorRecovery (handoff 05-07g Phase 5 Phase 4): 2 step + 全 fail で AgentHER failed パス検証
     "smoke_partial_success_chain", // ErrorRecovery (handoff 05-07h 後継): 1 success + 1 fail = HSL relabel 候補 (relabels>=1 実証用)
     "halluc_parent_of_false_fact", // Plan A G-4c (T1): KG seed と矛盾する parent_of 出力で Conflict 発火
