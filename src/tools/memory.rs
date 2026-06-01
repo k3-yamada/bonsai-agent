@@ -104,15 +104,18 @@ impl TypedTool for RecallTool {
                 success: true,
             });
         }
+        // 長大 content は match 周辺の snippet に短縮 (context 圧迫防止)。
+        let tokens_lc: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
         let mut o = format!("{}件の記憶:\n", hits.len());
         for (category, content, tags) in &hits {
+            let display = make_snippet(content, &tokens_lc, RECALL_SNIPPET_MAX_CHARS);
             // ingest chunk は出典ファイル名を併記し provenance を与える (ccg gemini 推奨)。
             // 非 ingest (remember fact 等) の tag は topical ラベルのため出典化しない。
             match (category.as_str(), source_filename(tags)) {
                 ("ingest", Some(src)) => {
-                    o.push_str(&format!("- [{category}] {content} (出典: {src})\n"))
+                    o.push_str(&format!("- [{category}] {display} (出典: {src})\n"))
                 }
-                _ => o.push_str(&format!("- [{category}] {content}\n")),
+                _ => o.push_str(&format!("- [{category}] {display}\n")),
             }
         }
         Ok(ToolResult {
@@ -120,6 +123,43 @@ impl TypedTool for RecallTool {
             success: true,
         })
     }
+}
+
+/// recall 出力 1 件あたりの最大表示文字数。これを超える content は
+/// match 周辺の snippet に短縮し、context 圧迫と読み疲れを抑える (ccg gemini snippet)。
+const RECALL_SNIPPET_MAX_CHARS: usize = 160;
+
+/// content が `max_chars` を超える場合、最初に一致した token 周辺の snippet に短縮する。
+/// char 単位でスライスし UTF-8 境界を壊さない。前後を省略した側に `…` を付す。
+/// 一致語が無い (tag のみ一致) 場合は先頭から `max_chars` を切り出す。
+/// 注意: 一致位置探索は `to_lowercase()` 上で行う (CJK は no-op、ASCII は 1:1 で char 整合)。
+fn make_snippet(content: &str, tokens_lc: &[String], max_chars: usize) -> String {
+    let chars: Vec<char> = content.chars().collect();
+    if chars.len() <= max_chars {
+        return content.to_string();
+    }
+    let content_lc = content.to_lowercase();
+    let match_char_idx = tokens_lc
+        .iter()
+        .filter_map(|t| content_lc.find(t.as_str()))
+        .min()
+        .map(|byte_pos| content_lc[..byte_pos].chars().count())
+        .unwrap_or(0);
+    // match を窓の前方 1/3 付近に置く。末尾寄りなら start を巻き戻して窓幅を保つ。
+    let lead = max_chars / 3;
+    let mut start = match_char_idx.saturating_sub(lead);
+    let mut end = (start + max_chars).min(chars.len());
+    start = end.saturating_sub(max_chars);
+    end = (start + max_chars).min(chars.len());
+    let mut s = String::new();
+    if start > 0 {
+        s.push('…');
+    }
+    s.extend(&chars[start..end]);
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
 }
 
 /// tags (JSON 配列文字列、例 `["notes.md"]`) から出典ファイル名 = 先頭要素を取り出す。
@@ -283,6 +323,10 @@ fn recall_scored(
     }
     // (score desc, id desc) で安定ソート。score は f64 なので total_cmp。
     scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    // 同一 content の重複を除去 (ソート後なので高スコア側を残す)。
+    // 別 source に同一段落がある場合に limit 枠を浪費せず context 圧迫を防ぐ (ccg dedup)。
+    let mut seen_content = std::collections::HashSet::new();
+    scored.retain(|(_, _, _, content, _)| seen_content.insert(content.clone()));
     scored.truncate(limit);
     Ok(scored
         .into_iter()
@@ -644,7 +688,11 @@ mod tests {
             .call(serde_json::json!({"query": "ブロック", "limit": 10}))
             .expect("recall 成功");
         let count = recall.output.matches("重複する知識ブロック").count();
-        assert_eq!(count, 1, "同一 content は 1 件に集約されるべき: {}", recall.output);
+        assert_eq!(
+            count, 1,
+            "同一 content は 1 件に集約されるべき: {}",
+            recall.output
+        );
         let _ = std::fs::remove_file(&path);
     }
 
