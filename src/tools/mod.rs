@@ -532,6 +532,17 @@ impl ToolRegistry {
             b.push("web");
             b.push("file");
         }
+        // 記憶操作: ツール名 remember/recall に部分一致して加点 (①知識デーモン)
+        if query.contains("覚え")
+            || query.contains("記憶")
+            || query.contains("思い出")
+            || query.contains("メモ")
+            || query.contains("remember")
+            || query.contains("recall")
+        {
+            b.push("remember");
+            b.push("recall");
+        }
         b
     }
 
@@ -1047,7 +1058,10 @@ mod tests {
         // 返り値をツール名に部分一致させてスコア加点する。記憶クエリで
         // remember/recall が boost されることを確認 (routing gap の実効修正)。
         let b = ToolRegistry::detect_task_boost("これを覚えておいて");
-        assert!(b.contains(&"remember"), "記憶クエリで remember boost: {b:?}");
+        assert!(
+            b.contains(&"remember"),
+            "記憶クエリで remember boost: {b:?}"
+        );
         assert!(b.contains(&"recall"), "記憶クエリで recall boost: {b:?}");
         let b2 = ToolRegistry::detect_task_boost("recall my preferences");
         assert!(b2.contains(&"recall"), "英語クエリでも boost: {b2:?}");
