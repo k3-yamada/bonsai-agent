@@ -154,8 +154,9 @@ pub fn detect_task_type(query: &str) -> TaskType {
 
 /// 記憶ターン (`TaskType::Memory`) で LLM に注入する per-turn directive。
 /// CCG 統合判断 (2026-06-01): 1bit モデルは自然文記憶意図で tool を自発選択せず
-/// 会話応答に流れる。実機 directive テストで「ツールを使え」と明示すると確実発火する
-/// ことを実証済 → 記憶意図検出時にこの指示を system message として注入する (案 C)。
+/// 会話応答に流れる。実機検証の結果、記憶意図検出時にこの指示を **user 発話末尾の
+/// suffix** として (LLM 送信用のローカルコピーに) 付加すると自然文でも発火する。
+/// system message 注入は backend が tool schema を追記して希釈し不発だった (commit 3da1c0f)。
 pub fn memory_directive(task_type: TaskType) -> Option<&'static str> {
     match task_type {
         TaskType::Memory => Some(
@@ -554,13 +555,19 @@ impl ToolRegistry {
             b.push("web");
             b.push("file");
         }
-        // 記憶操作: ツール名 remember/recall に部分一致して加点 (①知識デーモン)
-        if query.contains("覚え")
-            || query.contains("記憶")
-            || query.contains("思い出")
-            || query.contains("メモ")
-            || query.contains("remember")
-            || query.contains("recall")
+        // 記憶操作: ツール名 remember/recall に部分一致して加点 (①知識デーモン)。
+        // detect_task_type と同じ false positive を除外 (メモリ=RAM/記憶領域・容量/思い出話)。
+        let memory_false_positive = query.contains("メモリ")
+            || query.contains("記憶領域")
+            || query.contains("記憶容量")
+            || query.contains("思い出話");
+        if !memory_false_positive
+            && (query.contains("覚え")
+                || query.contains("記憶")
+                || query.contains("思い出")
+                || query.contains("メモ")
+                || query.contains("remember")
+                || query.contains("recall"))
         {
             b.push("remember");
             b.push("recall");
@@ -1120,6 +1127,16 @@ mod tests {
         assert!(b.contains(&"recall"), "記憶クエリで recall boost: {b:?}");
         let b2 = ToolRegistry::detect_task_boost("recall my preferences");
         assert!(b2.contains(&"recall"), "英語クエリでも boost: {b2:?}");
+    }
+
+    #[test]
+    fn test_task_boost_excludes_memory_false_positives() {
+        // detect_task_type と同じく false positive は remember/recall を boost しない
+        let b = ToolRegistry::detect_task_boost("メモリ使用量を教えて");
+        assert!(
+            !b.contains(&"remember") && !b.contains(&"recall"),
+            "メモリ(RAM)は記憶ツールを boost しない: {b:?}"
+        );
     }
 
     #[test]

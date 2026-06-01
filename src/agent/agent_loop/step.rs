@@ -59,26 +59,32 @@ pub fn execute_step(
     let task_params = inference_for_task(task_type, &ctx.config.base_inference);
 
     // 2.5 記憶ターンは tool 自発発火を促す directive を user 発話末尾に付加 (Phase 1.5、CCG)。
-    // system message 注入は backend が各 system message に tool schema 全文を追記して
-    // directive を希釈 + user の後ろに配置され 1bit が attend しにくく実機で不発だった。
-    // Gemini 案 suffix nudge: user turn 内に埋め込み強く attend させる。重複は部分一致で防止。
-    if let Some(directive) = memory_directive(task_type)
-        && let Some(last_user) = session
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| matches!(m.role, Role::User))
-        && !last_user.content.contains(directive)
-    {
-        last_user.content = format!("{}\n\n[指示] {directive}", last_user.content);
-    }
+    // system message 注入は backend が各 system message に tool schema 全文を追記して希釈し
+    // 実機で不発だった → user turn 内 suffix に埋め込む (Gemini 案)。
+    // session.messages は変更せず LLM 送信用ローカルコピーにのみ付加する
+    // (ecc review HIGH-2: SQLite に永続化される user 発話を agent 内部文字列で汚染しないため。
+    //  HIGH-1: 毎回 fresh clone なので content 一致 dedup も不要)。
+    let memory_msgs;
+    let llm_messages: &[Message] = match memory_directive(task_type) {
+        Some(directive) => {
+            let mut cloned = session.messages.clone();
+            if let Some(last_user) =
+                cloned.iter_mut().rev().find(|m| matches!(m.role, Role::User))
+            {
+                last_user.content = format!("{}\n\n[指示] {directive}", last_user.content);
+            }
+            memory_msgs = cloned;
+            &memory_msgs
+        }
+        None => &session.messages,
+    };
 
     // 3. LLM呼び出し（ストリーミング対応、タスク別パラメータ）
     let in_think = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let in_think_clone = in_think.clone();
 
     let result = ctx.backend.generate_with_params(
-        &session.messages,
+        llm_messages,
         &tool_schemas,
         &mut |token| {
             // ストリーミングトークンの表示
