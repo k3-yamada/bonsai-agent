@@ -129,21 +129,35 @@ impl TypedTool for RecallTool {
 /// match 周辺の snippet に短縮し、context 圧迫と読み疲れを抑える (ccg gemini snippet)。
 const RECALL_SNIPPET_MAX_CHARS: usize = 160;
 
+/// `haystack` 中に `needle` の char 列が最初に現れる開始 char index を返す。
+/// 全て char 空間で比較するため byte/char position のズレが生じない。
+fn find_char_subsequence(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| haystack[i..i + needle.len()] == *needle)
+}
+
 /// content が `max_chars` を超える場合、最初に一致した token 周辺の snippet に短縮する。
 /// char 単位でスライスし UTF-8 境界を壊さない。前後を省略した側に `…` を付す。
 /// 一致語が無い (tag のみ一致) 場合は先頭から `max_chars` を切り出す。
-/// 注意: 一致位置探索は `to_lowercase()` 上で行う (CJK は no-op、ASCII は 1:1 で char 整合)。
+///
+/// 一致位置探索は char 空間 + `to_ascii_lowercase` (常に 1:1) で行うため、
+/// `to_lowercase()` が一部 Unicode を伸長 (ß→ss 等) して byte/char index がズレる
+/// 問題を回避する (ecc review MEDIUM)。token は ASCII/CJK 主体で本変換と整合する。
 fn make_snippet(content: &str, tokens_lc: &[String], max_chars: usize) -> String {
     let chars: Vec<char> = content.chars().collect();
     if chars.len() <= max_chars {
         return content.to_string();
     }
-    let content_lc = content.to_lowercase();
+    let lc_chars: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
     let match_char_idx = tokens_lc
         .iter()
-        .filter_map(|t| content_lc.find(t.as_str()))
+        .filter_map(|t| {
+            let needle: Vec<char> = t.chars().map(|c| c.to_ascii_lowercase()).collect();
+            find_char_subsequence(&lc_chars, &needle)
+        })
         .min()
-        .map(|byte_pos| content_lc[..byte_pos].chars().count())
         .unwrap_or(0);
     // match を窓の前方 1/3 付近に置く。末尾寄りなら start を巻き戻して窓幅を保つ。
     let lead = max_chars / 3;
