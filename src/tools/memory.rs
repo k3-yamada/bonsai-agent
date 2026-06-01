@@ -118,7 +118,7 @@ impl TypedTool for RecallTool {
 /// 文字を ASCII 英数字 / CJK / 区切り の 3 クラスに分類する。
 /// CJK は ひらがな・カタカナ・漢字 (拡張 A + 互換漢字) を 1 クラスに統合し、
 /// 「使い方」のような漢字+ひらがな混在語を 1 run として扱えるようにする。
-#[derive(PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum CharClass {
     Ascii,
     Cjk,
@@ -129,17 +129,27 @@ fn classify_char(c: char) -> CharClass {
     if c.is_ascii_alphanumeric() {
         CharClass::Ascii
     } else if matches!(c as u32,
-        0x3040..=0x309F | // ひらがな
-        0x30A0..=0x30FF | // カタカナ
-        0x3400..=0x4DBF | // CJK 拡張 A
-        0x4E00..=0x9FFF | // CJK 統合漢字
-        0xF900..=0xFAFF   // CJK 互換漢字
+        0x3040..=0x309F |   // ひらがな
+        0x30A0..=0x30FF |   // カタカナ
+        0x31F0..=0x31FF |   // カタカナ音声拡張
+        0x3400..=0x4DBF |   // CJK 拡張 A
+        0x4E00..=0x9FFF |   // CJK 統合漢字
+        0xF900..=0xFAFF |   // CJK 互換漢字
+        0xFF65..=0xFF9F |   // 半角カタカナ (legacy data)
+        0x20000..=0x2A6DF | // CJK 拡張 B
+        0x2A700..=0x2EE5F | // CJK 拡張 C-F, I
+        0x2F800..=0x2FA1F   // CJK 互換漢字補助
     ) {
         CharClass::Cjk
     } else {
         CharClass::Sep
     }
 }
+
+/// recall クエリ 1 件あたりの最大 token 数。長大 CJK クエリ (貼付け文等) が
+/// 過剰な bigram → SQL LIKE param 膨張 + IDF の N+1 クエリを誘発するのを防ぐ
+/// (user 入力境界のガード、ecc review MEDIUM)。通常の想起クエリには十分な上限。
+const MAX_RECALL_TOKENS: usize = 32;
 
 /// クエリを Unicode script 境界で分割し、検索 token 配列を返す (重複・空除去)。
 ///
@@ -159,7 +169,7 @@ fn tokenize_recall_query(query: &str) -> Vec<String> {
         seen: &mut std::collections::HashSet<String>,
         out: &mut Vec<String>,
     ) {
-        if !tok.is_empty() && seen.insert(tok.clone()) {
+        if out.len() < MAX_RECALL_TOKENS && !tok.is_empty() && seen.insert(tok.clone()) {
             out.push(tok);
         }
     }
@@ -168,7 +178,7 @@ fn tokenize_recall_query(query: &str) -> Vec<String> {
     let mut out = Vec::new();
     let chars: Vec<char> = query.chars().collect();
     let mut i = 0;
-    while i < chars.len() {
+    while i < chars.len() && out.len() < MAX_RECALL_TOKENS {
         let cls = classify_char(chars[i]);
         let start = i;
         while i < chars.len() && classify_char(chars[i]) == cls {
@@ -545,6 +555,32 @@ mod tests {
             tokenize_recall_query("config 設定方法"),
             vec!["config", "設定", "定方", "方法"],
             "ASCII 語と CJK bigram の混在"
+        );
+    }
+
+    #[test]
+    fn t_tokenize_halfwidth_katakana() {
+        // 半角カタカナも CJK として bigram 化される (legacy data 対応、ecc review MEDIUM)。
+        // 旧 range では FF65-FF9F が Sep 扱いで全 drop → Red。
+        let toks = tokenize_recall_query("ｱﾌﾟﾘ");
+        assert!(
+            toks.contains(&"ｱﾌ".to_string()),
+            "半角カナ run が bigram 化されるべき: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn t_tokenize_token_cap() {
+        // 長大 CJK クエリでも token 数を上限で抑え SQL param 膨張を防ぐ (ecc review MEDIUM)。
+        // 100 連続の相異なる漢字 → 99 distinct bigram → cap で 32 以下に (旧実装 cap なし = Red)。
+        let long_q: String = (0x4E00u32..0x4E00 + 100)
+            .filter_map(char::from_u32)
+            .collect();
+        let toks = tokenize_recall_query(&long_q);
+        assert!(
+            toks.len() <= 32,
+            "token 数は上限以下に抑えるべき: {}",
+            toks.len()
         );
     }
 
