@@ -451,6 +451,60 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // ---------- Phase 5 Red: CJK bigram tokenization (助詞非分離の根治) ----------
+
+    #[test]
+    fn t_tokenize_cjk_bigram() {
+        // CJK run は overlapping bigram、ASCII run は語 token、script 境界で分割。
+        // 旧 tokenizer (whitespace 分割のみ) では "設定の使い方" は 1 token のまま → Red。
+        assert_eq!(
+            tokenize_recall_query("設定の使い方"),
+            vec!["設定", "定の", "の使", "使い", "い方"],
+            "CJK run は overlapping bigram 化されるべき"
+        );
+        // ASCII↔CJK script 境界で分割 (混在 token を解体)。
+        assert_eq!(
+            tokenize_recall_query("API設定"),
+            vec!["API", "設定"],
+            "script 境界で ASCII run と CJK run に分割されるべき"
+        );
+        // 単一 CJK char は unigram として保持 (drop しない)。
+        assert_eq!(
+            tokenize_recall_query("鍵"),
+            vec!["鍵"],
+            "単一 CJK char は unigram 保持"
+        );
+        // 空白区切り + CJK 複合: ASCII 語 + 各 CJK run の bigram。
+        assert_eq!(
+            tokenize_recall_query("config 設定方法"),
+            vec!["config", "設定", "定方", "方法"],
+            "ASCII 語と CJK bigram の混在"
+        );
+    }
+
+    #[test]
+    fn t_recall_cjk_particle_glued_query() {
+        // 実利用: 助詞で連結されたクエリ「金曜の締切」(空白なし) を想起できる。
+        // 旧 tokenizer は ["金曜の締切"] 1 token → LIKE %金曜の締切% は
+        // 語順/助詞が異なる content に一致せず 0 件 (Red)。
+        // bigram 化で "金曜"/"締切" が content に一致 (Green)。
+        let path = temp_db_path();
+        let r = RememberTool::new(&path);
+        r.call(serde_json::json!({"content": "重要な締切は金曜に設定されている"}))
+            .unwrap();
+        r.call(serde_json::json!({"content": "土曜は休みの予定"}))
+            .unwrap();
+        let recall = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "金曜の締切", "limit": 5}))
+            .expect("recall 成功");
+        assert!(
+            recall.output.contains("重要な締切は金曜"),
+            "助詞連結クエリでも content 語の bigram 一致で想起すべき: {}",
+            recall.output
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn t_recall_cjk_single_token_preserved() {
         // 単一 token (CJK 部分一致) は後方互換: 従来の LIKE %query% と同等にヒット。
