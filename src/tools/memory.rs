@@ -92,10 +92,10 @@ impl TypedTool for RecallTool {
         let store = crate::memory::store::MemoryStore::open(&self.db_path)?;
         let limit = args.limit.unwrap_or(5);
         // FTS5(unicode61) は CJK を 1 トークン化するため LIKE 部分一致で想起する
-        // (CJK 後方互換を維持)。多 token クエリでは literal 一致が極稀になるため、
-        // whitespace で分割した各 token を OR で union 検索 → Rust 側で
-        // overlap スコアリング (一致 token 数 desc、同点は id desc) で
-        // 関連度を擬似 hybrid 風に近似する (Phase 3、項目 270)。
+        // (CJK 後方互換を維持)。クエリを script 境界で分割し ASCII 語 + CJK bigram に
+        // トークン化 (`tokenize_recall_query`)、各 token を OR で union 検索 → Rust 側で
+        // IDF 重み付き overlap スコアリング (score desc、同点は id desc) で関連度を
+        // 擬似 hybrid 風に近似する。CJK bigram 化で助詞膠着クエリも想起可 (項目 271)。
         let tokens = tokenize_recall_query(&args.query);
         let hits = recall_scored(store.conn(), &tokens, limit)?;
         if hits.is_empty() {
@@ -115,17 +115,83 @@ impl TypedTool for RecallTool {
     }
 }
 
-/// クエリを whitespace で分割し、重複・空 token を除去した検索 token 配列を返す。
-/// 単一 token (CJK 含む) のときは長さ 1 配列となり従来 LIKE 挙動と等価。
-/// 重複除去により同一語の連続入力 ("apple apple") がスコアを不当に増幅しない。
-/// 空/空白のみクエリは空配列を返し、呼出側 (`recall_scored`) で 0 件にフォールバックする。
+/// 文字を ASCII 英数字 / CJK / 区切り の 3 クラスに分類する。
+/// CJK は ひらがな・カタカナ・漢字 (拡張 A + 互換漢字) を 1 クラスに統合し、
+/// 「使い方」のような漢字+ひらがな混在語を 1 run として扱えるようにする。
+#[derive(PartialEq, Clone, Copy)]
+enum CharClass {
+    Ascii,
+    Cjk,
+    Sep,
+}
+
+fn classify_char(c: char) -> CharClass {
+    if c.is_ascii_alphanumeric() {
+        CharClass::Ascii
+    } else if matches!(c as u32,
+        0x3040..=0x309F | // ひらがな
+        0x30A0..=0x30FF | // カタカナ
+        0x3400..=0x4DBF | // CJK 拡張 A
+        0x4E00..=0x9FFF | // CJK 統合漢字
+        0xF900..=0xFAFF   // CJK 互換漢字
+    ) {
+        CharClass::Cjk
+    } else {
+        CharClass::Sep
+    }
+}
+
+/// クエリを Unicode script 境界で分割し、検索 token 配列を返す (重複・空除去)。
+///
+/// - ASCII 英数字 run → 語 token (例 "API"、"config")。
+/// - CJK run (長さ >= 2) → overlapping bigram (例 "使い方" → ["使い","い方"])。
+/// - CJK run (長さ 1) → unigram 保持 (例 "鍵" → ["鍵"])。
+/// - 区切り (空白・記号・CJK 句読点) → 分割のみ。
+///
+/// 日本語は分かち書きしないため、助詞 (の/を/は…) が content 語に膠着すると
+/// 旧 whitespace 分割では LIKE 一致しなかった。bigram 化で content 語片に
+/// 部分一致させ、汎用的な橋渡し bigram (の使 等) は corpus-wide IDF (`compute_idf_weights`)
+/// が down-weight する。辞書/形態素解析器を持たず最小依存で日本語想起を改善する
+/// (ccg codex/gemini 双方が Option A = CJK bigram を最適と評価、Phase 5、項目 271)。
 fn tokenize_recall_query(query: &str) -> Vec<String> {
+    fn push_unique(
+        tok: String,
+        seen: &mut std::collections::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !tok.is_empty() && seen.insert(tok.clone()) {
+            out.push(tok);
+        }
+    }
+
     let mut seen = std::collections::HashSet::new();
-    query
-        .split_whitespace()
-        .filter(|t| !t.is_empty() && seen.insert(*t))
-        .map(|t| t.to_string())
-        .collect()
+    let mut out = Vec::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let cls = classify_char(chars[i]);
+        let start = i;
+        while i < chars.len() && classify_char(chars[i]) == cls {
+            i += 1;
+        }
+        match cls {
+            CharClass::Ascii => {
+                push_unique(chars[start..i].iter().collect(), &mut seen, &mut out);
+            }
+            CharClass::Cjk => {
+                let run = &chars[start..i];
+                if run.len() == 1 {
+                    push_unique(run[0].to_string(), &mut seen, &mut out);
+                } else {
+                    for w in run.windows(2) {
+                        push_unique(w.iter().collect(), &mut seen, &mut out);
+                    }
+                }
+            }
+            CharClass::Sep => {}
+        }
+    }
+    out
 }
 
 /// per-token LIKE の OR で候補を集め、各候補を **IDF 重み付き overlap** で
