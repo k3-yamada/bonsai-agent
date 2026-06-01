@@ -799,6 +799,33 @@ mod tests {
     }
 
     #[test]
+    fn t_recall_snake_case_not_split() {
+        // snake_case 識別子は単一 token として想起し、構成語を含む別 doc を誤想起しない。
+        // 旧: '_' が Sep 扱い → "agent_loop" が ["agent","loop"] に分割され
+        //     "agent of chaos" (agent 一致) を誤想起 (Red)。
+        let path = temp_db_path();
+        let rem = RememberTool::new(&path);
+        rem.call(serde_json::json!({"content": "the agent_loop module drives steps"}))
+            .unwrap();
+        rem.call(serde_json::json!({"content": "agent of chaos appears here"}))
+            .unwrap();
+        let r = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "agent_loop", "limit": 10}))
+            .expect("recall 成功");
+        assert!(
+            r.output.contains("agent_loop module"),
+            "snake_case 識別子を想起すべき: {}",
+            r.output
+        );
+        assert!(
+            !r.output.contains("agent of chaos"),
+            "構成語を含む別 doc を誤想起しないべき: {}",
+            r.output
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn t_recall_cjk_single_token_preserved() {
         // 単一 token (CJK 部分一致) は後方互換: 従来の LIKE %query% と同等にヒット。
         let path = temp_db_path();
