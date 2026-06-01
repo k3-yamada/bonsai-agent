@@ -46,7 +46,12 @@ pub fn ingest_path(store: &MemoryStore, path: &Path) -> Result<usize> {
     }
 }
 
-/// 単一ファイルを取り込む。
+/// 単一ファイルを取り込む。返り値は**新規**保存した chunk 数。
+///
+/// 冪等性: content が完全一致する既存メモリがあれば保存をスキップする。
+/// これにより `--ingest` の再実行で recall が重複汚染されない。
+/// 注意: ファイル編集で段落内容が変わった場合、旧版 chunk は残存する
+/// (content 一致 dedup のため)。完全な置換が必要なら別途 purge が必要。
 fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
     let content = std::fs::read_to_string(path)?;
     let filename = path
@@ -57,10 +62,23 @@ fn ingest_file(store: &MemoryStore, path: &Path) -> Result<usize> {
     let chunks = chunk_text(&content);
     let mut saved = 0;
     for chunk in &chunks {
+        if content_exists(store, chunk)? {
+            continue;
+        }
         store.save_memory(chunk, "ingest", std::slice::from_ref(&filename))?;
         saved += 1;
     }
     Ok(saved)
+}
+
+/// content が完全一致する既存メモリの有無を返す (ingest 冪等化用)。
+fn content_exists(store: &MemoryStore, content: &str) -> Result<bool> {
+    let n: i64 = store.conn().query_row(
+        "SELECT COUNT(*) FROM memories WHERE content = ?1",
+        rusqlite::params![content],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 fn has_ingest_extension(path: &Path) -> bool {
