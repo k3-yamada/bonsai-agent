@@ -608,6 +608,26 @@ mod tests {
     }
 
     #[test]
+    fn t_recall_ascii_case_insensitive() {
+        // ASCII クエリは大小無視で想起する (SQL LIKE と scoring の整合、ecc finding)。
+        // content 小文字 / query 大文字 → 旧 contains() は case-sensitive で
+        // SQL LIKE が返した行を scoring が落とし 0 件 (Red)。
+        let path = temp_db_path();
+        RememberTool::new(&path)
+            .call(serde_json::json!({"content": "claude code は便利"}))
+            .unwrap();
+        let r = RecallTool::new(&path)
+            .call(serde_json::json!({"query": "CLAUDE"}))
+            .expect("recall 成功");
+        assert!(
+            r.output.contains("claude code は便利"),
+            "ASCII 大小無視で想起すべき: {}",
+            r.output
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn t_recall_cjk_single_token_preserved() {
         // 単一 token (CJK 部分一致) は後方互換: 従来の LIKE %query% と同等にヒット。
         let path = temp_db_path();
