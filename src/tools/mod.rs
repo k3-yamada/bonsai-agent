@@ -1042,6 +1042,18 @@ mod tests {
     }
 
     #[test]
+    fn test_task_boost_memory_surfaces_tools() {
+        // live loop (select_relevant_split_semantic) は detect_task_boost の
+        // 返り値をツール名に部分一致させてスコア加点する。記憶クエリで
+        // remember/recall が boost されることを確認 (routing gap の実効修正)。
+        let b = ToolRegistry::detect_task_boost("これを覚えておいて");
+        assert!(b.contains(&"remember"), "記憶クエリで remember boost: {b:?}");
+        assert!(b.contains(&"recall"), "記憶クエリで recall boost: {b:?}");
+        let b2 = ToolRegistry::detect_task_boost("recall my preferences");
+        assert!(b2.contains(&"recall"), "英語クエリでも boost: {b2:?}");
+    }
+
+    #[test]
     fn test_select_relevant_with_type_file_operation() {
         let reg = build_registry();
         // ファイル操作クエリ → file_read, file_writeのみに絞られる
