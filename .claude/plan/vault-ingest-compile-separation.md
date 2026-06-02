@@ -1,5 +1,17 @@
 # Vault Ingest/Compile 2-skill 分離 (2do BRAIN 適用案 I-2)
 
+> **状態 (2026-06-02 更新): 据え置き — plan 前提が現コードに不在。**
+> 本 plan は `01_raw/` → `_drafts/` → `02_wiki/` の Obsidian 風ディレクトリ構造 +
+> frontmatter (`status`/`sources`) + `wiki/index.md`/`log.md` を前提とするが、
+> 現 `src/knowledge/vault.rs` の `Vault` は **category-stock 型**
+> (`decisions.md`/`facts.md`/... のフラットファイル + `append`/`summary`) で、これらは一切存在しない。
+> `vault_lint.rs` の `status`/`unreviewed` も **DB memory entry** に対する SQL 相当で wiki frontmatter ではない。
+> agent_loop からの Vault 破壊的 auto-invoke 経路も現状なく、plan の安全動機 (auto-invoke 暴走防止) も適用されない。
+> よって本 plan は「小さな bounded タスク」ではなく **何も使っていない greenfield wiki サブシステムの新規構築**
+> (~460+ LOC, 6-9h) であり、YAGNI / anti-churn 原則と衝突。ユーザー判断 (2026-06-02) で **据え置き確定**。
+> 再着手時は §1〜§2 の前提を現 `Vault` モデルに合わせて全面再設計すること。
+
+
 ## 1. 問題定義
 
 ### Qiita 2do BRAIN 記事の core pattern (verbatim)
