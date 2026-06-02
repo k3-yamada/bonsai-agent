@@ -831,8 +831,11 @@ mod tests {
             std::env::set_var("BONSAI_ENABLED_TOOLS", "file_read,recall");
             std::env::remove_var("BONSAI_LAB_SMOKE");
         }
-        let registry = build_full_registry()
-            .apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        let registry = build_full_registry().apply_whitelist(
+            whitelist::effective_tool_whitelist()
+                .as_deref()
+                .unwrap_or(&[]),
+        );
         assert!(registry.has("file_read"));
         assert!(registry.has("recall"));
         assert!(!registry.has("file_write"), "whitelist 外は登録されない");
@@ -851,8 +854,11 @@ mod tests {
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
             std::env::remove_var("BONSAI_ENABLED_TOOLS");
         }
-        let registry = build_full_registry()
-            .apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        let registry = build_full_registry().apply_whitelist(
+            whitelist::effective_tool_whitelist()
+                .as_deref()
+                .unwrap_or(&[]),
+        );
         for readonly_tool in whitelist::READONLY_TOOL_WHITELIST {
             assert!(
                 registry.has(readonly_tool),
@@ -876,8 +882,11 @@ mod tests {
             std::env::set_var("BONSAI_ENABLED_TOOLS", "file_read");
             std::env::set_var("BONSAI_LAB_SMOKE", "1");
         }
-        let registry = build_full_registry()
-            .apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        let registry = build_full_registry().apply_whitelist(
+            whitelist::effective_tool_whitelist()
+                .as_deref()
+                .unwrap_or(&[]),
+        );
         assert!(registry.has("file_read"));
         // repo_map は readonly default だが env 明示列挙外 → env が smoke に優先
         assert!(
@@ -905,8 +914,11 @@ mod tests {
         );
         let full = build_full_registry();
         let n = full.len();
-        let registry =
-            full.apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        let registry = full.apply_whitelist(
+            whitelist::effective_tool_whitelist()
+                .as_deref()
+                .unwrap_or(&[]),
+        );
         assert_eq!(registry.len(), n, "backward compat: 全 tool 維持");
         assert!(registry.has("file_write"));
     }

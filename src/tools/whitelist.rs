@@ -43,11 +43,7 @@ pub fn parse_enabled_tools_env() -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect();
-    if list.is_empty() {
-        None
-    } else {
-        Some(list)
-    }
+    if list.is_empty() { None } else { Some(list) }
 }
 
 /// whitelist 強制が有効か (env 明示列挙 OR smoke mode).

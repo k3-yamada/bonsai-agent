@@ -355,6 +355,12 @@ fn t_smoke_whitelist_keeps_real_readonly_tools() {
         std::env::remove_var("BONSAI_ENABLED_TOOLS");
     }
 
+    // CWD 汚染 + 並列 CI 競合回避のため pid 付き temp パスを使用.
+    let db_path = std::env::temp_dir()
+        .join(format!("bonsai_whitelist_test_{}.db", std::process::id()))
+        .to_string_lossy()
+        .to_string();
+
     let mut reg = ToolRegistry::new();
     reg.register(Box::new(FileReadTool));
     reg.register(Box::new(FileWriteTool));
@@ -362,24 +368,27 @@ fn t_smoke_whitelist_keeps_real_readonly_tools() {
     reg.register(Box::new(WebFetchTool));
     reg.register(Box::new(WebSearchTool));
     reg.register(Box::new(ArxivTool));
-    reg.register(Box::new(RecallTool::new(
-        "bonsai_structural_whitelist_test.db",
-    )));
+    reg.register(Box::new(RecallTool::new(db_path)));
 
     let reg = reg.apply_whitelist(effective_tool_whitelist().as_deref().unwrap_or(&[]));
 
-    for readonly in READONLY_TOOL_WHITELIST {
-        assert!(
-            reg.has(readonly),
-            "smoke mode で実 tool '{readonly}' が registry に残る (NAME 整合確認)"
-        );
-    }
-    assert!(
-        !reg.has("file_write"),
-        "smoke mode で write tool 'file_write' は除外される"
-    );
-
+    // assert より前に結果を確定 + env を必ず unset し、panic 時も env を汚さない.
+    let missing_readonly: Vec<&str> = READONLY_TOOL_WHITELIST
+        .iter()
+        .copied()
+        .filter(|t| !reg.has(t))
+        .collect();
+    let write_still_present = reg.has("file_write");
     unsafe {
         std::env::remove_var("BONSAI_LAB_SMOKE");
     }
+
+    assert!(
+        missing_readonly.is_empty(),
+        "smoke mode で実 readonly tool が除外された (NAME drift?): {missing_readonly:?}"
+    );
+    assert!(
+        !write_still_present,
+        "smoke mode で write tool 'file_write' は除外される"
+    );
 }
