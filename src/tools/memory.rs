@@ -286,7 +286,9 @@ fn tokenize_recall_query(query: &str) -> Vec<String> {
 /// `_` を Ascii token に含めた結果 (snake_case 対応)、LIKE のワイルドカードとして
 /// 誤展開し candidate set を広げる / 病的に全表走査するのを防ぐ。
 fn escape_like(s: &str) -> String {
-    s.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_")
+    s.replace('\\', r"\\")
+        .replace('%', r"\%")
+        .replace('_', r"\_")
 }
 
 fn recall_scored(
@@ -377,7 +379,10 @@ fn compute_idf_weights(conn: &rusqlite::Connection, tokens: &[String]) -> Result
     }
     sql.push_str(" FROM memories");
 
-    let patterns: Vec<String> = tokens.iter().map(|t| format!("%{}%", escape_like(t))).collect();
+    let patterns: Vec<String> = tokens
+        .iter()
+        .map(|t| format!("%{}%", escape_like(t)))
+        .collect();
     let params: Vec<&dyn rusqlite::ToSql> =
         patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
 
