@@ -104,13 +104,18 @@ fn sync_file_chunks(store: &MemoryStore, filename: &str, chunks: &[String]) -> R
         }
     }
     // (b) add: 既存に無い現 chunk のみ保存 ((c) 不変 chunk は再保存しない = 冪等)。
+    // existing は再 ingest 時の DB 既存分のスナップショット。同一ファイル内に content
+    // 完全一致の段落が複数あると existing 判定だけでは二重保存されるため、本 pass で
+    // 保存済みの content を `seen` で追跡し distinct content を 1 度だけ保存する。
     let tags = [filename.to_string()];
     let mut saved = 0;
+    let mut seen: HashSet<&str> = HashSet::new();
     for chunk in chunks {
-        if !existing_contents.contains(chunk.as_str()) {
-            store.save_memory(chunk, "ingest", &tags)?;
-            saved += 1;
+        if existing_contents.contains(chunk.as_str()) || !seen.insert(chunk.as_str()) {
+            continue;
         }
+        store.save_memory(chunk, "ingest", &tags)?;
+        saved += 1;
     }
     Ok(saved)
 }
