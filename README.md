@@ -11,7 +11,7 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
-- **166のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（950テスト、`agent_loop` を 9 ファイルに分割済、最大ファイル 315 行）
+- **269+のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（1400+ テスト、詳細は CLAUDE.md / [docs/quality/lab-history.md](docs/quality/lab-history.md)）
 - **ADK 取込ロードマップ** — Phase A/B1/B2/C 完了（LLM-as-judge + Judge Gate + ベンチマーク 22→40）、Phase D は YAGNI 判定で見送り
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
 - **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
@@ -97,6 +97,8 @@ cargo run -- --tasks                   # 未完了タスク一覧
 cargo run -- --audit                   # 監査ログ
 cargo run -- --vault                   # ナレッジVault概要
 cargo run -- --manifest                # ケイパビリティ一覧
+cargo run -- --list-tools              # 登録ツール一覧（whitelist 適用後の live registry）
+cargo run -- --ingest <PATH>           # .md/.txt を memory に取り込む（知識デーモン）
 cargo run -- --dashboard               # 統合統計ダッシュボード
 cargo run -- --checkpoints             # チェックポイント一覧
 cargo run -- --rollback <id>           # チェックポイント復元
@@ -105,7 +107,28 @@ cargo run -- --init                    # config.tomlテンプレート生成
 cargo run -- --skills-export           # スキルをMarkdownにエクスポート
 cargo run -- --diagnose                # サーバー接続診断
 cargo run -- --evolve                  # arxiv収集+自己改善
+cargo run -- --serve --api-port <PORT> # REST API サーバー
+cargo run -- --mcp-server              # MCP サーバーとして起動
 cargo run -- --server-url <URL>        # カスタムサーバーURL
+```
+
+### 環境変数（主要）
+
+完全な一覧は [docs/execution/runbook.md](docs/execution/runbook.md) を参照。
+
+| 環境変数 | 既定 | 用途 |
+|----------|------|------|
+| `BONSAI_DB_PATH` | OS data_dir | memory DB パス上書き（テスト隔離・本番非汚染に使用） |
+| `BONSAI_ENABLED_TOOLS` | 未設定 | deny-by-default ツール whitelist。列挙したツールのみ有効化（未設定で全ツール） |
+| `BONSAI_LAB_SMOKE` | 未設定 | smoke モード。readonly ツールのみ自動許可 + コンテキスト縮小 |
+
+```bash
+# 例: readonly ツールだけを有効化して安全に動作確認
+BONSAI_ENABLED_TOOLS=file_read,recall cargo run -- --list-tools
+# => 登録ツール 2 件: file_read / recall
+
+# smoke モード（readonly default = file_read/repo_map/recall/web_fetch/web_search/arxiv_search）
+BONSAI_LAB_SMOKE=1 cargo run -- --list-tools
 ```
 
 ## ビルド feature flags
@@ -139,8 +162,12 @@ cargo build --release --no-default-features --features cli,tree-sitter
 | `web_fetch` | Auto | URLからテキスト取得 |
 | `repo_map` | Auto | コード構造マップ（Rust/Python/TS/JS/Go/Java/C/C++/Kotlin/Swift対応） |
 | `arxiv_search` | Auto | arxiv論文検索 |
+| `remember` | Auto | 事実・好みを memory に保存（知識デーモン） |
+| `recall` | Auto | 過去の memory を検索（知識デーモン、FTS5+ベクトル） |
 | **プラグイン** | 設定可能 | TOML定義でカスタムツール追加 |
 | **MCP** | Confirm | MCPサーバーのツールを利用 |
+
+`BONSAI_ENABLED_TOOLS` / `BONSAI_LAB_SMOKE` で有効化するツールを制限できる（deny-by-default、上記「環境変数」参照）。`--list-tools` で実際に有効なツール集合を確認可能。
 
 読取専用ツール（`file_read`, `web_search`, `web_fetch`, `repo_map`）は`is_read_only()`トレイトにより、連続2件以上で自動並列実行される。書き込みツールはバリアとして逐次実行を保証。
 
@@ -242,7 +269,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 会話（フロー）から重要な情報（ストック）を自動抽出し、mdファイルに蓄積。
 
 ```
-~/.local/share/bonsai-agent/vault/
+# macOS: ~/Library/Application Support/bonsai-agent/vault/
+# Linux: ~/.local/share/bonsai-agent/vault/
+vault/
 ├── decisions.md      # 意思決定（「〜にした」）
 ├── facts.md          # 事実（「〜である」）
 ├── preferences.md    # 好み（「〜がいい」）
@@ -299,7 +328,7 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - ベースライン: score=0.8596, pass@k=1.0
 - 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
 
-## ハーネスパターン（148項目）
+## ハーネスパターン（269+項目）
 
 「Scaffolding > Model」設計原則に基づく、1ビットモデルの信頼性向上パターン:
 
@@ -319,16 +348,18 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 - **構造化エラー分類12種**: FailureMode拡張 + RecoveryHint
 - **ヘルスチェック統一**: /health + /v1/modelsフォールバック（MLX対応）
 
-全148項目の詳細はCLAUDE.mdを参照。
+全項目の詳細はCLAUDE.md（直近5項目）+ session memory archive を参照。
 
 ## 開発
 
 ```bash
-cargo test                     # 880テスト
-cargo clippy -- -D warnings    # リント
+cargo test --lib               # 1400+ テスト
+cargo test --test structural   # レイヤー/サイズ/eprintln lint（Z-4）
+cargo clippy --lib -- -D warnings  # リント
 cargo fmt -- --check           # フォーマット
-cargo build --features full    # fastembed有効化ビルド
 ```
+
+開発フローの詳細（Lab 起動、env 一覧、smoke 手順）は [docs/execution/runbook.md](docs/execution/runbook.md)、設計判断は [docs/decisions/](docs/decisions/)（ADR-001〜009）を参照。
 
 ## 必要環境
 

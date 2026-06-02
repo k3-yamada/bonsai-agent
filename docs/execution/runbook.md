@@ -6,11 +6,13 @@
 
 ```bash
 cargo build                    # ビルド
-cargo test                     # ユニットテスト（1348テスト、2026-05-20 時点）
+cargo test --lib               # ユニットテスト（1434テスト、2026-06-02 時点）
+cargo test --test structural   # Z-4 layer/size/eprintln lint
 cargo test -- --ignored        # 統合テスト（llama-server/ネットワーク必要）
 cargo clippy -- -D warnings    # リント
 cargo fmt -- --check           # フォーマットチェック
 cargo run -- --manifest        # ケイパビリティ一覧
+cargo run -- --list-tools      # 登録ツール一覧（whitelist 適用後の live registry）
 cargo run -- --vault           # ナレッジVault概要
 cargo run -- --lab             # 自律的自己改善ループ（pass^k評価）
 ```
