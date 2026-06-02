@@ -361,20 +361,41 @@ fn recall_scored(
 /// N = memories 総数、df = その token を content/tags に含む memory 数。
 /// 平滑化 (+1) により df=0 や N=0 でも有限・正値を保つ。頻出語ほど重みが小さくなる。
 fn compute_idf_weights(conn: &rusqlite::Connection, tokens: &[String]) -> Result<Vec<f64>> {
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
-    let n = n as f64;
-    let mut weights = Vec::with_capacity(tokens.len());
-    for t in tokens {
-        let pat = format!("%{}%", escape_like(t));
-        let df: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE content LIKE ?1 ESCAPE '\\' OR tags LIKE ?1 ESCAPE '\\'",
-            rusqlite::params![pat],
-            |row| row.get(0),
-        )?;
-        let idf = ((n + 1.0) / (df as f64 + 1.0)).ln() + 1.0;
-        weights.push(idf);
+    if tokens.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(weights)
+    // 旧実装は token ごとに COUNT を発行する N+1 だった。memories の単一スキャンで
+    // N (COUNT(*)) と各 token の df (SUM(CASE ...)) を同時集計し、9079 chunk × 最大 32
+    // token のスキャン回数を 32+1 回から 1 回に削減する。各 token のパターンは content/
+    // tags の両 LIKE で同一プレースホルダを再利用する。
+    let mut sql = String::from("SELECT COUNT(*)");
+    for i in 0..tokens.len() {
+        let p = i + 1;
+        sql.push_str(&format!(
+            ", SUM(CASE WHEN content LIKE ?{p} ESCAPE '\\' OR tags LIKE ?{p} ESCAPE '\\' THEN 1 ELSE 0 END)"
+        ));
+    }
+    sql.push_str(" FROM memories");
+
+    let patterns: Vec<String> = tokens.iter().map(|t| format!("%{}%", escape_like(t))).collect();
+    let params: Vec<&dyn rusqlite::ToSql> =
+        patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+
+    let (n, dfs) = conn.query_row(&sql, params.as_slice(), |row| {
+        let n: i64 = row.get(0)?;
+        let mut dfs = Vec::with_capacity(tokens.len());
+        for i in 0..tokens.len() {
+            // SUM は対象 0 件時 NULL を返し得るため Option で受け 0 に丸める。
+            dfs.push(row.get::<_, Option<i64>>(i + 1)?.unwrap_or(0));
+        }
+        Ok((n, dfs))
+    })?;
+
+    let n = n as f64;
+    Ok(dfs
+        .into_iter()
+        .map(|df| ((n + 1.0) / (df as f64 + 1.0)).ln() + 1.0)
+        .collect())
 }
 
 #[cfg(test)]
