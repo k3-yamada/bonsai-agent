@@ -772,6 +772,119 @@ mod tests {
         reg
     }
 
+    /// 本番 setup_tools 相当の全 tool 名 (DummyTool) を登録した registry.
+    /// whitelist filter test 用に readonly/write 双方を含む.
+    fn build_full_registry() -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for name in [
+            "shell",
+            "file_read",
+            "file_write",
+            "multi_edit",
+            "git",
+            "web_search",
+            "web_fetch",
+            "arxiv_search",
+            "repo_map",
+            "remember",
+            "recall",
+        ] {
+            reg.register(Box::new(DummyTool::new(name, "ダミー")));
+        }
+        reg
+    }
+
+    // ===== tool whitelist deny-by-default (Z-NEW-E) =====
+
+    #[test]
+    fn t_env_whitelist_filters_registry() {
+        let _g = crate::config::LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("BONSAI_ENABLED_TOOLS", "file_read,recall");
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+        }
+        let registry = build_full_registry()
+            .apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        assert!(registry.has("file_read"));
+        assert!(registry.has("recall"));
+        assert!(!registry.has("file_write"), "whitelist 外は登録されない");
+        assert!(!registry.has("shell"), "whitelist 外は登録されない");
+        unsafe {
+            std::env::remove_var("BONSAI_ENABLED_TOOLS");
+        }
+    }
+
+    #[test]
+    fn t_smoke_mode_applies_readonly_default() {
+        let _g = crate::config::LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+            std::env::remove_var("BONSAI_ENABLED_TOOLS");
+        }
+        let registry = build_full_registry()
+            .apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        for readonly_tool in whitelist::READONLY_TOOL_WHITELIST {
+            assert!(
+                registry.has(readonly_tool),
+                "smoke で readonly tool {readonly_tool} は維持される"
+            );
+        }
+        assert!(!registry.has("file_write"), "smoke で write は除外");
+        assert!(!registry.has("shell"), "smoke で write は除外");
+        assert!(!registry.has("remember"), "smoke で memory write は除外");
+        unsafe {
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+        }
+    }
+
+    #[test]
+    fn t_env_overrides_smoke_default() {
+        let _g = crate::config::LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("BONSAI_ENABLED_TOOLS", "file_read");
+            std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        }
+        let registry = build_full_registry()
+            .apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        assert!(registry.has("file_read"));
+        // repo_map は readonly default だが env 明示列挙外 → env が smoke に優先
+        assert!(
+            !registry.has("repo_map"),
+            "env 明示列挙が smoke readonly default に優先"
+        );
+        unsafe {
+            std::env::remove_var("BONSAI_ENABLED_TOOLS");
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+        }
+    }
+
+    #[test]
+    fn t_no_env_no_smoke_preserves_full_registry() {
+        let _g = crate::config::LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("BONSAI_ENABLED_TOOLS");
+            std::env::remove_var("BONSAI_LAB_SMOKE");
+        }
+        assert!(
+            whitelist::effective_tool_whitelist().is_none(),
+            "env 未設定で whitelist 無効 (None)"
+        );
+        let full = build_full_registry();
+        let n = full.len();
+        let registry =
+            full.apply_whitelist(whitelist::effective_tool_whitelist().as_deref().unwrap_or(&[]));
+        assert_eq!(registry.len(), n, "backward compat: 全 tool 維持");
+        assert!(registry.has("file_write"));
+    }
+
     #[test]
     fn test_register_and_get() {
         let reg = build_registry();
