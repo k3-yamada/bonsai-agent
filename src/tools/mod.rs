@@ -12,6 +12,7 @@ pub mod sandbox;
 pub mod shell;
 pub mod typed;
 pub mod web;
+pub mod whitelist;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -290,6 +291,31 @@ impl ToolRegistry {
     /// 名前でツールを取得
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
+    }
+
+    /// 指定名の tool が登録済みか.
+    pub fn has(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    /// deny-by-default: whitelist に列挙された tool のみ残す (Z-NEW-E).
+    ///
+    /// 空 slice は **no-op** (filtering 無し)。これは
+    /// [`whitelist::effective_tool_whitelist`] が `None` の時に
+    /// `.as_deref().unwrap_or(&[])` 経由で空 slice を渡しても
+    /// 全 tool が維持される (backward compat) ための契約。
+    /// 実際の filter は非空 whitelist のみ適用する。
+    pub fn apply_whitelist(mut self, whitelist: &[String]) -> Self {
+        if whitelist.is_empty() {
+            return self;
+        }
+        self.tools
+            .retain(|name, _| whitelist.iter().any(|w| w == name));
+        // tool 集合変更につき semantic cache を無効化 (次回使用時に再構築)
+        if let Ok(mut cache) = self.semantic_cache.lock() {
+            *cache = None;
+        }
+        self
     }
 
     /// モデルCapabilityに基づくツールフィルタリング（OpenCode知見）
