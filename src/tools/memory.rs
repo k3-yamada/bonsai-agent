@@ -616,6 +616,32 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn t_compute_idf_weights_matches_df_formula() {
+        // IDF 単一スキャン batch 化の characterization test。df に基づく具体値と
+        // rare>common の重み順を検証し、N+1 → 単一スキャン refactor の behavior 不変を保証。
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        for i in 0..3 {
+            store
+                .save_memory(&format!("common filler {i}"), "fact", &[])
+                .unwrap();
+        }
+        store.save_memory("rareword beta", "fact", &[]).unwrap();
+        // N=4: "common" df=3 / "rareword" df=1 / "absent" df=0
+        let tokens = vec![
+            "common".to_string(),
+            "rareword".to_string(),
+            "absent".to_string(),
+        ];
+        let w = compute_idf_weights(store.conn(), &tokens).unwrap();
+        let n = 4.0_f64;
+        let expect = |df: f64| ((n + 1.0) / (df + 1.0)).ln() + 1.0;
+        assert!((w[0] - expect(3.0)).abs() < 1e-9, "common df=3: {w:?}");
+        assert!((w[1] - expect(1.0)).abs() < 1e-9, "rareword df=1: {w:?}");
+        assert!((w[2] - expect(0.0)).abs() < 1e-9, "absent df=0: {w:?}");
+        assert!(w[1] > w[0], "rare(df1) は common(df3) より高重み");
+    }
+
     // ---------- Phase 5 Red: CJK bigram tokenization (助詞非分離の根治) ----------
 
     #[test]
