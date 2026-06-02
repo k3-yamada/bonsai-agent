@@ -350,6 +350,34 @@ mod tests {
     }
 
     #[test]
+    fn t_ingest_dedups_duplicate_paragraphs_within_file() {
+        // 同一ファイル内に content 完全一致の段落が複数あっても 1 度だけ保存する。
+        // 旧 add ループは existing スナップショット前提のため初回 ingest で重複行を
+        // 二重保存していた (Red)。recall は出力 dedup するが DB 行重複は無駄なため掃除。
+        let store = MemoryStore::in_memory().unwrap();
+        let dir = std::env::temp_dir();
+        let fpath = dir.join(format!(
+            "bonsai_ingest_dup_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // 同一段落 "dup line" が 2 回 + 異なる段落 1 つ。
+        std::fs::write(&fpath, "dup line\n\ndup line\n\nother line").unwrap();
+
+        let first = ingest_path(&store, &fpath).unwrap();
+        assert_eq!(first, 2, "distinct 段落数 (dup line, other line) = 2 のみ保存");
+        assert_eq!(
+            store.memory_count().unwrap(),
+            2,
+            "重複段落は 1 行に集約され総数 2"
+        );
+        let _ = std::fs::remove_file(&fpath);
+    }
+
+    #[test]
     fn t_ingest_follows_edits_purges_stale() {
         // ファイル編集後の再 ingest で旧 chunk を purge し新 chunk へ置換する (編集追従)。
         // 旧実装は global content dedup のみで旧 chunk が残存 → Red。
