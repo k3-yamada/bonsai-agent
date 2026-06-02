@@ -1127,13 +1127,13 @@ fn run_repl_loop(
 // --- ユーティリティ ---
 
 fn get_db_path() -> String {
-    if let Some(data_dir) = dirs::data_dir() {
-        let dir = data_dir.join("bonsai-agent");
-        std::fs::create_dir_all(&dir).ok();
-        dir.join("bonsai.db").to_string_lossy().to_string()
-    } else {
-        "bonsai.db".to_string()
+    let env_override = std::env::var("BONSAI_DB_PATH").ok();
+    let path = bonsai_agent::config::resolve_db_path(env_override.as_deref(), dirs::data_dir());
+    // 親ディレクトリを作成して open を成功させる (env override 指定パスにも適用)。
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
     }
+    path.to_string_lossy().to_string()
 }
 
 fn ctrlc_handler(cancel: CancellationToken) {

@@ -584,6 +584,26 @@ impl AppConfig {
     }
 }
 
+/// SQLite メモリ DB のパスを解決する純粋関数 (I/O なし、testability 用)。
+///
+/// 優先順位:
+/// 1. `BONSAI_DB_PATH` env — 隔離 DB の明示指定。live 検証で production DB を
+///    汚染しないための経路 (`HOME=/tmp` ハックの代替)。空白のみは未設定扱い。
+/// 2. `<data_dir>/bonsai-agent/bonsai.db`
+/// 3. data_dir 不明時は CWD 直下の `bonsai.db`
+pub fn resolve_db_path(env_override: Option<&str>, data_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(raw) = env_override {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    match data_dir {
+        Some(dir) => dir.join("bonsai-agent").join("bonsai.db"),
+        None => PathBuf::from("bonsai.db"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
