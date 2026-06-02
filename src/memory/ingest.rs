@@ -373,7 +373,10 @@ mod tests {
         std::fs::write(&fpath, "dup line\n\ndup line\n\nother line").unwrap();
 
         let first = ingest_path(&store, &fpath).unwrap();
-        assert_eq!(first, 2, "distinct 段落数 (dup line, other line) = 2 のみ保存");
+        assert_eq!(
+            first, 2,
+            "distinct 段落数 (dup line, other line) = 2 のみ保存"
+        );
         assert_eq!(
             store.memory_count().unwrap(),
             2,
