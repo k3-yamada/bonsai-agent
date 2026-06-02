@@ -488,6 +488,25 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
         }
     }
 
+    // deny-by-default whitelist (Z-NEW-E): BONSAI_ENABLED_TOOLS 明示列挙 or BONSAI_LAB_SMOKE=1 時のみ
+    // readonly tool に絞る。env 未設定 (= None) で全 tool 維持 (backward compat)。
+    let tools = match bonsai_agent::tools::whitelist::effective_tool_whitelist() {
+        Some(whitelist) => {
+            let filtered = tools.apply_whitelist(&whitelist);
+            bonsai_agent::observability::logger::log_event(
+                bonsai_agent::observability::logger::LogLevel::Info,
+                "tools",
+                &format!(
+                    "tool whitelist 適用: {} tool に制限 ({})",
+                    filtered.len(),
+                    whitelist.join(",")
+                ),
+            );
+            filtered
+        }
+        None => tools,
+    };
+
     // ツール数上限警告
     tools.warn_if_exceeded(app_config.agent.max_tools_in_context);
 

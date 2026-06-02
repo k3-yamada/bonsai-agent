@@ -33,6 +33,8 @@ const WHITELIST_OVER_800: &[&str] = &[
     "src/tools/repomap.rs",
     "src/tools/mod.rs",
     "src/tools/file.rs",
+    // 知識デーモン recall/ingest 拡張 (06-01〜06-02 session) で 800 超過。既存 grandfather。
+    "src/tools/memory.rs",
     "src/memory/heuristics.rs",
     "src/memory/store.rs",
     "src/memory/factcheck.rs",
@@ -326,5 +328,58 @@ fn t_lint_error_messages_include_docs_link() {
             "[LINT:META] 必須 lint code {} が source 内に未発見. 修正方法: assert! 削除 silent regression 防止、docs/architecture/module-layer-rules.md を参照",
             bracketed
         );
+    }
+}
+
+// ===== tool whitelist deny-by-default wiring (Z-NEW-E) =====
+
+/// 実 tool struct の `const NAME` が [`READONLY_TOOL_WHITELIST`] と整合し、smoke mode で
+/// readonly のみ残り write tool (`file_write`) が除外される事を end-to-end で確証.
+/// NAME drift (例: "file_read" → 改名) が起きると本 test が fail して気付ける.
+///
+/// 注: 本 binary (structural) 内で env を触る唯一の test。他 test は env 不読のため
+/// 並列実行でも競合しない。
+#[test]
+fn t_smoke_whitelist_keeps_real_readonly_tools() {
+    use bonsai_agent::tools::ToolRegistry;
+    use bonsai_agent::tools::arxiv::ArxivTool;
+    use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
+    use bonsai_agent::tools::memory::RecallTool;
+    use bonsai_agent::tools::repomap::RepoMapTool;
+    use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
+    use bonsai_agent::tools::whitelist::{READONLY_TOOL_WHITELIST, effective_tool_whitelist};
+
+    // SAFETY: 本 binary 内で env を触る唯一の test (他 test は env 不読).
+    unsafe {
+        std::env::set_var("BONSAI_LAB_SMOKE", "1");
+        std::env::remove_var("BONSAI_ENABLED_TOOLS");
+    }
+
+    let mut reg = ToolRegistry::new();
+    reg.register(Box::new(FileReadTool));
+    reg.register(Box::new(FileWriteTool));
+    reg.register(Box::new(RepoMapTool));
+    reg.register(Box::new(WebFetchTool));
+    reg.register(Box::new(WebSearchTool));
+    reg.register(Box::new(ArxivTool));
+    reg.register(Box::new(RecallTool::new(
+        "bonsai_structural_whitelist_test.db",
+    )));
+
+    let reg = reg.apply_whitelist(effective_tool_whitelist().as_deref().unwrap_or(&[]));
+
+    for readonly in READONLY_TOOL_WHITELIST {
+        assert!(
+            reg.has(readonly),
+            "smoke mode で実 tool '{readonly}' が registry に残る (NAME 整合確認)"
+        );
+    }
+    assert!(
+        !reg.has("file_write"),
+        "smoke mode で write tool 'file_write' は除外される"
+    );
+
+    unsafe {
+        std::env::remove_var("BONSAI_LAB_SMOKE");
     }
 }

@@ -119,9 +119,10 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_DYNAMIC_BUDGET` | OFF | bool | Compaction dynamic budget (項目 248) |
 | `BONSAI_DYNAMIC_BUDGET_RATIOS` | 30/30/15/25 | 4 要素 sum=1.0 | 4 軸配分 (default 項目 263) |
 | `BONSAI_DYNAMIC_BUDGET_ALPHA` | 0.2 | 0.0..=1.0 | relevance 反映係数 |
-| `BONSAI_LAB_SMOKE` | OFF | bool | smoke task pool (5 件) 使用 + 項目 265 max_context 自動縮小 (14000→6000) |
+| `BONSAI_LAB_SMOKE` | OFF | bool | smoke task pool (5 件) 使用 + 項目 265 max_context 自動縮小 (14000→6000) + readonly tool whitelist 自動適用 (Z-NEW-E) |
 | `BONSAI_LAB_MAX_CTX` | None | 1..=14000 | max_context_tokens 明示 override (項目 265、smoke より優先) |
 | `BONSAI_T6_PROMPT_AUGMENT` | OFF | bool | T6 LongHorizonPlanning system prompt augment (項目 262、+14.4% strong ACCEPT、paired re-eval 待ち) |
+| `BONSAI_ENABLED_TOOLS` | None | comma-list | deny-by-default tool whitelist (Z-NEW-E)。列挙 tool のみ active、未設定で全 tool。smoke より優先 |
 
 ## 注意事項 (Phase 5 で「絶対に守るルール」化)
 
