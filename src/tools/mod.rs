@@ -924,6 +924,30 @@ mod tests {
     }
 
     #[test]
+    fn t_format_tool_listing_sorted_and_counted() {
+        let reg = build_full_registry();
+        let out = format_tool_listing(&reg);
+        assert!(out.contains("11"), "件数 11 を含む: {out}");
+        assert!(out.contains("file_read"));
+        assert!(out.contains("file_write"));
+        // 名前順ソート: arxiv_search が web_search より前
+        let a = out.find("arxiv_search").expect("arxiv_search 行");
+        let w = out.find("web_search").expect("web_search 行");
+        assert!(a < w, "名前順ソートされる");
+    }
+
+    #[test]
+    fn t_format_tool_listing_reflects_whitelist() {
+        let reg = build_full_registry()
+            .apply_whitelist(&["file_read".to_string(), "recall".to_string()]);
+        let out = format_tool_listing(&reg);
+        assert!(out.contains("file_read"));
+        assert!(out.contains("recall"));
+        assert!(!out.contains("file_write"), "whitelist 外は一覧に出ない");
+        assert!(out.contains('2'), "件数 2: {out}");
+    }
+
+    #[test]
     fn test_register_and_get() {
         let reg = build_registry();
         assert_eq!(reg.len(), 6);
