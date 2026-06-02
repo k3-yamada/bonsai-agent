@@ -1386,4 +1386,38 @@ max_iterations = 20
             "env=601 (range out) で default 180 fallback (Phase 1 Red FAIL = stub は 0)"
         );
     }
+
+    #[test]
+    fn t_resolve_db_path_env_override_takes_precedence() {
+        // BONSAI_DB_PATH 指定時は data_dir を無視してその path を直接使う。
+        // live 検証で production DB を汚染しない隔離 DB 指定経路 (HOME=/tmp ハック代替)。
+        let got = resolve_db_path(
+            Some("/tmp/iso/x.db"),
+            Some(PathBuf::from("/home/u/.local/share")),
+        );
+        assert_eq!(got, PathBuf::from("/tmp/iso/x.db"));
+    }
+
+    #[test]
+    fn t_resolve_db_path_default_uses_data_dir() {
+        let got = resolve_db_path(None, Some(PathBuf::from("/home/u/.local/share")));
+        assert_eq!(
+            got,
+            PathBuf::from("/home/u/.local/share/bonsai-agent/bonsai.db")
+        );
+    }
+
+    #[test]
+    fn t_resolve_db_path_no_data_dir_falls_back_to_cwd() {
+        let got = resolve_db_path(None, None);
+        assert_eq!(got, PathBuf::from("bonsai.db"));
+    }
+
+    #[test]
+    fn t_resolve_db_path_blank_env_is_ignored() {
+        // 空白のみ env は未設定扱い (`BONSAI_DB_PATH=` の誤設定で CWD 直下に
+        // 空 path で開くのを防ぐ robustness)。
+        let got = resolve_db_path(Some("   "), Some(PathBuf::from("/data")));
+        assert_eq!(got, PathBuf::from("/data/bonsai-agent/bonsai.db"));
+    }
 }
