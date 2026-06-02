@@ -336,6 +336,13 @@ impl ToolRegistry {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
+    /// 登録済みツール名を名前順 (alphabetical) で返す.
+    pub fn sorted_names(&self) -> Vec<&str> {
+        let mut names = self.names();
+        names.sort_unstable();
+        names
+    }
+
     /// 登録済みツール数
     pub fn len(&self) -> usize {
         self.tools.len()
@@ -741,6 +748,20 @@ impl Default for ToolRegistry {
     }
 }
 
+/// registry の登録ツールを名前順で整形する (`--list-tools` 用).
+///
+/// `setup_tools` で whitelist 適用後の **live registry** を渡せば、
+/// `BONSAI_ENABLED_TOOLS` / `BONSAI_LAB_SMOKE` の効果がそのまま反映される
+/// (MLX server 起動なしで whitelist 動作確認に使える)。
+pub fn format_tool_listing(registry: &ToolRegistry) -> String {
+    let names = registry.sorted_names();
+    let mut out = format!("登録ツール {} 件:\n", names.len());
+    for name in names {
+        out.push_str(&format!("  - {name}\n"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,8 +959,8 @@ mod tests {
 
     #[test]
     fn t_format_tool_listing_reflects_whitelist() {
-        let reg = build_full_registry()
-            .apply_whitelist(&["file_read".to_string(), "recall".to_string()]);
+        let reg =
+            build_full_registry().apply_whitelist(&["file_read".to_string(), "recall".to_string()]);
         let out = format_tool_listing(&reg);
         assert!(out.contains("file_read"));
         assert!(out.contains("recall"));

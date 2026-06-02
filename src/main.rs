@@ -67,6 +67,10 @@ struct Cli {
     #[arg(long)]
     manifest: bool,
 
+    /// 登録ツール一覧を表示（whitelist 適用後の live registry、BONSAI_ENABLED_TOOLS/LAB_SMOKE 反映）
+    #[arg(long)]
+    list_tools: bool,
+
     /// arxiv収集+自己改善
     #[arg(long)]
     evolve: bool,
@@ -251,6 +255,11 @@ fn main() -> Result<()> {
     }
     if cli.manifest {
         println!("{}", bonsai_agent::safety::manifest::format_manifest());
+        return Ok(());
+    }
+    if cli.list_tools {
+        // whitelist 適用後の live registry (ctx.tools は setup_tools で filter 済み)
+        print!("{}", bonsai_agent::tools::format_tool_listing(&ctx.tools));
         return Ok(());
     }
     if cli.vault {
