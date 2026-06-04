@@ -4,3 +4,4 @@ pub mod inference;
 pub mod llama_server;
 pub mod model_router;
 pub mod process_supervisor;
+pub mod supervised_backend;
