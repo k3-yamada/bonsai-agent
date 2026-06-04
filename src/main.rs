@@ -193,12 +193,16 @@ fn main() -> Result<()> {
         app_config.model.server_url.clone()
     };
 
-    // B-3: BONSAI_MLX_AUTO_CLAMP=1 のとき MLX server /props から n_ctx を取得し
+    // B-3: BONSAI_MLX_AUTO_CLAMP=1 のとき context 上限を取得し
     // context_length を min(configured, server_n_ctx) にクランプ (LocalAI fit_params 思想)。
-    // env unset / server 未応答時は no-op で完全後方互換。
+    // llama.cpp は /props、MLX はローカル model dir の config.json (max_position_embeddings)
+    // から取得する 2 段 fallback。env unset / 両方失敗時は no-op で完全後方互換。
     if bonsai_agent::config::is_mlx_auto_clamp() {
         let configured = app_config.model.context_length;
-        let server_n_ctx = bonsai_agent::runtime::server_props::fetch_server_n_ctx(&server_url);
+        let server_n_ctx = bonsai_agent::runtime::server_props::resolve_server_n_ctx(
+            &server_url,
+            &app_config.model.model_id,
+        );
         let clamped =
             bonsai_agent::runtime::server_props::clamp_context_to_server(configured, server_n_ctx);
         if clamped != configured {

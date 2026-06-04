@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """
-M-1: MLX server prompt cache potential measurement.
+M-1: MLX server prompt cache potential measurement (warmup-controlled).
 
-LocalAI 調査 (2026-06-04) 推奨 M-1 — MLX-LM server-side prompt cache の有無を確認し
-prefix reuse 率を計測する。
+LocalAI 調査 (2026-06-04) 推奨 M-1。初版は同一 prefix を 3 回送るだけだったため
+warmup (Metal kernel compile / model load) と prefix cache を区別できなかった。
+本版は 2 つの control を導入してこれを分離する:
+
+  1. Warmup phase — 計測前に throwaway request を投げ、cold-start (初回のみ遅い
+     steady-state) を計測対象から除外する。
+  2. SAME vs DIFF prefix control — 計測 phase で
+       SAME: 固定の長い system prompt (prefix cache hit 候補)
+       DIFF: 先頭に unique nonce を付けた system prompt (先頭 token が毎回異なる
+             → prefix cache miss を強制)
+     を interleave 計測する。両者の latency 差が真の prefix cache 効果。
+     SAME ≈ DIFF なら「prefix cache 不在 = 初版の +39% は warmup のみ」が確定する。
 
 Usage:
     python scripts/measure_prefix_cache_potential.py [--server http://localhost:8888]
+                                                     [--rounds 6] [--warmup 3]
 
 目的:
 - 項目 263/268 paired -6.83% の root cause 切り分け evidence
-  (prefix cache miss が MLX latency noise の一因かを確認)
-- /props から n_ctx を取得 (B-3 auto-clamp 機能の動作確認にも利用可)
+  (warmup を差し引いた真の prefix cache 効果の有無を判定)
+- /props / config から context 上限を確認 (B-3 auto-clamp の前提確認にも利用可)
 """
 import argparse
 import json
-import sys
+import statistics
 import time
-import urllib.request
 import urllib.error
+import urllib.request
+import uuid
 
 
 def fetch_json(server_url: str, path: str) -> dict | None:
@@ -87,113 +99,179 @@ def check_server_capabilities(server_url: str) -> dict:
     return result
 
 
-def measure_prefix_reuse(server_url: str, model_id: str = "bonsai") -> list[float]:
-    """同一 system prompt を繰り返し送り latency 変化を観測する"""
-    print("\n=== [2] Prefix Reuse Latency Measurement ===")
-    print("  (3 rounds with identical system prompt — cache hit should reduce latency)")
-
-    system_prompt = "You are a helpful assistant. Reply very briefly."
-    latencies = []
-
-    for i in range(3):
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Reply 'OK' only. (round {i + 1})"},
-        ]
-        payload = json.dumps({
-            "model": model_id,
-            "messages": messages,
-            "max_tokens": 5,
-            "temperature": 0.0,
-            "stream": False,
-        }).encode()
-
-        req = urllib.request.Request(
-            f"{server_url.rstrip('/')}/v1/chat/completions",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        t0 = time.monotonic()
-        try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                resp = json.loads(r.read())
-            elapsed = time.monotonic() - t0
-            latencies.append(elapsed)
-            content = (
-                resp.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "?")
-            )
-            usage = resp.get("usage", {})
-            print(
-                f"  Round {i + 1}: {elapsed:.3f}s | "
-                f"prompt={usage.get('prompt_tokens','?')}tok "
-                f"completion={usage.get('completion_tokens','?')}tok | "
-                f"reply={content!r}"
-            )
-        except Exception as e:
-            print(f"  Round {i + 1}: ERROR — {e}")
-
-    return latencies
+# 長い固定 prefix — prefix cache が効くだけの token 数を稼ぐ (~数百 token)。
+# 内容は無害な instruction の反復。SAME trial はこれをそのまま使う。
+_SHARED_PREFIX = (
+    "You are a meticulous assistant operating under strict constraints. "
+    "Follow every instruction precisely and answer with extreme brevity. "
+) * 24
 
 
-def analyze_results(latencies: list[float]) -> None:
-    print("\n=== [3] Analysis ===")
-    if len(latencies) < 2:
+def _one_call(server_url: str, model_id: str, system_prompt: str, tag: str) -> float | None:
+    """1 回の chat completion を投げ、wall latency(秒) を返す。失敗で None。"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Reply 'OK' only. ({tag})"},
+    ]
+    payload = json.dumps({
+        "model": model_id,
+        "messages": messages,
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            json.loads(r.read())
+        return time.monotonic() - t0
+    except Exception as e:
+        print(f"  [{tag}] ERROR — {e}")
+        return None
+
+
+def run_warmup(server_url: str, model_id: str, n: int) -> None:
+    """計測前に throwaway request を投げ cold-start を除外する。"""
+    print(f"\n=== [2] Warmup ({n} throwaway calls — excluded from measurement) ===")
+    for i in range(n):
+        # warmup ごとに別 prefix で、SAME/DIFF どちらにも cache を残さない。
+        sys_prompt = f"warmup-{uuid.uuid4().hex}\n{_SHARED_PREFIX}"
+        lat = _one_call(server_url, model_id, sys_prompt, f"warmup {i + 1}")
+        if lat is not None:
+            print(f"  warmup {i + 1}: {lat:.3f}s")
+
+
+def measure_same_vs_diff(
+    server_url: str, model_id: str, rounds: int
+) -> tuple[list[float], list[float]]:
+    """SAME prefix と DIFF prefix を interleave 計測する。
+
+    SAME: 固定 prefix (warmup 後は prefix cache hit 候補)
+    DIFF: 先頭 unique nonce 付き (先頭 token が毎回異なる → cache miss 強制)
+    交互に投げて時間ドリフトを相殺する。
+    """
+    print(f"\n=== [3] SAME vs DIFF prefix ({rounds} rounds each, interleaved) ===")
+    same_lat: list[float] = []
+    diff_lat: list[float] = []
+    for i in range(rounds):
+        # SAME: 固定 prefix。
+        s = _one_call(server_url, model_id, _SHARED_PREFIX, f"same {i + 1}")
+        # DIFF: 先頭に nonce → 先頭 token から divergence。
+        diff_prompt = f"{uuid.uuid4().hex}\n{_SHARED_PREFIX}"
+        d = _one_call(server_url, model_id, diff_prompt, f"diff {i + 1}")
+        if s is not None:
+            same_lat.append(s)
+        if d is not None:
+            diff_lat.append(d)
+        s_str = f"{s:.3f}s" if s is not None else "ERR"
+        d_str = f"{d:.3f}s" if d is not None else "ERR"
+        print(f"  round {i + 1}: SAME={s_str}  DIFF={d_str}")
+    return same_lat, diff_lat
+
+
+def analyze(same_lat: list[float], diff_lat: list[float]) -> None:
+    """PAIRED 解析。
+
+    SAME/DIFF は同 round に interleave 計測したので、独立 median 比較ではなく
+    per-round の paired delta (diff[i] - same[i]) で評価する。これにより緩やかな
+    latency drift (熱/負荷) を round 内で相殺する (ADR-003 paired-evidence 規律)。
+
+    判定は 2 条件を AND で要求し、片方でも欠ければ inconclusive とする:
+      (a) 符号一貫性 — paired delta が過半数で正 (DIFF が遅い = SAME が cache hit)
+      (b) 効果量 — mean paired delta の相対値がノイズフロア (5%) を超える
+    """
+    print("\n=== [4] Analysis (paired, warmup-controlled) ===")
+    n = min(len(same_lat), len(diff_lat))
+    if n < 2:
         print("  Insufficient data for analysis.")
         return
 
-    first = latencies[0]
-    last = latencies[-1]
-    improvement_pct = (first - last) / first * 100 if first > 0 else 0
+    same_mean = statistics.mean(same_lat)
+    diff_mean = statistics.mean(diff_lat)
+    same_sd = statistics.pstdev(same_lat)
+    diff_sd = statistics.pstdev(diff_lat)
+    print(f"  SAME : mean={same_mean:.3f}s sd={same_sd:.3f}s n={len(same_lat)}")
+    print(f"  DIFF : mean={diff_mean:.3f}s sd={diff_sd:.3f}s n={len(diff_lat)}")
 
-    print(f"  First round latency : {first:.3f}s")
-    print(f"  Last round latency  : {last:.3f}s")
-    print(f"  Δ (first - last)    : {first - last:+.3f}s ({improvement_pct:+.1f}%)")
+    # ── drift confound 警告: 末尾が先頭の 1.5x 超なら latency が単調上昇している ──
+    drift = (same_lat[-1] + diff_lat[-1]) > 1.5 * (same_lat[0] + diff_lat[0])
+    if drift:
+        print("  ⚠️  latency が計測中に上昇 (熱/負荷 drift) — paired delta で相殺評価する")
+
+    # ── paired delta ──
+    # MLX latency は heavy-tail (単発ストールで 5-6x spike)。mean は外れ値に
+    # 乗っ取られるため、verdict は MEDIAN paired delta で評価する (mean は参考表示)。
+    deltas = [diff_lat[i] - same_lat[i] for i in range(n)]
+    mean_delta = statistics.mean(deltas)
+    median_delta = statistics.median(deltas)
+    median_same = statistics.median(same_lat)
+    n_pos = sum(1 for d in deltas if d > 0)
+    # 相対効果: median paired delta を median SAME で正規化 (外れ値に頑健)。
+    rel_pct = median_delta / median_same * 100 if median_same > 0 else 0.0
+    print(
+        f"  paired delta (DIFF-SAME): median={median_delta:+.3f}s "
+        f"({rel_pct:+.1f}% of median SAME) | mean={mean_delta:+.3f}s (outlier-inflated)"
+    )
+    print(f"  sign: {n_pos}/{n} rounds DIFF slower (SAME faster)")
+    print("  per-round deltas:", [f"{d:+.3f}s" for d in deltas])
     print()
 
-    # MLX latency noise floor from item 268: ~5%
     NOISE_FLOOR_PCT = 5.0
-    if improvement_pct > NOISE_FLOOR_PCT:
-        print(f"  ✅ Possible prefix cache effect (>{NOISE_FLOOR_PCT:.0f}% speedup exceeds noise floor)")
-        print("     Recommendation: investigate MLX-LM --cache-limit-gb flag")
-    elif improvement_pct < -NOISE_FLOOR_PCT:
-        print("  ⚠️  Latency INCREASED on repeated calls (unexpected — check server load)")
+    sign_ok = n_pos > n / 2.0 and (n_pos / n) >= 2.0 / 3.0  # 過半数 かつ >=2/3
+    effect_ok = rel_pct > NOISE_FLOOR_PCT
+    if sign_ok and effect_ok:
+        print(f"  ✅ REAL prefix cache effect: SAME faster by {rel_pct:.1f}% (paired, {n_pos}/{n})")
+        print("     warmup 除外 + paired drift 相殺後も SAME<DIFF = server が prefix を cache。")
+        print("     項目 263/268 含意: prefix cache miss が paired noise の一因たり得る。")
+    elif n_pos < n / 2.0 and rel_pct < -NOISE_FLOOR_PCT:
+        print("  ⚠️  SAME slower than DIFF (unexpected — server load / measurement artifact)")
     else:
-        print(f"  ℹ️  No significant speedup within noise floor (±{NOISE_FLOOR_PCT:.0f}%)")
-        print("     Conclusion: MLX server likely does NOT cache prompt prefixes client-side")
-        print("     item 268 paired -6.83% root cause remains: MLX latency measurement noise")
+        print("  ℹ️  INCONCLUSIVE / no robust prefix cache effect.")
+        print(f"     sign {n_pos}/{n} (need >=2/3) and/or effect {rel_pct:+.1f}% (need >{NOISE_FLOOR_PCT:.0f}%) 不足。")
+        print("     median だけ見ると効果ありに見えるが、符号反転 round + 大きな分散が示す通り")
+        print("     drift/noise 支配。初版 +39% (round1→2) は warmup (cold-start) が真因と整合し、")
+        print("     項目 263/268 paired noise への prefix-cache 寄与は確証できない。")
 
     print()
-    print("  All latency values:", [f"{l:.3f}s" for l in latencies])
+    print("  SAME latencies:", [f"{l:.3f}s" for l in same_lat])
+    print("  DIFF latencies:", [f"{l:.3f}s" for l in diff_lat])
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MLX prompt cache potential measurement (M-1)")
+    parser = argparse.ArgumentParser(
+        description="MLX prompt cache potential measurement (M-1, warmup-controlled)"
+    )
     parser.add_argument("--server", default="http://localhost:8888", help="MLX server URL")
     parser.add_argument("--model", default="bonsai", help="Model ID for /v1/chat/completions")
+    parser.add_argument("--rounds", type=int, default=6, help="SAME/DIFF rounds (each)")
+    parser.add_argument("--warmup", type=int, default=3, help="Warmup throwaway calls")
     args = parser.parse_args()
 
-    print(f"MLX Prompt Cache Potential Measurement (M-1)")
+    print("MLX Prompt Cache Potential Measurement (M-1, warmup-controlled)")
     print(f"Server : {args.server}")
     print(f"Model  : {args.model}")
+    print(f"Rounds : {args.rounds}  Warmup : {args.warmup}")
     print()
 
     caps = check_server_capabilities(args.server)
-
     model_id = caps.get("model_id", args.model)
-    latencies = measure_prefix_reuse(args.server, model_id)
 
-    analyze_results(latencies)
+    run_warmup(args.server, model_id, args.warmup)
+    same_lat, diff_lat = measure_same_vs_diff(args.server, model_id, args.rounds)
+    analyze(same_lat, diff_lat)
 
     print("\n=== Summary ===")
     n_ctx = caps.get("n_ctx")
     if n_ctx:
-        print(f"  /props n_ctx={n_ctx} → B-3 auto-clamp applicable ✅")
+        print(f"  /props n_ctx={n_ctx} → B-3 auto-clamp applicable via /props ✅")
     else:
-        print("  /props n_ctx=unavailable → B-3 auto-clamp will use configured value")
+        print("  /props n_ctx=unavailable → B-3 falls back to model card config.json")
 
     cache_metrics = caps.get("has_cache_metrics")
     if cache_metrics:

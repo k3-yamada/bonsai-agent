@@ -278,6 +278,54 @@ mod tests {
         s.kill(); // panic しないこと
     }
 
+    // ── B-1 follow-up: 実 HTTP socket での is_healthy + idle ライフサイクル e2e ──
+
+    /// 常に `200 OK` を返す in-process mock HTTP server を ephemeral port で起動し、
+    /// base URL (`http://127.0.0.1:<port>`) を返す。accept ループは daemon thread。
+    fn spawn_always_ok_server() -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf); // request を drain (内容は不問)
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// 実 HTTP round-trip で is_healthy=true を確認し、idle timeout 超過で
+    /// is_idle/kill_if_idle が遷移、record_request で復帰することを end-to-end 検証。
+    /// 外部 server 不要 (in-process mock)、CI safe。
+    #[test]
+    fn t_is_healthy_and_idle_cycle_real_socket() {
+        let base = spawn_always_ok_server();
+        let health_url = format!("{base}/health");
+        // idle_timeout=1s (秒単位最小)。
+        let s = ProcessSupervisor::new(health_url, 1);
+
+        // 実 HTTP で health 200 → healthy。
+        assert!(s.is_healthy(), "mock server は 200 を返すので healthy");
+
+        // request 直後は idle でない。
+        s.record_request();
+        assert!(!s.is_idle(), "record 直後は idle でない");
+
+        // idle timeout 超過 → idle、child=None なので kill は no-op だが kill_if_idle=true。
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(s.is_idle(), "1s 超過で idle");
+        assert!(s.kill_if_idle(), "idle なら kill_if_idle=true");
+
+        // record_request で idle timer 復帰。
+        s.record_request();
+        assert!(!s.is_idle(), "record_request 後は idle 解除");
+    }
+
     // ── 実プロセス integration test (real MLX env が必要、default skip) ──
 
     /// 実 spawn → kill のラウンドトリップ。実バイナリ要なので #[ignore]。
