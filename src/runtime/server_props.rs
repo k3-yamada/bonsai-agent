@@ -6,10 +6,15 @@ struct ServerProps {
     n_ctx: Option<u32>,
 }
 
-/// MLX server の `/props` エンドポイントから `n_ctx` を取得する。
+/// server の `/props` エンドポイントから `n_ctx` を取得する。
 ///
 /// サーバーが到達不能または `n_ctx` フィールドが存在しない場合は `None` を返す。
 /// HTTP エラー・JSON パースエラーはすべて `None` として扱い、呼び出し元に伝播しない。
+///
+/// **実機 finding (2026-06-04)**: `/props` は **llama.cpp 専用**エンドポイント。
+/// 現行 MLX backend (mlx-openai-server) は `/props` 404 + `/v1/models` にも
+/// `context_length` 非搭載のため、B-3 auto-clamp は **MLX backend では永久 no-op**。
+/// llama.cpp backend (fallback chain) 使用時のみ有効。env-gated かつ None で無害なため残置。
 pub fn fetch_server_n_ctx(server_url: &str) -> Option<u32> {
     let agent = crate::runtime::http_agent::short_agent();
     let url = format!("{}/props", server_url.trim_end_matches('/'));
