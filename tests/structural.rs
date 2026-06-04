@@ -59,7 +59,7 @@ const WHITELIST_OVER_800: &[&str] = &[
 /// (path, current_layer, imported_layer) tuple、現状は type-only import や
 /// cross-cutting reference として legitimate. 真の防御は逆方向 function call で、
 /// type read だけは layer 順を弱めて許容. follow-up plan で個別 audit 推奨.
-const WHITELIST_DEP: &[(&str, &str, &str)] = &[("src/memory/heuristics.rs", "memory", "runtime")];
+const WHITELIST_DEP: &[(&str, &str, &str)] = &[];
 
 /// LOG-001 whitelist — Phase 2 Green で operator visibility 用途を許容.
 /// path string substr match.

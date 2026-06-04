@@ -12,8 +12,8 @@ use crate::agent::error_recovery::{
 use crate::agent::middleware::MiddlewareChain;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
+use crate::domain::llm::LlmBackend;
 use crate::memory::store::MemoryStore;
-use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{AdvisorConfig, CriticConfig};
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::{ToolRegistry, ToolResultCache};

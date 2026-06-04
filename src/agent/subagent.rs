@@ -4,10 +4,10 @@ use crate::agent::agent_loop::{AgentConfig, run_agent_loop};
 use crate::agent::task::{TaskManager, TaskState};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
+use crate::domain::llm::LlmBackend;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
-use crate::runtime::inference::LlmBackend;
 use crate::tools::ToolRegistry;
 
 /// サブエージェント実行の最大深度（2階層まで）
@@ -505,7 +505,7 @@ pub fn execute_single_subtask(
 mod tests {
     use super::*;
     use crate::cancel::CancellationToken;
-    use crate::runtime::inference::MockLlmBackend;
+    use crate::domain::llm::MockLlmBackend;
     use crate::tools::ToolRegistry;
 
     fn test_store() -> MemoryStore {

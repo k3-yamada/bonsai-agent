@@ -7,9 +7,9 @@ use crate::agent::middleware::StepResult as MwStepResult;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::{Message, Session};
+use crate::domain::llm::LlmBackend;
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
-use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{CriticDisagreementAction, CriticOutcome};
 
 use super::advisor_inject::{

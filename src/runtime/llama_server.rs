@@ -9,9 +9,9 @@ use anyhow::Result;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::Message;
+use crate::domain::llm::{GenerateResult, LlmBackend, TokenUsage};
 use crate::domain::tool_schema::ToolSchema;
 use crate::runtime::http_agent::{shared_agent, short_agent, streaming_agent};
-use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 
 /// llama-serverプロセスを管理し、OpenAI互換APIで通信するバックエンド
 pub struct LlamaServerBackend {

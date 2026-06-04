@@ -6,8 +6,8 @@ use crate::agent::agent_loop::{AgentConfig, AgentLoopResult, run_agent_loop};
 use crate::agent::t6_prompt_augment::augment_system_prompt;
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
+use crate::domain::llm::LlmBackend;
 use crate::memory::store::MemoryStore;
-use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::AdvisorConfig;
 use crate::tools::ToolRegistry;
 

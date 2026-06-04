@@ -13,10 +13,10 @@ use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::{Message, Session};
 use crate::domain::event::classify_task_type;
+use crate::domain::llm::LlmBackend;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
-use crate::runtime::inference::LlmBackend;
 use crate::runtime::model_router::{
     AdvisorConfig, AdvisorRole, CriticConfig, CriticMode, CriticOutcome,
 };

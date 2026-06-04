@@ -13,6 +13,7 @@ use crate::agent::experiment_log::{
 use crate::agent::judge::{HttpAdvisorJudge, LlmJudge, RubricScore};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
+use crate::domain::llm::LlmBackend;
 use crate::memory::experience::{ExperienceStore, SubgoalJudgeMethod, extract_hindsight_relabels};
 use crate::memory::factcheck::{self, FactCheckSummary};
 use crate::memory::graph::KnowledgeGraph;
@@ -22,7 +23,6 @@ use crate::memory::heuristics::{
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
-use crate::runtime::inference::LlmBackend;
 use crate::tools::ToolRegistry;
 
 /// 変異候補
@@ -3579,7 +3579,7 @@ mod tests {
     /// Phase 1 Red 核心: count=3 で MockLlmBackend.generate を 3 回呼ぶ → return 3.
     #[test]
     fn t_lab_mlx_prewarm_returns_count_when_all_succeed() {
-        let backend = crate::runtime::inference::MockLlmBackend::new(vec![
+        let backend = crate::domain::llm::MockLlmBackend::new(vec![
             "warm1".to_string(),
             "warm2".to_string(),
             "warm3".to_string(),
@@ -3595,7 +3595,7 @@ mod tests {
     /// Phase 1 Red sanity: count=0 で no-op、return 0 (stub も 0 → PASS).
     #[test]
     fn t_lab_mlx_prewarm_zero_count_is_noop() {
-        let backend = crate::runtime::inference::MockLlmBackend::single("unused");
+        let backend = crate::domain::llm::MockLlmBackend::single("unused");
         let cancel = CancellationToken::new();
         let succ = lab_mlx_prewarm(&backend, 0, &cancel);
         assert_eq!(succ, 0, "count==0 で generate 呼出ゼロ (no-op)");
@@ -3604,9 +3604,8 @@ mod tests {
     /// Phase 1 Red 核心: count=5 で return 5 (FAIL、stub 0 と乖離).
     #[test]
     fn t_lab_mlx_prewarm_count_5_all_succeed() {
-        let backend = crate::runtime::inference::MockLlmBackend::new(
-            (0..5).map(|i| format!("warm{i}")).collect(),
-        );
+        let backend =
+            crate::domain::llm::MockLlmBackend::new((0..5).map(|i| format!("warm{i}")).collect());
         let cancel = CancellationToken::new();
         let succ = lab_mlx_prewarm(&backend, 5, &cancel);
         assert_eq!(
@@ -3621,7 +3620,7 @@ mod tests {
 
     /// `LlmBackend` を impl して常に Err を返す test-only backend.
     struct AlwaysFailBackend;
-    impl crate::runtime::inference::LlmBackend for AlwaysFailBackend {
+    impl crate::domain::llm::LlmBackend for AlwaysFailBackend {
         fn model_id(&self) -> &str {
             "always-fail-mock"
         }
@@ -3631,7 +3630,7 @@ mod tests {
             _tools: &[crate::domain::tool_schema::ToolSchema],
             _on_token: &mut dyn FnMut(&str),
             _cancel: &CancellationToken,
-        ) -> Result<crate::runtime::inference::GenerateResult> {
+        ) -> Result<crate::domain::llm::GenerateResult> {
             anyhow::bail!("simulated MLX server unreachable (F1 test)")
         }
     }

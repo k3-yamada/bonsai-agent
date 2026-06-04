@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::Message;
+use crate::domain::llm::{GenerateResult, LlmBackend, TokenUsage};
 use crate::domain::tool_schema::ToolSchema;
-use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 
 /// 推論結果キャッシュ。model_id + messages + tools のハッシュをキーに使用。
 pub struct InferenceCache {
@@ -312,7 +312,8 @@ mod tests {
 mod cached_tests {
     use super::*;
     use crate::config::ServerBackend;
-    use crate::runtime::inference::{FallbackBackend, MockLlmBackend};
+    use crate::domain::llm::MockLlmBackend;
+    use crate::runtime::inference::FallbackBackend;
     use crate::runtime::model_router::{FallbackChain, FallbackEntry};
 
     #[test]

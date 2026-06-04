@@ -6,10 +6,10 @@ use anyhow::Result;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::{Message, Session};
+use crate::domain::llm::{GenerateResult, LlmBackend, TokenUsage};
 use crate::domain::tool_schema::ToolSchema;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::AuditLog;
-use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 use crate::runtime::model_router::{CriticConfig, CriticMode, CriticOutcome};
 
 use super::advisor_inject::{force_separate_backend_panic, inject_critic_review};

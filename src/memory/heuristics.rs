@@ -23,12 +23,12 @@ use serde::{Deserialize, Serialize};
 use crate::cancel::CancellationToken;
 use crate::domain::conversation::Message;
 use crate::domain::event::{Event, EventRepository};
+use crate::domain::llm::LlmBackend;
 use crate::memory::decay;
 use crate::memory::review::{
     self, ReviewOutcome, ReviewState, ReviewStatus, compute_next_review_at,
     estimate_volatility_from_category,
 };
-use crate::runtime::inference::LlmBackend;
 
 /// Reflection prompt template (`prompts/heuristic_reflection.txt`、compile-time embed)。
 const REFLECTION_PROMPT_TEMPLATE: &str = include_str!("../../prompts/heuristic_reflection.txt");
@@ -761,9 +761,9 @@ pub(crate) fn detect_tool_chain_in_advice(
 mod tests {
     use super::*;
     use crate::domain::event::EventType;
+    use crate::domain::llm::MockLlmBackend;
     use crate::memory::mocks::event_repository_mock::MockEventRepository;
     use crate::memory::store::MemoryStore;
-    use crate::runtime::inference::MockLlmBackend;
 
     // ===========================================================================
     // HeuristicStore basic operations (8 tests、plan §5 Phase 1 Red)
