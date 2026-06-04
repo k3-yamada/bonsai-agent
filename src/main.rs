@@ -193,6 +193,23 @@ fn main() -> Result<()> {
         app_config.model.server_url.clone()
     };
 
+    // B-3: BONSAI_MLX_AUTO_CLAMP=1 のとき MLX server /props から n_ctx を取得し
+    // context_length を min(configured, server_n_ctx) にクランプ (LocalAI fit_params 思想)。
+    // env unset / server 未応答時は no-op で完全後方互換。
+    if bonsai_agent::config::is_mlx_auto_clamp() {
+        let configured = app_config.model.context_length;
+        let server_n_ctx = bonsai_agent::runtime::server_props::fetch_server_n_ctx(&server_url);
+        let clamped =
+            bonsai_agent::runtime::server_props::clamp_context_to_server(configured, server_n_ctx);
+        if clamped != configured {
+            eprintln!(
+                "[auto-clamp] BONSAI_MLX_AUTO_CLAMP=1 → context_length {} → {} (server n_ctx={:?})",
+                configured, clamped, server_n_ctx
+            );
+            app_config.model.context_length = clamped;
+        }
+    }
+
     let mut tools = setup_tools(&app_config);
     // プラグインツールの登録
     for plugin_tool in bonsai_agent::tools::plugin::load_plugin_tools(&app_config.plugins.tools) {
