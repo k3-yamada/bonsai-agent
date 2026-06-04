@@ -125,6 +125,9 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_LAB_MAX_CTX` | None | 1..=14000 | max_context_tokens 明示 override (項目 265、smoke より優先) |
 | `BONSAI_T6_PROMPT_AUGMENT` | OFF | bool | T6 LongHorizonPlanning system prompt augment (項目 262、+14.4% strong ACCEPT、paired re-eval 待ち) |
 | `BONSAI_ENABLED_TOOLS` | None | comma-list | deny-by-default tool whitelist (Z-NEW-E)。列挙 tool のみ active、未設定で全 tool。smoke より優先 |
+| `BONSAI_MLX_IDLE_TIMEOUT_SEC` | 0 (OFF) | int | B-1: N 秒 idle で MLX server 自動 kill + 次 request で lazy respawn。0 で lifecycle supervisor 全体無効 (既存挙動保持) |
+| `BONSAI_MLX_SPAWN_PROGRAM` | `~/.venvs/bonsai-mlx/bin/mlx-openai-server` | path | B-1: MLX server 起動プログラム (lazy respawn 用)。idle timeout>0 時のみ使用 |
+| `BONSAI_MLX_AUTO_CLAMP` | OFF | bool | B-3: 起動時 MLX `/props` の n_ctx で context_length を `min(configured, n_ctx)` にクランプ。server 未応答時 no-op。LocalAI fit_params 思想 |
 
 ## 注意事項 (Phase 5 で「絶対に守るルール」化)
 

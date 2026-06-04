@@ -142,10 +142,30 @@ impl ProcessSupervisor {
         self.last_used.lock().unwrap().elapsed() >= self.idle_timeout
     }
 
-    /// health_url に HTTP GET して 2xx なら true。
+    /// health_url の `/health` から `/v1/models` を導出する純粋関数。
+    ///
+    /// mlx-openai-server は `/health` 未対応 (`/v1/models` で応答)。llama_server.rs の
+    /// is_healthy() と同じフォールバック方針を踏襲するため、health_url の末尾 `/health` を
+    /// 剥がして `/v1/models` を組み立てる。
+    pub fn models_url_from_health(health_url: &str) -> String {
+        let base = health_url
+            .strip_suffix("/health")
+            .unwrap_or(health_url)
+            .trim_end_matches('/');
+        format!("{base}/v1/models")
+    }
+
+    /// health_url (`/health`) に HTTP GET、失敗時は `/v1/models` にフォールバック。
+    ///
+    /// llama-server は `/health`、mlx-openai-server / mlx-lm は `/v1/models` で応答するため
+    /// 両方を試す (llama_server.rs:75-88 と同方針)。どちらか 2xx なら healthy。
     pub fn is_healthy(&self) -> bool {
         let agent = crate::runtime::http_agent::short_agent();
-        agent.get(&self.health_url).call().is_ok()
+        if agent.get(&self.health_url).call().is_ok() {
+            return true;
+        }
+        let models_url = Self::models_url_from_health(&self.health_url);
+        agent.get(&models_url).call().is_ok()
     }
 }
 
@@ -205,6 +225,23 @@ mod tests {
                 "8000".to_string(),
             ],
             "mlx-openai-server launch 引数列が完全一致"
+        );
+    }
+
+    #[test]
+    fn t_models_url_from_health_strips_health_suffix() {
+        assert_eq!(
+            ProcessSupervisor::models_url_from_health("http://localhost:8000/health"),
+            "http://localhost:8000/v1/models"
+        );
+    }
+
+    #[test]
+    fn t_models_url_from_health_without_suffix() {
+        // /health が無い base URL でも /v1/models を付与
+        assert_eq!(
+            ProcessSupervisor::models_url_from_health("http://localhost:8000"),
+            "http://localhost:8000/v1/models"
         );
     }
 
