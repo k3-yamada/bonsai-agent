@@ -9,6 +9,12 @@ src/
 ├── main.rs / lib.rs / cancel.rs
 ├── config.rs                      # TOML設定（~/.config/bonsai-agent/config.toml）
 │                                  # AgentSettings.soul_path: SOUL.mdペルソナパス
+├── domain/                       # ★ 最下層 (Clean Architecture Entities + Ports、ADR-010)
+│   ├── conversation.rs           # Message, Role, Session, ToolCall, Attachment
+│   ├── tool_schema.rs            # ToolSchema DTO (Tool trait=振る舞いは tools 層)
+│   ├── embedder.rs               # Embedder trait + SimpleEmbedder/FastEmbedder + cosine
+│   ├── event.rs                  # Event/EventType/TrajectoryCandidate/EventRepository trait
+│   └── llm.rs                    # LlmBackend trait + GenerateResult/TokenUsage + MockLlmBackend
 ├── agent/
 │   ├── agent_loop/                # run_agent_loop() — Reflexion + 全パーツ統合 (mod 分割)
 │   │                              # core.rs: メインループ + emit_event helper
@@ -20,7 +26,6 @@ src/
 │   │                              # MultiRunConfig/MultiRunTaskScore — pass^k + PASS@(k,T) (項目 225)
 │   │                              # run_k() — 各タスクk回実行、pass_at_k/pass_consecutive_k計算
 │   ├── parse.rs / validate.rs     # <think>/<tool_call>パーサー、バリデーション
-│   ├── conversation.rs            # Message, Session, ToolCall
 │   ├── error_recovery.rs          # FailureMode(4種), CircuitBreaker, LoopDetector, ContinueSite
 │   ├── compaction.rs              # 4段階コンテキストコンパクション + AI+Toolペア保護
 │   ├── checkpoint.rs              # git stashチェックポイント/ロールバック
@@ -32,7 +37,7 @@ src/
 │   ├── middleware.rs              # ミドルウェアチェーン（5段）
 │   ├── subagent.rs                # SubAgentExecutor — サブタスク順次委任
 │   ├── working_memory.rs          # Miller 7±2 hard cap (項目 219、env-gated)
-│   └── event_store.rs             # Event Sourcing（統一イベントストリーム）
+│   └── event_store.rs             # 具象 EventStore<'a> (SQLite)。型/port/純粋ロジックは domain::event
 │                                  # EventType::AssistantMessage emit は step.rs 経由 (項目 237)
 ├── tools/
 │   ├── mod.rs                     # Tool トレイト + ToolRegistry（動的選択）
@@ -43,9 +48,9 @@ src/
 │   ├── mcp_client.rs              # MCPクライアント（JSON-RPC over stdio）
 │   └── hooks.rs / permission.rs / sandbox.rs
 ├── runtime/
-│   ├── inference.rs               # LlmBackend + MockLlmBackend
+│   ├── inference.rs               # FallbackBackend (具象)。LlmBackend trait/DTO/Mock は domain::llm
 │   ├── llama_server.rs            # LlamaServerBackend（HTTP API）
-│   ├── cache.rs / embedder.rs     # 推論キャッシュ、Embedder
+│   ├── cache.rs                   # 推論キャッシュ (Embedder は domain::embedder へ移動)
 │   └── model_router.rs            # ModelRouter + PipelineStage + AdvisorConfig + CriticConfig (項目 226)
 ├── memory/
 │   ├── store.rs                   # MemoryStore — SQLite A-MEM + セッション永続化
@@ -101,7 +106,7 @@ p^n 問題 (ステップ蓄積による失敗確率指数的増大) への対策
 ## Module layer 順
 
 詳細は [module-layer-rules.md](module-layer-rules.md) (Z-4 layer linter rule source) を参照。
-提案順: `db < observability < safety < memory < knowledge < runtime < tools < agent < main`
+層順 (確定、DEP-001 強制、WHITELIST_DEP=空): `domain < db < observability < safety < memory < knowledge < runtime < tools < agent < main` (ADR-010)
 
 ## 関連
 

@@ -24,6 +24,7 @@ Z-1 Phase 6 (CLAUDE.md 項目 1-254 から 30-40 件を ADR 化、~6-8h) で起�
 - [ADR-007](ADR-007-kg-factcheck-anti-hallucination.md) — KG Fact-Check Anti-Hallucination (Plan A) (Accepted 2026-05-31)
 - [ADR-008](ADR-008-compaction-strategy.md) — Context Compaction 戦略 (multi-level + dynamic budget OFF) (Accepted 2026-05-31)
 - [ADR-009](ADR-009-knowledge-daemon-recall-ingest.md) — 知識デーモン recall/ingest 層の設計判断 (採用機構 / 本規模不採用 / deferred rationale) (Accepted 2026-06-02)
+- [ADR-010](ADR-010-clean-architecture-domain-layer.md) — クリーンアーキテクチャ準拠: domain 層新設と DEP-001 違反ゼロ化 (Accepted 2026-06-04)
 
 ## 関連
 - .claude/plan/agents-md-docs-knowledge-base.md (Z-1 plan §6)
