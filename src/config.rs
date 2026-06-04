@@ -358,6 +358,17 @@ pub fn is_lab_mlx_warmup() -> bool {
     )
 }
 
+/// `BONSAI_MLX_AUTO_CLAMP=1` の場合、起動時に MLX server の `/props` から `n_ctx` を取得して
+/// `ModelConfig.context_length` を `min(configured, server_n_ctx)` にクランプする。
+///
+/// 環境変数未設定時は既存挙動を維持（副作用ゼロ）。
+pub fn is_mlx_auto_clamp() -> bool {
+    matches!(
+        std::env::var("BONSAI_MLX_AUTO_CLAMP").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 /// `BONSAI_LAB_MLX_WARMUP_COUNT=N` で pre-warm 投入回数 override (1..=10、項目 252 候補、F4 案 A).
 ///
 /// 戻り値: 1..=10 で `Some(N)`、parse 失敗 / 範囲外 / unset で `None` → caller 側 `unwrap_or(3)` 想定.
