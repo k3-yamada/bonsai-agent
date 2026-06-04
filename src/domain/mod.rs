@@ -1,5 +1,6 @@
 //! ドメイン層 — 最下層のエンティティ/値オブジェクト群。
-//! 他層に依存しない純粋な型のみを置く (Clean Architecture の Entities)。
+//! cross-cutting concern (`cancel` / `config`) を除き他層に依存しない純粋な型・port のみを
+//! 置く (Clean Architecture の Entities + Ports)。具象実装は上層に残す (DIP)。
 //! layer 順: domain < db < observability < ... (DEP-001、module-layer-rules.md)。
 
 pub mod conversation;
