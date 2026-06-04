@@ -10,15 +10,22 @@ struct ServerProps {
 ///
 /// サーバーが到達不能または `n_ctx` フィールドが存在しない場合は `None` を返す。
 /// HTTP エラー・JSON パースエラーはすべて `None` として扱い、呼び出し元に伝播しない。
-pub fn fetch_server_n_ctx(_server_url: &str) -> Option<u32> {
-    todo!()
+pub fn fetch_server_n_ctx(server_url: &str) -> Option<u32> {
+    let agent = crate::runtime::http_agent::short_agent();
+    let url = format!("{}/props", server_url.trim_end_matches('/'));
+    let mut resp = agent.get(&url).call().ok()?;
+    let props: ServerProps = resp.body_mut().read_json().ok()?;
+    props.n_ctx
 }
 
 /// `configured` と `server_n_ctx` の小さい方を返す。
 ///
 /// `server_n_ctx` が `None`（サーバー未応答）の場合は `configured` をそのまま返す。
-pub fn clamp_context_to_server(_configured: u32, _server_n_ctx: Option<u32>) -> u32 {
-    todo!()
+pub fn clamp_context_to_server(configured: u32, server_n_ctx: Option<u32>) -> u32 {
+    match server_n_ctx {
+        Some(n) => configured.min(n),
+        None => configured,
+    }
 }
 
 #[cfg(test)]
