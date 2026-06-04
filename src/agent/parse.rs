@@ -188,7 +188,7 @@ fn split_fg_params(s: &str) -> Vec<&str> {
 }
 
 /// ToolSchemaをFunctionGemma宣言形式に変換
-pub fn format_functiongemma_declaration(schema: &crate::tools::ToolSchema) -> String {
+pub fn format_functiongemma_declaration(schema: &crate::domain::tool_schema::ToolSchema) -> String {
     let mut decl = format!(
         "<start_function_declaration>declaration:{}{{description:<escape>{}<escape>",
         schema.name, schema.description
@@ -235,7 +235,9 @@ pub fn format_functiongemma_declaration(schema: &crate::tools::ToolSchema) -> St
 }
 
 /// 複数のToolSchemaからFunctionGemmaシステムプロンプトを構築
-pub fn format_functiongemma_system_prompt(schemas: &[crate::tools::ToolSchema]) -> String {
+pub fn format_functiongemma_system_prompt(
+    schemas: &[crate::domain::tool_schema::ToolSchema],
+) -> String {
     let mut prompt =
         String::from("You are a model that can do function calling with the following functions");
     for schema in schemas {
@@ -505,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_fg_format_tool_declaration() {
-        let schema = crate::tools::ToolSchema {
+        let schema = crate::domain::tool_schema::ToolSchema {
             name: "shell".to_string(),
             description: "Execute a shell command".to_string(),
             parameters: serde_json::json!({
@@ -529,12 +531,12 @@ mod tests {
     #[test]
     fn test_fg_format_system_prompt() {
         let schemas = vec![
-            crate::tools::ToolSchema {
+            crate::domain::tool_schema::ToolSchema {
                 name: "shell".to_string(),
                 description: "Execute a shell command".to_string(),
                 parameters: serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"cmd"}},"required":["command"]}),
             },
-            crate::tools::ToolSchema {
+            crate::domain::tool_schema::ToolSchema {
                 name: "file_read".to_string(),
                 description: "Read a file".to_string(),
                 parameters: serde_json::json!({"type":"object","properties":{"path":{"type":"string","description":"file path"}},"required":["path"]}),

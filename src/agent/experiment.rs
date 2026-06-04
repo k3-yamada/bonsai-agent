@@ -3628,7 +3628,7 @@ mod tests {
         fn generate(
             &self,
             _messages: &[crate::domain::conversation::Message],
-            _tools: &[crate::tools::ToolSchema],
+            _tools: &[crate::domain::tool_schema::ToolSchema],
             _on_token: &mut dyn FnMut(&str),
             _cancel: &CancellationToken,
         ) -> Result<crate::runtime::inference::GenerateResult> {

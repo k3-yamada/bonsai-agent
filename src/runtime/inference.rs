@@ -6,9 +6,9 @@ use anyhow::Result;
 
 use crate::cancel::CancellationToken;
 use crate::domain::conversation::Message;
+use crate::domain::tool_schema::ToolSchema;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::model_router::{FallbackChain, FallbackEntry};
-use crate::tools::ToolSchema;
 
 /// トークン使用量
 #[derive(Debug, Clone)]

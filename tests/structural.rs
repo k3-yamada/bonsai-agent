@@ -71,9 +71,6 @@ const WHITELIST_DEP: &[(&str, &str, &str)] = &[
     ("src/memory/store.rs", "memory", "runtime"),
     ("src/memory/skill.rs", "memory", "agent"),
     ("src/memory/search.rs", "memory", "runtime"),
-    ("src/runtime/cache.rs", "runtime", "tools"),
-    ("src/runtime/llama_server.rs", "runtime", "tools"),
-    ("src/runtime/inference.rs", "runtime", "tools"),
     ("src/observability/audit.rs", "observability", "memory"),
 ];
 

@@ -15,20 +15,12 @@ pub mod web;
 pub mod whitelist;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::domain::tool_schema::ToolSchema;
 use crate::runtime::embedder::{Embedder, cosine_similarity, create_embedder};
 use crate::tools::permission::Permission;
-
-/// ツールのスキーマ情報（LLMのシステムプロンプトに注入する）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolSchema {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-}
 
 /// ツールの実行結果
 #[derive(Debug, Clone)]

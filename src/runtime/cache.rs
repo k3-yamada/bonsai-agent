@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::Message;
+use crate::domain::tool_schema::ToolSchema;
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
-use crate::tools::ToolSchema;
 
 /// 推論結果キャッシュ。model_id + messages + tools のハッシュをキーに使用。
 pub struct InferenceCache {

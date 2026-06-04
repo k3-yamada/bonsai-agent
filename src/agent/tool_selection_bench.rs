@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::parse::{format_functiongemma_system_prompt, parse_functiongemma_output};
-use crate::tools::ToolSchema;
+use crate::domain::tool_schema::ToolSchema;
 
 /// ツール選択テストケース
 #[derive(Debug, Clone)]
