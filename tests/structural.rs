@@ -60,15 +60,7 @@ const WHITELIST_OVER_800: &[&str] = &[
 /// cross-cutting reference として legitimate. 真の防御は逆方向 function call で、
 /// type read だけは layer 順を弱めて許容. follow-up plan で個別 audit 推奨.
 const WHITELIST_DEP: &[(&str, &str, &str)] = &[
-    (
-        "src/memory/mocks/event_repository_mock.rs",
-        "memory",
-        "agent",
-    ),
-    ("src/memory/experience.rs", "memory", "agent"),
-    ("src/memory/heuristics.rs", "memory", "agent"),
     ("src/memory/heuristics.rs", "memory", "runtime"),
-    ("src/memory/skill.rs", "memory", "agent"),
     ("src/observability/audit.rs", "observability", "memory"),
 ];
 
@@ -81,7 +73,7 @@ const WHITELIST_EPRINTLN: &[&str] = &[
     "src/agent/agent_loop/step.rs",   // step 進捗
     "src/agent/context_inject.rs",    // context 注入 trace
     "src/runtime/llama_server.rs",    // server log
-    "src/domain/embedder.rs",        // embed log
+    "src/domain/embedder.rs",         // embed log
     "src/observability/logger.rs",    // logger 内部 (log_event implementation)
     "src/safety/secrets.rs",          // security warning
     "src/knowledge/vault_lint.rs",    // 項目 246 implementation の意図的 eprintln

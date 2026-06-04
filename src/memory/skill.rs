@@ -161,7 +161,7 @@ impl<'a> SkillStore<'a> {
     /// スキル名は task_description 先頭30文字 + tool_chain ハッシュ4桁で安定化。
     pub fn promote_from_trajectory(
         &self,
-        candidate: &crate::agent::event_store::TrajectoryCandidate,
+        candidate: &crate::domain::event::TrajectoryCandidate,
     ) -> Result<Option<i64>> {
         self.promote_with_prefix(candidate, "traj_")
     }
@@ -169,7 +169,7 @@ impl<'a> SkillStore<'a> {
     /// 軌跡候補を任意 prefix で昇格 (promote_from_trajectory / HSL 共通の private helper)
     fn promote_with_prefix(
         &self,
-        candidate: &crate::agent::event_store::TrajectoryCandidate,
+        candidate: &crate::domain::event::TrajectoryCandidate,
         prefix: &str,
     ) -> Result<Option<i64>> {
         let tool_chain = candidate.tool_chain_key();
@@ -256,7 +256,7 @@ impl<'a> SkillStore<'a> {
         // ERL advice は実 trajectory 由来でないため duration_ms=0、
         // tool_success_rate=1.0 (reflection が helpful chain と推奨した想定)。
         // task_description には advice 先頭 30 chars を入れて prefix 由来を識別容易に。
-        let candidate = crate::agent::event_store::TrajectoryCandidate {
+        let candidate = crate::domain::event::TrajectoryCandidate {
             session_id: source_session_id.to_string(),
             task_description: advice.chars().take(30).collect::<String>(),
             tool_sequence: tool_chain.to_vec(),
@@ -505,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_promote_from_trajectory_basic() {
-        use crate::agent::event_store::TrajectoryCandidate;
+        use crate::domain::event::TrajectoryCandidate;
         let store = test_store();
         let skills = SkillStore::new(store.conn());
 
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_promote_from_trajectory_deduplicates() {
-        use crate::agent::event_store::TrajectoryCandidate;
+        use crate::domain::event::TrajectoryCandidate;
         let store = test_store();
         let skills = SkillStore::new(store.conn());
 
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_promote_from_trajectory_empty_tool_chain() {
-        use crate::agent::event_store::TrajectoryCandidate;
+        use crate::domain::event::TrajectoryCandidate;
         let store = test_store();
         let skills = SkillStore::new(store.conn());
         let c = TrajectoryCandidate {
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn t_promote_hsl_dedup() {
-        use crate::agent::event_store::TrajectoryCandidate;
+        use crate::domain::event::TrajectoryCandidate;
         let store = test_store();
         let skills = SkillStore::new(store.conn());
         // 既存 success trajectory を昇格
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn t_existing_promote_from_trajectory_unaffected() {
         // 既存 promote_from_trajectory が無変更で動くことを確認 (regression check)
-        use crate::agent::event_store::TrajectoryCandidate;
+        use crate::domain::event::TrajectoryCandidate;
         let store = test_store();
         let skills = SkillStore::new(store.conn());
         let candidate = TrajectoryCandidate {

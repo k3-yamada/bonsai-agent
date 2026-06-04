@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 
-use crate::agent::event_store::{
+use crate::domain::event::{
     Event, EventRepository, EventType, TrajectoryCandidate, build_trajectory_from_events,
     classify_session_for_verification,
 };

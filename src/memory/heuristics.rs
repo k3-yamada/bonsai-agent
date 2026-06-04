@@ -20,9 +20,9 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::event_store::{Event, EventRepository};
 use crate::cancel::CancellationToken;
 use crate::domain::conversation::Message;
+use crate::domain::event::{Event, EventRepository};
 use crate::memory::decay;
 use crate::memory::review::{
     self, ReviewOutcome, ReviewState, ReviewStatus, compute_next_review_at,
@@ -760,7 +760,7 @@ pub(crate) fn detect_tool_chain_in_advice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::event_store::EventType;
+    use crate::domain::event::EventType;
     use crate::memory::mocks::event_repository_mock::MockEventRepository;
     use crate::memory::store::MemoryStore;
     use crate::runtime::inference::MockLlmBackend;

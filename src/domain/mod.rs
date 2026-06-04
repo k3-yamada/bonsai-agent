@@ -4,4 +4,5 @@
 
 pub mod conversation;
 pub mod embedder;
+pub mod event;
 pub mod tool_schema;

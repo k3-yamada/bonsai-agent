@@ -3179,7 +3179,7 @@ mod tests {
     ) {
         es.append(
             session_id,
-            &crate::agent::event_store::EventType::SessionStart,
+            &crate::domain::event::EventType::SessionStart,
             "{}",
             None,
         )
@@ -3187,7 +3187,7 @@ mod tests {
         let user_payload = format!(r#"{{"content":"{}"}}"#, user_content);
         es.append(
             session_id,
-            &crate::agent::event_store::EventType::UserMessage,
+            &crate::domain::event::EventType::UserMessage,
             &user_payload,
             Some(0),
         )
@@ -3196,7 +3196,7 @@ mod tests {
             let start_payload = format!(r#"{{"tool":"{}"}}"#, tool);
             es.append(
                 session_id,
-                &crate::agent::event_store::EventType::ToolCallStart,
+                &crate::domain::event::EventType::ToolCallStart,
                 &start_payload,
                 Some(i),
             )
@@ -3204,7 +3204,7 @@ mod tests {
             let end_payload = format!(r#"{{"tool":"{}","success":{}}}"#, tool, success);
             es.append(
                 session_id,
-                &crate::agent::event_store::EventType::ToolCallEnd,
+                &crate::domain::event::EventType::ToolCallEnd,
                 &end_payload,
                 Some(i),
             )
@@ -3212,7 +3212,7 @@ mod tests {
         }
         es.append(
             session_id,
-            &crate::agent::event_store::EventType::SessionEnd,
+            &crate::domain::event::EventType::SessionEnd,
             "{}",
             None,
         )
@@ -3316,7 +3316,7 @@ mod tests {
     ) {
         es.append(
             session_id,
-            &crate::agent::event_store::EventType::SessionStart,
+            &crate::domain::event::EventType::SessionStart,
             "{}",
             None,
         )
@@ -3324,7 +3324,7 @@ mod tests {
         let user_payload = format!(r#"{{"content":"{}"}}"#, user_content);
         es.append(
             session_id,
-            &crate::agent::event_store::EventType::UserMessage,
+            &crate::domain::event::EventType::UserMessage,
             &user_payload,
             Some(0),
         )
@@ -3333,7 +3333,7 @@ mod tests {
             let start = format!(r#"{{"tool":"{}"}}"#, tool);
             es.append(
                 session_id,
-                &crate::agent::event_store::EventType::ToolCallStart,
+                &crate::domain::event::EventType::ToolCallStart,
                 &start,
                 Some(i),
             )
@@ -3341,7 +3341,7 @@ mod tests {
             let end = format!(r#"{{"tool":"{}","success":{}}}"#, tool, success);
             es.append(
                 session_id,
-                &crate::agent::event_store::EventType::ToolCallEnd,
+                &crate::domain::event::EventType::ToolCallEnd,
                 &end,
                 Some(i),
             )
@@ -3351,7 +3351,7 @@ mod tests {
             let payload = serde_json::json!({ "content": msg }).to_string();
             es.append(
                 session_id,
-                &crate::agent::event_store::EventType::AssistantMessage,
+                &crate::domain::event::EventType::AssistantMessage,
                 &payload,
                 Some(i),
             )
@@ -3359,7 +3359,7 @@ mod tests {
         }
         es.append(
             session_id,
-            &crate::agent::event_store::EventType::SessionEnd,
+            &crate::domain::event::EventType::SessionEnd,
             "{}",
             None,
         )

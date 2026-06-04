@@ -11,10 +11,10 @@
 
 #![cfg(feature = "embeddings")]
 
-use bonsai_agent::memory::store::MemoryStore;
-use bonsai_agent::runtime::embedder::{
+use bonsai_agent::domain::embedder::{
     DEFAULT_EMBEDDING_DIM, Embedder, SimpleEmbedder, cosine_similarity,
 };
+use bonsai_agent::memory::store::MemoryStore;
 use std::time::Instant;
 
 const DIM: usize = DEFAULT_EMBEDDING_DIM; // 256

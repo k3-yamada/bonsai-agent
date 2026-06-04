@@ -8,10 +8,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::agent::error_recovery::{StructuredFeedback, TrialSummary};
-use crate::agent::event_store::{EventStore, classify_task_type};
+use crate::agent::event_store::EventStore;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
 use crate::domain::conversation::{Message, Session};
+use crate::domain::event::classify_task_type;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
@@ -455,8 +456,9 @@ mod verify_skip_tests {
 
     use super::*;
     use crate::agent::error_recovery::TrialSummary;
-    use crate::agent::event_store::{EventRepository, EventStore, EventType};
+    use crate::agent::event_store::EventStore;
     use crate::domain::conversation::Session;
+    use crate::domain::event::{EventRepository, EventType};
     use crate::memory::mocks::MockEventRepository;
     use crate::memory::store::MemoryStore;
     use crate::runtime::model_router::AdvisorConfig;

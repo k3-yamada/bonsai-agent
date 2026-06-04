@@ -9,11 +9,12 @@ use crate::agent::checkpoint::CheckpointManager;
 use crate::agent::context_inject::{
     inject_contextual_memories, inject_heuristics, inject_memory_blocks,
 };
-use crate::agent::event_store::{EventStore, EventType};
+use crate::agent::event_store::EventStore;
 use crate::agent::validate::PathGuard;
 use crate::agent::working_memory::{cap_session_messages, working_cap_from_env};
 use crate::cancel::CancellationToken;
 use crate::domain::conversation::{Message, Role, Session};
+use crate::domain::event::EventType;
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::inference::LlmBackend;

@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::event_store::{Event, TrajectoryCandidate};
+use crate::domain::event::{Event, TrajectoryCandidate};
 
 /// 経験の種類
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
