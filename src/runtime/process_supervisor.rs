@@ -23,7 +23,13 @@ pub struct ProcessSupervisor {
 impl ProcessSupervisor {
     /// spawn 設定なしの supervisor (health check / idle 判定のみ)。
     pub fn new(health_url: String, idle_timeout_secs: u64) -> Self {
-        Self::with_spawn(health_url, idle_timeout_secs, String::new(), String::new(), 0)
+        Self::with_spawn(
+            health_url,
+            idle_timeout_secs,
+            String::new(),
+            String::new(),
+            0,
+        )
     }
 
     /// spawn 設定付き supervisor。
@@ -47,9 +53,80 @@ impl ProcessSupervisor {
 
     /// mlx-openai-server launch コマンドの引数列を組み立てる純粋関数。
     ///
-    /// Phase 1 Red: 未実装 stub (空 vec)。
-    pub fn build_spawn_args(_model_path: &str, _port: u16) -> Vec<String> {
-        Vec::new()
+    /// scripts/start-mlx-server.sh と同形:
+    /// `launch --model-path <M> --model-type lm --port <P>`。
+    pub fn build_spawn_args(model_path: &str, port: u16) -> Vec<String> {
+        vec![
+            "launch".to_string(),
+            "--model-path".to_string(),
+            model_path.to_string(),
+            "--model-type".to_string(),
+            "lm".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ]
+    }
+
+    /// MLX server を起動し child を保持。spawn_program が空なら何もしない (Ok)。
+    /// bonsai が起動した child のみ保持し、既に保持中なら再起動しない。
+    pub fn spawn(&self) -> anyhow::Result<()> {
+        if self.spawn_program.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.child.lock().unwrap();
+        if guard.is_some() {
+            return Ok(()); // already spawned by us
+        }
+        let child = Command::new(&self.spawn_program)
+            .args(&self.spawn_args)
+            .spawn()
+            .map_err(|e| {
+                anyhow::anyhow!("MLX server spawn failed ({}): {e}", self.spawn_program)
+            })?;
+        *guard = Some(child);
+        Ok(())
+    }
+
+    /// 保持している child を kill (SIGTERM 相当)。
+    /// bonsai が起動していない外部 server は触らない (child=None なら no-op)。
+    pub fn kill(&self) {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// server が応答していなければ spawn し health OK まで待つ (best-effort、最大 ~30s)。
+    /// disabled (timeout=0) では lifecycle 管理しないため即 Ok。
+    pub fn ensure_running(&self) -> anyhow::Result<()> {
+        // disabled (feature OFF) では何もしない。test を高速化し、
+        // 「supervisor 無効 = lifecycle 管理しない」セマンティクスとも一致。
+        if self.idle_timeout.is_zero() {
+            return Ok(());
+        }
+        if self.is_healthy() {
+            return Ok(());
+        }
+        self.spawn()?;
+        // health poll: up to ~30s
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_millis(500));
+            if self.is_healthy() {
+                return Ok(());
+            }
+        }
+        Ok(()) // best-effort; backend health check が実エラーを surface する
+    }
+
+    /// idle なら kill して true。disabled (timeout=0) や busy なら false。
+    pub fn kill_if_idle(&self) -> bool {
+        if self.is_idle() {
+            self.kill();
+            true
+        } else {
+            false
+        }
     }
 
     /// idle timer をリセット (推論 request 毎に呼ぶ)。
@@ -113,7 +190,6 @@ mod tests {
     // ── B-1 Phase 1 Red: build_spawn_args 純粋関数 ──
 
     /// build_spawn_args が mlx-openai-server launch 引数列を正確に組む。
-    /// Phase 1 Red: stub は空 vec → FAIL。
     #[test]
     fn t_build_spawn_args_exact() {
         let args = ProcessSupervisor::build_spawn_args("M", 8000);
@@ -130,5 +206,55 @@ mod tests {
             ],
             "mlx-openai-server launch 引数列が完全一致"
         );
+    }
+
+    /// kill_if_idle は disabled (timeout=0) で常に false (= lifecycle 管理しない)。
+    #[test]
+    fn t_kill_if_idle_false_when_disabled() {
+        let s = ProcessSupervisor::new("http://127.0.0.1:1/health".to_string(), 0);
+        assert!(!s.kill_if_idle(), "timeout=0 では kill_if_idle=false");
+    }
+
+    /// spawn (empty program) は no-op で Ok。
+    #[test]
+    fn t_spawn_noop_when_program_empty() {
+        let s = ProcessSupervisor::new("http://127.0.0.1:1/health".to_string(), 1);
+        assert!(s.spawn().is_ok(), "spawn_program 空で no-op Ok");
+    }
+
+    /// ensure_running は disabled で即 Ok (health poll しない = 高速)。
+    #[test]
+    fn t_ensure_running_noop_when_disabled() {
+        let s = ProcessSupervisor::new("http://127.0.0.1:1/health".to_string(), 0);
+        let start = Instant::now();
+        assert!(s.ensure_running().is_ok());
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "disabled では health poll せず即 return"
+        );
+    }
+
+    /// kill は child=None で no-op (外部 server を触らない)。
+    #[test]
+    fn t_kill_noop_when_no_child() {
+        let s = ProcessSupervisor::new("http://127.0.0.1:1/health".to_string(), 1);
+        s.kill(); // panic しないこと
+    }
+
+    // ── 実プロセス integration test (real MLX env が必要、default skip) ──
+
+    /// 実 spawn → kill のラウンドトリップ。実バイナリ要なので #[ignore]。
+    #[test]
+    #[ignore]
+    fn t_spawn_then_kill_real_process() {
+        let s = ProcessSupervisor::with_spawn(
+            "http://127.0.0.1:8000/health".to_string(),
+            300,
+            "sleep".to_string(),
+            "60".to_string(),
+            8000,
+        );
+        s.spawn().expect("spawn");
+        s.kill();
     }
 }
