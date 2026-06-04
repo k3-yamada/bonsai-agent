@@ -397,6 +397,15 @@ pub fn lab_mlx_warmup_timeout_secs() -> u64 {
     }
 }
 
+/// `BONSAI_MLX_IDLE_TIMEOUT_SEC=N` で MLX server の N 秒 idle 後自動 SIGTERM を有効化。
+/// 0 または未指定 = disable (後方互換)。
+pub fn mlx_idle_timeout_sec() -> u64 {
+    std::env::var("BONSAI_MLX_IDLE_TIMEOUT_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 /// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
 #[cfg(test)]
 pub(crate) static LAB_RUNTIME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
