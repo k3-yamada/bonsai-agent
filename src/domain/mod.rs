@@ -3,4 +3,5 @@
 //! layer 順: domain < db < observability < ... (DEP-001、module-layer-rules.md)。
 
 pub mod conversation;
+pub mod embedder;
 pub mod tool_schema;

@@ -10,11 +10,11 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::domain::embedder::create_embedder;
 use crate::eval::longmemeval::dataset::LongMemEvalEntry;
 use crate::eval::longmemeval::metrics::{mrr, ndcg_at_k, recall_any_at_k};
 use crate::memory::search::HybridSearch;
 use crate::memory::store::MemoryStore;
-use crate::runtime::embedder::create_embedder;
 
 #[derive(Debug, Clone)]
 pub struct BenchConfig {

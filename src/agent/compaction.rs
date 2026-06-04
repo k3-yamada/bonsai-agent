@@ -1,7 +1,7 @@
 use crate::domain::conversation::{Message, Role};
+use crate::domain::embedder::{Embedder, cosine_similarity};
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
-use crate::runtime::embedder::{Embedder, cosine_similarity};
 use std::collections::HashMap;
 
 /// ContextOverflowGuard 派生 budget 比率 (n_ctx の 70% を bonsai 側 budget とする)
@@ -1686,7 +1686,7 @@ mod tests {
 
     #[test]
     fn t_semantic_scorer_new() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "rust programming task").unwrap();
         assert_eq!(scorer.task_embedding.len(), 256, "埋め込み次元は256");
@@ -1694,7 +1694,7 @@ mod tests {
 
     #[test]
     fn t_semantic_scorer_blends_role_and_similarity() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "rust async programming").unwrap();
 
@@ -1707,7 +1707,7 @@ mod tests {
 
     #[test]
     fn t_semantic_scorer_empty_content() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "task").unwrap();
         let empty_msg = Message::assistant("");
@@ -1718,7 +1718,7 @@ mod tests {
 
     #[test]
     fn t_semantic_scorer_error_tool_low() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "write unit tests").unwrap();
         // 項目 178: 実エラー format (tool_exec.rs:78 prefix) を使用
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[test]
     fn t_compact_level1_with_scorer_prunes() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "task").unwrap();
         let mut m = mk(10, 100);
@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn t_compact_level1_with_scorer_no_op_short() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let embedder = Box::new(SimpleEmbedder::default());
         let scorer = SemanticScorer::new(embedder, "task").unwrap();
         let mut m = vec![Message::user("q"), Message::assistant("a")];

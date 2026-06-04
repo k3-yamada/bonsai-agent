@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use crate::db::migrate;
 
 #[cfg(feature = "embeddings")]
-use crate::runtime::embedder::{DEFAULT_EMBEDDING_DIM, Embedder};
+use crate::domain::embedder::{DEFAULT_EMBEDDING_DIM, Embedder};
 #[cfg(feature = "embeddings")]
 use anyhow::bail;
 
@@ -790,7 +790,7 @@ mod tests {
     #[cfg(feature = "embeddings")]
     #[test]
     fn t_1_1_vec_memories_virtual_table_exists_after_ensure() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let store = test_store();
         let embedder = SimpleEmbedder::default();
         store.ensure_vec_table(&embedder).unwrap();
@@ -811,7 +811,7 @@ mod tests {
     #[cfg(feature = "embeddings")]
     #[test]
     fn t_1_2_insert_memory_embedding_persists_256d() {
-        use crate::runtime::embedder::{DEFAULT_EMBEDDING_DIM, SimpleEmbedder};
+        use crate::domain::embedder::{DEFAULT_EMBEDDING_DIM, SimpleEmbedder};
         let store = test_store();
         let embedder = SimpleEmbedder::default();
         store.ensure_vec_table(&embedder).unwrap();
@@ -832,7 +832,7 @@ mod tests {
     #[cfg(feature = "embeddings")]
     #[test]
     fn t_1_3_vec_knn_returns_top_k_distance_order() {
-        use crate::runtime::embedder::{DEFAULT_EMBEDDING_DIM, SimpleEmbedder};
+        use crate::domain::embedder::{DEFAULT_EMBEDDING_DIM, SimpleEmbedder};
         let store = test_store();
         let embedder = SimpleEmbedder::default();
         store.ensure_vec_table(&embedder).unwrap();
@@ -871,7 +871,7 @@ mod tests {
     #[cfg(feature = "embeddings")]
     #[test]
     fn t_1_5_ensure_vec_table_eager_backfill_existing_memories() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let store = test_store();
         // ensure 前に 3 件 memories を投入。
         for i in 0..3 {
@@ -892,7 +892,7 @@ mod tests {
     #[cfg(feature = "embeddings")]
     #[test]
     fn t_1_7_insert_memory_embedding_rejects_non_256d() {
-        use crate::runtime::embedder::SimpleEmbedder;
+        use crate::domain::embedder::SimpleEmbedder;
         let store = test_store();
         let embedder = SimpleEmbedder::default();
         store.ensure_vec_table(&embedder).unwrap();

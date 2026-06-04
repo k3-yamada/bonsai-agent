@@ -1,11 +1,11 @@
 use anyhow::Result;
 
+use crate::domain::embedder::Embedder;
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::{MemoryRecord, MemoryStore};
-use crate::runtime::embedder::Embedder;
 
 #[cfg(not(feature = "embeddings"))]
-use crate::runtime::embedder::cosine_similarity;
+use crate::domain::embedder::cosine_similarity;
 
 /// ハイブリッド検索結果
 #[derive(Debug, Clone)]
@@ -304,7 +304,7 @@ fn tokenize_for_graph(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::embedder::SimpleEmbedder;
+    use crate::domain::embedder::SimpleEmbedder;
 
     fn setup() -> (MemoryStore, SimpleEmbedder) {
         let store = MemoryStore::in_memory().unwrap();
