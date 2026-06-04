@@ -3,9 +3,9 @@
 //! agent_loop.rs からの抽出モジュール。
 //! ツール呼び出しの実行・並列化・結果反映を担う。
 
-use crate::agent::conversation::{Message, Session};
 use crate::agent::error_recovery::{CircuitBreaker, MultiFileEditCycleDetector};
 use crate::agent::event_store::EventType;
+use crate::domain::conversation::{Message, Session};
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};

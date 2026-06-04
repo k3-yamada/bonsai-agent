@@ -3,7 +3,7 @@
 //! 出力ハッシュ計算、不変条件チェック、成功/中断記録、回答整形といった
 //! 雑多な補助関数を集約。
 
-use crate::agent::conversation::{ParsedOutput, Role, Session};
+use crate::domain::conversation::{ParsedOutput, Role, Session};
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
 use crate::memory::heuristics::HeuristicStore;
 use crate::memory::skill::SkillStore;

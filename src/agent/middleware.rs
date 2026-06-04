@@ -7,7 +7,7 @@ use crate::agent::agent_loop::{StallDetector, TokenBudgetTracker};
 use crate::agent::compaction::{
     CompactionConfig, compact_if_needed, compact_level3, estimate_tokens,
 };
-use crate::agent::conversation::{Message, Session};
+use crate::domain::conversation::{Message, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::{AuditAction, AuditLog};
 use crate::observability::logger::{LogLevel, log_event};
@@ -397,7 +397,7 @@ pub fn build_default_chain<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::conversation::Session;
+    use crate::domain::conversation::Session;
 
     fn make_continue_result(iteration: usize, tools: Vec<String>) -> StepResult {
         StepResult {

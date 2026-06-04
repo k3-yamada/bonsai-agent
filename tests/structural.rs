@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const LAYER_ORDER: &[&str] = &[
+    "domain",
     "db",
     "observability",
     "safety",
@@ -68,15 +69,10 @@ const WHITELIST_DEP: &[(&str, &str, &str)] = &[
     ("src/memory/heuristics.rs", "memory", "agent"),
     ("src/memory/heuristics.rs", "memory", "runtime"),
     ("src/memory/store.rs", "memory", "runtime"),
-    ("src/memory/store.rs", "memory", "agent"),
     ("src/memory/skill.rs", "memory", "agent"),
     ("src/memory/search.rs", "memory", "runtime"),
-    ("src/runtime/cache.rs", "runtime", "agent"),
     ("src/runtime/cache.rs", "runtime", "tools"),
-    ("src/runtime/llama_server.rs", "runtime", "agent"),
     ("src/runtime/llama_server.rs", "runtime", "tools"),
-    ("src/runtime/model_router.rs", "runtime", "agent"),
-    ("src/runtime/inference.rs", "runtime", "agent"),
     ("src/runtime/inference.rs", "runtime", "tools"),
     ("src/observability/audit.rs", "observability", "memory"),
 ];

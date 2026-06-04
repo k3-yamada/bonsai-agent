@@ -236,7 +236,7 @@ impl MemoryStore {
     // --- セッション ---
 
     /// セッションを保存（単一トランザクションでバッチ実行）
-    pub fn save_session(&self, session: &crate::agent::conversation::Session) -> Result<()> {
+    pub fn save_session(&self, session: &crate::domain::conversation::Session) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
 
         // 単一トランザクションで全操作を実行（N+2 fsync → 1 fsync）
@@ -252,7 +252,7 @@ impl MemoryStore {
 
     fn save_session_inner(
         &self,
-        session: &crate::agent::conversation::Session,
+        session: &crate::domain::conversation::Session,
         now: &str,
     ) -> Result<()> {
         self.conn.execute(
@@ -275,10 +275,10 @@ impl MemoryStore {
         )?;
         for msg in &session.messages {
             let role = match msg.role {
-                crate::agent::conversation::Role::System => "system",
-                crate::agent::conversation::Role::User => "user",
-                crate::agent::conversation::Role::Assistant => "assistant",
-                crate::agent::conversation::Role::Tool => "tool",
+                crate::domain::conversation::Role::System => "system",
+                crate::domain::conversation::Role::User => "user",
+                crate::domain::conversation::Role::Assistant => "assistant",
+                crate::domain::conversation::Role::Tool => "tool",
             };
             stmt.execute(params![
                 &session.id,
@@ -318,8 +318,8 @@ impl MemoryStore {
     pub fn load_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<crate::agent::conversation::Session>> {
-        use crate::agent::conversation::{Message, Role, Session};
+    ) -> Result<Option<crate::domain::conversation::Session>> {
+        use crate::domain::conversation::{Message, Role, Session};
 
         let session_row = self.conn.query_row(
             "SELECT id, created_at, summary FROM sessions WHERE id = ?1",
@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn test_save_session_transactional() {
         // セッション保存がトランザクション内で実行され、差分更新されることを検証
-        use crate::agent::conversation::{Message, Session};
+        use crate::domain::conversation::{Message, Session};
         let store = test_store();
         let mut session = Session::new();
         session.messages.push(Message::user("msg1"));
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn test_save_session_idempotent() {
         // 同一セッションを複数回保存しても重複しない
-        use crate::agent::conversation::{Message, Session};
+        use crate::domain::conversation::{Message, Session};
         let store = test_store();
         let mut session = Session::new();
         session.messages.push(Message::user("hello"));

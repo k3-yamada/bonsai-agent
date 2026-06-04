@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::agent::conversation::Message;
 use crate::cancel::CancellationToken;
+use crate::domain::conversation::Message;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::model_router::{FallbackChain, FallbackEntry};
 use crate::tools::ToolSchema;

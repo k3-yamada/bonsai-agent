@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::agent::conversation::{Message, Session};
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
+use crate::domain::conversation::{Message, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::AuditLog;
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};

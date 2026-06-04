@@ -10,13 +10,13 @@ use super::support::{check_invariants, compute_output_hash};
 use super::*;
 
 use crate::agent::context_inject::inject_experience_context;
-use crate::agent::conversation::{Message, Role, Session};
 use crate::agent::error_recovery::{CircuitBreaker, TrialSummary};
 use crate::agent::middleware::MiddlewareChain;
 use crate::agent::tool_exec::{ToolExecResult, apply_tool_result, execute_validated_calls};
 use crate::agent::validate::PathGuard;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
+use crate::domain::conversation::{Message, Role, Session};
 use crate::memory::experience::{ExperienceStore, ExperienceType, RecordParams};
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::MemoryStore;

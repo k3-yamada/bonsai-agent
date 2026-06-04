@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::conversation::Message;
 use crate::config::ServerBackend;
+use crate::domain::conversation::Message;
 
 /// モデル選択
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1121,7 +1121,7 @@ mod tests {
     fn test_task_context_with_image() {
         let mut msg = Message::user("画像");
         msg.attachments
-            .push(crate::agent::conversation::Attachment::Image(vec![0xFF]));
+            .push(crate::domain::conversation::Attachment::Image(vec![0xFF]));
         let ctx = TaskContext::from_messages(&[msg], false);
         assert!(ctx.has_image);
     }

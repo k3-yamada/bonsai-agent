@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 
-use crate::agent::conversation::{Message, Role, Session};
 use crate::agent::error_recovery::{
     CircuitBreaker, FailureMode, LoopDetector, MultiFileEditCycleDetector, ParseErrorDetail,
     RecoveryAction, decide_recovery,
@@ -14,6 +13,7 @@ use crate::agent::event_store::EventType;
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::validate::{Severity, validate_tool_call};
+use crate::domain::conversation::{Message, Role, Session};
 use crate::tools::ToolResultCache;
 use crate::tools::{detect_task_type, memory_directive};
 

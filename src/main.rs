@@ -5,11 +5,11 @@ use clap::Parser;
 
 use bonsai_agent::agent::agent_loop::{AgentConfig, run_agent_loop, run_agent_loop_with_session};
 use bonsai_agent::agent::checkpoint::CheckpointManager;
-use bonsai_agent::agent::conversation::Message;
 use bonsai_agent::agent::experiment::{ExperimentLoopConfig, run_experiment_loop};
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::{AppConfig, ServerBackend};
+use bonsai_agent::domain::conversation::Message;
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::cache::CachedBackend;
 use bonsai_agent::runtime::http_agent::{shared_agent, short_agent};
@@ -1033,8 +1033,8 @@ fn handle_resume_mode(ctx: &AppContext, store: &MemoryStore, resume_id: &str) ->
     let msg_start = msg_len.saturating_sub(4);
     for msg in &session.messages[msg_start..] {
         let role = match msg.role {
-            bonsai_agent::agent::conversation::Role::User => "\x1b[36mあなた\x1b[0m",
-            bonsai_agent::agent::conversation::Role::Assistant => "\x1b[32mBonsai\x1b[0m",
+            bonsai_agent::domain::conversation::Role::User => "\x1b[36mあなた\x1b[0m",
+            bonsai_agent::domain::conversation::Role::Assistant => "\x1b[32mBonsai\x1b[0m",
             _ => continue,
         };
         let preview: String = msg.content.chars().take(80).collect();
@@ -1084,7 +1084,7 @@ fn run_repl_loop(
     ctx: &AppContext,
     store: &MemoryStore,
     backend: &dyn LlmBackend,
-    mut session: Option<&mut bonsai_agent::agent::conversation::Session>,
+    mut session: Option<&mut bonsai_agent::domain::conversation::Session>,
 ) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();

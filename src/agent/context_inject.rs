@@ -4,7 +4,7 @@
 //! メモリ・経験・Vault・スキル・グラフ記憶・SOUL.md ペルソナを
 //! セッションに注入する責務を担う。
 
-use crate::agent::conversation::{Message, Session};
+use crate::domain::conversation::{Message, Session};
 use crate::knowledge::vault::Vault;
 use crate::memory::experience::{ExperienceStore, ExperienceType};
 use crate::memory::graph::KnowledgeGraph;

@@ -1,4 +1,4 @@
-use crate::agent::conversation::{ParsedOutput, ToolCall};
+use crate::domain::conversation::{ParsedOutput, ToolCall};
 use anyhow::Result;
 
 /// LLMの生出力をパースする。

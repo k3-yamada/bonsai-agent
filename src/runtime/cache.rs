@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Mutex;
 
-use crate::agent::conversation::Message;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
+use crate::domain::conversation::Message;
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 use crate::tools::ToolSchema;
 

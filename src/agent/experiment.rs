@@ -1917,7 +1917,7 @@ pub fn lab_mlx_prewarm(
     count: usize,
     cancel: &CancellationToken,
 ) -> usize {
-    use crate::agent::conversation::Message;
+    use crate::domain::conversation::Message;
     // code-reviewer MEDIUM M-1 fix: ping prompt を loop 外 hoist で重複 alloc 回避.
     let prompt = [Message::user("ping")];
     // M2 Phase 2 Green: per-iter wall budget (0 = sentinel disable、>0 = thread::scope path).
@@ -3627,7 +3627,7 @@ mod tests {
         }
         fn generate(
             &self,
-            _messages: &[crate::agent::conversation::Message],
+            _messages: &[crate::domain::conversation::Message],
             _tools: &[crate::tools::ToolSchema],
             _on_token: &mut dyn FnMut(&str),
             _cancel: &CancellationToken,

@@ -20,9 +20,9 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use crate::agent::conversation::Message;
 use crate::agent::event_store::{Event, EventRepository};
 use crate::cancel::CancellationToken;
+use crate::domain::conversation::Message;
 use crate::memory::decay;
 use crate::memory::review::{
     self, ReviewOutcome, ReviewState, ReviewStatus, compute_next_review_at,

@@ -3,10 +3,10 @@
 //! `StepOutcome` を `OutcomeAction` に解釈する `handle_outcome` と、
 //! 計画プレステップ要否を判定する `detect_task_complexity` を集約。
 
-use crate::agent::conversation::{Message, Session};
 use crate::agent::middleware::StepResult as MwStepResult;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
+use crate::domain::conversation::{Message, Session};
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::inference::LlmBackend;

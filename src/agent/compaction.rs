@@ -1,4 +1,4 @@
-use crate::agent::conversation::{Message, Role};
+use crate::domain::conversation::{Message, Role};
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::embedder::{Embedder, cosine_similarity};

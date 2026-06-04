@@ -1,4 +1,4 @@
-use crate::agent::conversation::ToolCall;
+use crate::domain::conversation::ToolCall;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;

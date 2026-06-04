@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::agent::conversation::Message;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
+use crate::domain::conversation::Message;
 use crate::runtime::http_agent::{shared_agent, short_agent, streaming_agent};
 use crate::runtime::inference::{GenerateResult, LlmBackend, TokenUsage};
 use crate::tools::ToolSchema;
@@ -132,7 +132,7 @@ impl LlamaServerBackend {
             // 最初のシステムメッセージに追加、またはなければ新規作成
             let has_system = messages
                 .iter()
-                .any(|m| matches!(m.role, crate::agent::conversation::Role::System));
+                .any(|m| matches!(m.role, crate::domain::conversation::Role::System));
             if !has_system {
                 msgs.push(serde_json::json!({
                     "role": "system",
@@ -143,21 +143,21 @@ impl LlamaServerBackend {
 
         for msg in messages {
             let role = match msg.role {
-                crate::agent::conversation::Role::System => "system",
-                crate::agent::conversation::Role::User => "user",
-                crate::agent::conversation::Role::Assistant => "assistant",
-                crate::agent::conversation::Role::Tool => "user", // llama-serverはtoolロール非対応
+                crate::domain::conversation::Role::System => "system",
+                crate::domain::conversation::Role::User => "user",
+                crate::domain::conversation::Role::Assistant => "assistant",
+                crate::domain::conversation::Role::Tool => "user", // llama-serverはtoolロール非対応
             };
 
             let mut content = msg.content.clone();
 
             // システムメッセージにツールスキーマを追加
-            if matches!(msg.role, crate::agent::conversation::Role::System) && !tools.is_empty() {
+            if matches!(msg.role, crate::domain::conversation::Role::System) && !tools.is_empty() {
                 content = format!("{}\n\n{}", content, format_tool_schemas(tools));
             }
 
             // Toolロールの場合はプレフィックスを付加
-            if matches!(msg.role, crate::agent::conversation::Role::Tool)
+            if matches!(msg.role, crate::domain::conversation::Role::Tool)
                 && let Some(id) = &msg.tool_call_id
             {
                 content = format!(

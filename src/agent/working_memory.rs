@@ -21,7 +21,7 @@
 //! ## Phase 1 Red (TDD strict)
 //! `cap_session_messages` は `todo!()` stub。Phase 2 Green で実装。
 
-use crate::agent::conversation::{Message, Role, Session};
+use crate::domain::conversation::{Message, Role, Session};
 
 /// `BONSAI_WORKING_CAP` env で override されない場合の default cap (Miller 7±2 中央値+2)。
 const DEFAULT_CAP: usize = 9;
