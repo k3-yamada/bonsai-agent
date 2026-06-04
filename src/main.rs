@@ -606,7 +606,7 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
             chain.entries().len(),
             ctx.app_config.fallback_chain.max_failures.unwrap_or(2),
         );
-        return Box::new(FallbackBackend::new(chain, backends));
+        return maybe_supervise(ctx, Box::new(FallbackBackend::new(chain, backends)));
     }
 
     // 単一バックエンド経路（既存）
@@ -631,7 +631,50 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
         eprintln!("--mock フラグでモックモードを使用するか、サーバーを起動してください。");
         std::process::exit(1);
     }
-    Box::new(b)
+    maybe_supervise(ctx, Box::new(b))
+}
+
+/// B-1: `BONSAI_MLX_IDLE_TIMEOUT_SEC>0` の場合のみ backend を SupervisedBackend で wrap し、
+/// idle watchdog thread を起動する。env unset/0 (default) では backend をそのまま返す
+/// = 既存挙動 100% 保持。
+fn maybe_supervise(ctx: &AppContext, backend: Box<dyn LlmBackend>) -> Box<dyn LlmBackend> {
+    let idle = bonsai_agent::config::mlx_idle_timeout_sec();
+    if idle == 0 {
+        return backend;
+    }
+
+    let health_url = format!("{}/health", ctx.server_url.trim_end_matches('/'));
+    let port = ctx
+        .server_url
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
+        .unwrap_or(8000);
+    let supervisor = std::sync::Arc::new(
+        bonsai_agent::runtime::process_supervisor::ProcessSupervisor::with_spawn(
+            health_url,
+            idle,
+            bonsai_agent::config::mlx_spawn_program(),
+            ctx.app_config.model.model_id.clone(),
+            port,
+        ),
+    );
+
+    // watchdog thread: 30s 毎に kill_if_idle を poll、idle なら kill (次 request で respawn)。
+    let sup_watch = std::sync::Arc::clone(&supervisor);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            if sup_watch.kill_if_idle() {
+                eprintln!(
+                    "[watchdog] MLX server idle timeout — killed (will respawn on next request)"
+                );
+            }
+        }
+    });
+    eprintln!("[watchdog] MLX idle supervisor active (timeout={idle}s)");
+
+    Box::new(bonsai_agent::runtime::supervised_backend::SupervisedBackend::new(backend, supervisor))
 }
 
 // --- モードハンドラ ---

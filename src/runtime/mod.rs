@@ -5,3 +5,4 @@ pub mod llama_server;
 pub mod model_router;
 pub mod process_supervisor;
 pub mod server_props;
+pub mod supervised_backend;

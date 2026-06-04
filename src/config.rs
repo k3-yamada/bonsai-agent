@@ -408,13 +408,24 @@ pub fn lab_mlx_warmup_timeout_secs() -> u64 {
     }
 }
 
-/// `BONSAI_MLX_IDLE_TIMEOUT_SEC=N` で MLX server の N 秒 idle 後自動 SIGTERM を有効化。
-/// 0 または未指定 = disable (後方互換)。
+/// B-1: MLX server idle timeout 秒数。`BONSAI_MLX_IDLE_TIMEOUT_SEC` env で指定。
+///
+/// 戻り値: parse 成功で N、unset / parse 失敗 / 0 で 0。
+/// 0 = lifecycle supervisor 全体 OFF (既存挙動 100% 保持)。
 pub fn mlx_idle_timeout_sec() -> u64 {
     std::env::var("BONSAI_MLX_IDLE_TIMEOUT_SEC")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
+}
+
+/// B-1: MLX server 起動プログラムパス。`BONSAI_MLX_SPAWN_PROGRAM` env 優先、
+/// 未指定時は scripts/start-mlx-server.sh と同じ `~/.venvs/bonsai-mlx/bin/mlx-openai-server`。
+pub fn mlx_spawn_program() -> String {
+    std::env::var("BONSAI_MLX_SPAWN_PROGRAM").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/.venvs/bonsai-mlx/bin/mlx-openai-server", home)
+    })
 }
 
 /// `BONSAI_LAB_*` env を弄る test 間 cross-file mutex (項目 249 用).
@@ -1424,6 +1435,42 @@ max_iterations = 20
         assert_eq!(
             result_out, 180,
             "env=601 (range out) で default 180 fallback (Phase 1 Red FAIL = stub は 0)"
+        );
+    }
+
+    // ── B-1 Phase 1 Red: mlx idle supervisor config getters ──
+
+    /// env unset / 0 で 0 (supervisor 全体 OFF)、N で N。
+    #[test]
+    fn t_mlx_idle_timeout_sec_env() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("BONSAI_MLX_IDLE_TIMEOUT_SEC") };
+        assert_eq!(mlx_idle_timeout_sec(), 0, "unset で 0 (feature OFF)");
+        unsafe { std::env::set_var("BONSAI_MLX_IDLE_TIMEOUT_SEC", "300") };
+        assert_eq!(mlx_idle_timeout_sec(), 300, "env=300 で 300");
+        unsafe { std::env::set_var("BONSAI_MLX_IDLE_TIMEOUT_SEC", "abc") };
+        assert_eq!(mlx_idle_timeout_sec(), 0, "parse 失敗で 0");
+        unsafe { std::env::remove_var("BONSAI_MLX_IDLE_TIMEOUT_SEC") };
+    }
+
+    /// env 指定で env 値、未指定で mlx-openai-server を含むパス。
+    #[test]
+    fn t_mlx_spawn_program_env() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_MLX_SPAWN_PROGRAM", "/custom/mlx-bin") };
+        assert_eq!(
+            mlx_spawn_program(),
+            "/custom/mlx-bin",
+            "env 指定で env 値を優先"
+        );
+        unsafe { std::env::remove_var("BONSAI_MLX_SPAWN_PROGRAM") };
+        assert!(
+            mlx_spawn_program().contains("mlx-openai-server"),
+            "unset で mlx-openai-server を含む default path"
         );
     }
 
