@@ -63,7 +63,10 @@ mod tests {
     #[test]
     fn t_not_idle_immediately_after_creation() {
         let sup = make_sup(60);
-        assert!(!sup.is_idle(), "freshly created supervisor should not be idle");
+        assert!(
+            !sup.is_idle(),
+            "freshly created supervisor should not be idle"
+        );
     }
 
     #[test]
