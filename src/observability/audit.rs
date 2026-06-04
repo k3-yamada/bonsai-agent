@@ -374,16 +374,18 @@ impl<'a> AuditLog<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::store::MemoryStore;
+    use crate::db::migrate;
 
-    fn test_store() -> MemoryStore {
-        MemoryStore::in_memory().unwrap()
+    fn test_store() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate::apply_all(&conn).unwrap();
+        conn
     }
 
     #[test]
     fn test_log_llm_call() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("session-1"),
@@ -401,7 +403,7 @@ mod tests {
     #[test]
     fn test_log_tool_call() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("session-1"),
@@ -418,7 +420,7 @@ mod tests {
     #[test]
     fn test_log_security_event() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 None,
@@ -433,7 +435,7 @@ mod tests {
     #[test]
     fn test_recent() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         for i in 0..5 {
             audit
                 .log(
@@ -455,7 +457,7 @@ mod tests {
     #[test]
     fn test_advisor_stats_empty() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         let stats = audit.advisor_stats(None).unwrap();
         assert_eq!(stats.total_calls, 0);
         assert_eq!(stats.avg_prompt_len, 0);
@@ -464,7 +466,7 @@ mod tests {
     #[test]
     fn test_advisor_stats_aggregates_correctly() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         // verification x2 (remote, local) + replan x1 (remote)
         audit
             .log(
@@ -513,7 +515,7 @@ mod tests {
     #[test]
     fn test_advisor_stats_filters_by_session() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("s-A"),
@@ -548,7 +550,7 @@ mod tests {
     #[test]
     fn test_advisor_stats_ignores_other_action_types() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("s"),
@@ -567,7 +569,7 @@ mod tests {
     #[test]
     fn test_for_session() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("s1"),
@@ -622,7 +624,7 @@ mod tests {
     #[test]
     fn test_empty_audit() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         assert_eq!(audit.count().unwrap(), 0);
         assert!(audit.recent(10).unwrap().is_empty());
     }
@@ -632,7 +634,7 @@ mod tests {
     #[test]
     fn test_log_step_outcome_success() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("session-1"),
@@ -653,7 +655,7 @@ mod tests {
     #[test]
     fn test_log_step_outcome_aborted() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("session-1"),
@@ -675,7 +677,7 @@ mod tests {
     #[test]
     fn test_step_outcome_duration_recorded() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("s1"),
@@ -696,7 +698,7 @@ mod tests {
     #[test]
     fn test_step_outcome_consecutive_failures_tracked() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         for i in 0..3 {
             audit
                 .log(
@@ -722,7 +724,7 @@ mod tests {
     #[test]
     fn test_task_complete_stats_empty() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         let stats = audit.task_complete_stats(None).unwrap();
         assert_eq!(stats.total_completed, 0);
         assert_eq!(stats.avg_steps, 0.0);
@@ -732,7 +734,7 @@ mod tests {
     #[test]
     fn test_task_complete_stats_aggregates() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("s1"),
@@ -767,7 +769,7 @@ mod tests {
     #[test]
     fn test_task_complete_stats_filters_by_session() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("s-A"),
@@ -808,7 +810,7 @@ mod tests {
     #[test]
     fn test_audit_action_vault_lint_round_trip() {
         let store = test_store();
-        let audit = AuditLog::new(store.conn());
+        let audit = AuditLog::new(&store);
         audit
             .log(
                 Some("lab-session-1"),

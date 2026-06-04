@@ -31,6 +31,23 @@ pub fn get_migration_sql(version: u32) -> Option<&'static str> {
         .map(|m| m.sql)
 }
 
+/// 新規 Connection に全 migration を適用する (fresh DB 用、version 0 起点)。
+/// `MemoryStore::initialize` と同等のスキーマを構築。db 層に閉じた helper で
+/// 上位層 (observability 等) の test が memory 層を経由せず Connection を準備できる。
+pub fn apply_all(conn: &rusqlite::Connection) -> anyhow::Result<()> {
+    let plan = plan_migrations(0);
+    for version in &plan.migrations_to_apply {
+        if let Some(sql) = get_migration_sql(*version) {
+            conn.execute_batch(sql)?;
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+                rusqlite::params![version],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
