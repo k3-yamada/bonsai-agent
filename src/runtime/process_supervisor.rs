@@ -17,23 +17,31 @@ pub struct ProcessSupervisor {
 
 impl ProcessSupervisor {
     pub fn new(health_url: String, idle_timeout_secs: u64) -> Self {
-        todo!()
+        Self {
+            health_url,
+            last_used: Mutex::new(Instant::now()),
+            idle_timeout: Duration::from_secs(idle_timeout_secs),
+        }
     }
 
     /// 推論リクエスト前後に呼び出してアイドルタイマーをリセットする
     pub fn record_request(&self) {
-        todo!()
+        *self.last_used.lock().unwrap() = Instant::now();
     }
 
     /// idle_timeout を超えてリクエストがない場合に true を返す。
     /// タイムアウト無効時 (0) は常に false。
     pub fn is_idle(&self) -> bool {
-        todo!()
+        if self.idle_timeout.is_zero() {
+            return false;
+        }
+        self.last_used.lock().unwrap().elapsed() > self.idle_timeout
     }
 
     /// MLX サーバがヘルスチェックに応答するか確認する
     pub fn is_healthy(&self) -> bool {
-        todo!()
+        let agent = crate::runtime::http_agent::short_agent();
+        agent.get(&self.health_url).call().is_ok()
     }
 }
 
