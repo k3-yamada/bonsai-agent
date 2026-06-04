@@ -59,13 +59,69 @@ pub fn fetch_model_ctx_from_card(model_path: &str) -> Option<u32> {
     card.max_position_embeddings
 }
 
-/// server context 上限を解決する。`/props` (llama.cpp) を優先し、`None` のとき
-/// model card (`config.json`、MLX 含む) に fallback する。
+/// HuggingFace cache の `config.json` から `max_position_embeddings` を読む。
 ///
-/// **B-3 (LocalAI fit_params 思想)**: llama.cpp は `/props`、MLX はローカル model dir の
-/// `config.json` から context 上限を得る 2 段 fallback。両方失敗で `None` → clamp は no-op。
+/// MLX-only 運用では `model_path` が HF repo id (`org/name`、例
+/// `prism-ml/Ternary-Bonsai-8B-mlx-2bit`) のことが多く、ローカル dir ではないため
+/// [`fetch_model_ctx_from_card`] が `None` を返す。本関数は HF cache 規約
+/// (`<cache>/hub/models--<org>--<name>/snapshots/<rev>/config.json`) を辿って context 上限を得る。
+///
+/// cache root は `HF_HOME` (あれば `$HF_HOME/hub`)、無ければ `~/.cache/huggingface/hub`。
+/// repo id が `org/name` 形式でない / cache 不在 / config.json 不在は全て `None`。
+pub fn fetch_model_ctx_from_hf_cache(repo_id: &str) -> Option<u32> {
+    // repo id は "org/name" 形式 (スラッシュ 1 個、絶対パスでない)。
+    if !repo_id.contains('/') || repo_id.starts_with('/') || repo_id.starts_with('.') {
+        return None;
+    }
+    let cache_root = hf_cache_root()?;
+    hf_ctx_from_cache_root(&cache_root, repo_id)
+}
+
+/// HF cache root (`hub` ディレクトリ) を解決する。`HF_HOME` 優先、無ければ `~/.cache/huggingface`。
+fn hf_cache_root() -> Option<std::path::PathBuf> {
+    if let Ok(hf_home) = std::env::var("HF_HOME")
+        && !hf_home.is_empty()
+    {
+        return Some(std::path::Path::new(&hf_home).join("hub"));
+    }
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    Some(
+        std::path::Path::new(&home)
+            .join(".cache")
+            .join("huggingface")
+            .join("hub"),
+    )
+}
+
+/// 純粋ヘルパ: cache root と repo id から `models--<org>--<name>/snapshots/*/config.json` を辿る。
+/// テスト容易性のため root を引数化 (env に依存しない)。
+fn hf_ctx_from_cache_root(cache_root: &std::path::Path, repo_id: &str) -> Option<u32> {
+    let dir_name = format!("models--{}", repo_id.replace('/', "--"));
+    let snapshots = cache_root.join(&dir_name).join("snapshots");
+    // snapshots/<rev>/config.json を順に探す (最初に見つかった有効な card を採用)。
+    for entry in std::fs::read_dir(&snapshots).ok()?.flatten() {
+        let config_path = entry.path().join("config.json");
+        if let Ok(raw) = std::fs::read_to_string(&config_path)
+            && let Ok(card) = serde_json::from_str::<ModelCard>(&raw)
+            && card.max_position_embeddings.is_some()
+        {
+            return card.max_position_embeddings;
+        }
+    }
+    None
+}
+
+/// server context 上限を解決する。`/props` (llama.cpp) → ローカル model card →
+/// HF cache の 3 段 fallback。すべて失敗で `None` → clamp は no-op。
+///
+/// **B-3 (LocalAI fit_params 思想)**:
+/// - llama.cpp backend: `/props` で取得
+/// - MLX backend かつ `model_path` がローカル dir: [`fetch_model_ctx_from_card`]
+/// - MLX backend かつ `model_path` が HF repo id: [`fetch_model_ctx_from_hf_cache`]
 pub fn resolve_server_n_ctx(server_url: &str, model_path: &str) -> Option<u32> {
-    fetch_server_n_ctx(server_url).or_else(|| fetch_model_ctx_from_card(model_path))
+    fetch_server_n_ctx(server_url)
+        .or_else(|| fetch_model_ctx_from_card(model_path))
+        .or_else(|| fetch_model_ctx_from_hf_cache(model_path))
 }
 
 #[cfg(test)]
@@ -157,5 +213,40 @@ mod tests {
             None,
             "server 不応答 + card 不在で None (clamp no-op)"
         );
+    }
+
+    // ── B-3 follow-up #2: HF cache resolution ──
+
+    #[test]
+    fn t_hf_ctx_from_cache_root_reads_snapshot_config() {
+        // <root>/models--org--name/snapshots/abc123/config.json を作る
+        let root = std::env::temp_dir().join(format!("bonsai_hf_{}", std::process::id()));
+        let snap = root
+            .join("models--prism-ml--Ternary-Bonsai-8B-mlx-2bit")
+            .join("snapshots")
+            .join("abc123");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("config.json"), r#"{"max_position_embeddings": 40960}"#).unwrap();
+        let got = hf_ctx_from_cache_root(&root, "prism-ml/Ternary-Bonsai-8B-mlx-2bit");
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(got, Some(40960));
+    }
+
+    #[test]
+    fn t_hf_ctx_from_cache_root_none_when_missing() {
+        let root = std::env::temp_dir().join(format!("bonsai_hf_miss_{}", std::process::id()));
+        assert_eq!(
+            hf_ctx_from_cache_root(&root, "org/name"),
+            None,
+            "cache 不在で None"
+        );
+    }
+
+    #[test]
+    fn t_fetch_hf_cache_none_for_non_repo_id() {
+        // "org/name" 形式でない (ローカル絶対パス等) は repo id とみなさない
+        assert_eq!(fetch_model_ctx_from_hf_cache("/abs/local/dir"), None);
+        assert_eq!(fetch_model_ctx_from_hf_cache("./rel"), None);
+        assert_eq!(fetch_model_ctx_from_hf_cache("noslash"), None);
     }
 }

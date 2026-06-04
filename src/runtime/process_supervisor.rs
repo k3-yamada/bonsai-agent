@@ -326,20 +326,56 @@ mod tests {
         assert!(!s.is_idle(), "record_request 後は idle 解除");
     }
 
-    // ── 実プロセス integration test (real MLX env が必要、default skip) ──
+    // ── 実プロセス integration test (python3 + port bind が必要、default skip) ──
 
-    /// 実 spawn → kill のラウンドトリップ。実バイナリ要なので #[ignore]。
+    /// OS から空き port を 1 つ borrow して返す (bind→drop で即解放)。
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    /// 実プロセス e2e: fake MLX server (tests/fixtures/fake_mlx_server.py) を
+    /// supervisor が spawn → health 200 → idle kill → 次 request で respawn する
+    /// 完全往復を検証する。python3 + port bind を要するため #[ignore]
+    /// (`cargo test -- --ignored` で実行)。build_spawn_args の mlx 引数列を
+    /// fixture がそのまま受理することも同時に確認する。
     #[test]
     #[ignore]
-    fn t_spawn_then_kill_real_process() {
+    fn t_real_process_spawn_health_idle_kill_respawn() {
+        let port = free_port();
+        let health_url = format!("http://127.0.0.1:{port}/health");
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_mlx_server.py");
         let s = ProcessSupervisor::with_spawn(
-            "http://127.0.0.1:8000/health".to_string(),
-            300,
-            "sleep".to_string(),
-            "60".to_string(),
-            8000,
+            health_url,
+            1, // idle_timeout=1s
+            fixture.to_string(),
+            "dummy-model".to_string(),
+            port,
         );
-        s.spawn().expect("spawn");
+
+        // (1) spawn + health 待ち。
+        s.ensure_running().expect("ensure_running");
+        assert!(s.is_healthy(), "spawn 後 fake server が 200 を返す");
+
+        // (2) idle timeout 超過 → 実 child を kill。
+        s.record_request();
+        assert!(!s.is_idle());
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(s.is_idle(), "1s 超過で idle");
+        assert!(s.kill_if_idle(), "idle なら実 child を kill して true");
+
+        // kill 後は接続不可 = unhealthy。
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!s.is_healthy(), "kill 後は server 不在で unhealthy");
+
+        // (3) 次 request で respawn。
+        s.ensure_running().expect("respawn");
+        assert!(s.is_healthy(), "respawn 後に再び 200");
+
+        // cleanup。
         s.kill();
     }
 }
