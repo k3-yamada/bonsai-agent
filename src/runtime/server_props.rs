@@ -1,0 +1,54 @@
+use serde::Deserialize;
+
+/// MLX server `/props` エンドポイントのレスポンス形式
+#[derive(Debug, Deserialize, Default)]
+struct ServerProps {
+    n_ctx: Option<u32>,
+}
+
+/// MLX server の `/props` エンドポイントから `n_ctx` を取得する。
+///
+/// サーバーが到達不能または `n_ctx` フィールドが存在しない場合は `None` を返す。
+/// HTTP エラー・JSON パースエラーはすべて `None` として扱い、呼び出し元に伝播しない。
+pub fn fetch_server_n_ctx(_server_url: &str) -> Option<u32> {
+    todo!()
+}
+
+/// `configured` と `server_n_ctx` の小さい方を返す。
+///
+/// `server_n_ctx` が `None`（サーバー未応答）の場合は `configured` をそのまま返す。
+pub fn clamp_context_to_server(_configured: u32, _server_n_ctx: Option<u32>) -> u32 {
+    todo!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t_clamp_respects_server_limit() {
+        assert_eq!(clamp_context_to_server(16384, Some(4096)), 4096);
+    }
+
+    #[test]
+    fn t_clamp_keeps_configured_when_server_is_larger() {
+        assert_eq!(clamp_context_to_server(4096, Some(32768)), 4096);
+    }
+
+    #[test]
+    fn t_clamp_no_op_when_server_unavailable() {
+        assert_eq!(clamp_context_to_server(14000, None), 14000);
+    }
+
+    #[test]
+    fn t_clamp_equal_values() {
+        assert_eq!(clamp_context_to_server(8192, Some(8192)), 8192);
+    }
+
+    #[test]
+    fn t_is_mlx_auto_clamp_off_by_default() {
+        // SAFETY: テスト専用スレッド、他スレッドからの同 env 変数アクセスなし
+        unsafe { std::env::remove_var("BONSAI_MLX_AUTO_CLAMP") };
+        assert!(!crate::config::is_mlx_auto_clamp());
+    }
+}
