@@ -89,9 +89,54 @@ pub fn detect_concept_candidates(
     entries: &[StockEntry],
     config: &ConceptConfig,
 ) -> Vec<ConceptCandidate> {
-    // STUB (Red): 未実装。Green で集計ロジックを入れる。
-    let _ = (entries, config, extract_terms("") , content_key(""));
-    Vec::new()
+    use std::collections::BTreeMap;
+
+    // term -> (member entry 数, dedup content key 集合, distinct source 集合)。
+    // BTreeMap/BTreeSet で挿入順非依存の決定的反復を保証。
+    #[derive(Default)]
+    struct Agg {
+        entry_count: usize,
+        keys: std::collections::BTreeSet<String>,
+        sources: std::collections::BTreeSet<String>,
+    }
+    let mut by_term: BTreeMap<String, Agg> = BTreeMap::new();
+
+    for e in entries {
+        let key = content_key(&e.content);
+        for term in extract_terms(&e.content) {
+            let agg = by_term.entry(term).or_default();
+            agg.entry_count += 1;
+            agg.keys.insert(key.clone());
+            if !e.source.is_empty() {
+                agg.sources.insert(e.source.clone());
+            }
+        }
+    }
+
+    let mut candidates: Vec<ConceptCandidate> = by_term
+        .into_iter()
+        .filter(|(_, agg)| {
+            agg.sources.len() >= config.min_sources && agg.entry_count >= config.min_cluster_size
+        })
+        .map(|(theme_key, agg)| {
+            let score = agg.sources.len() * agg.entry_count;
+            ConceptCandidate {
+                theme_key,
+                member_entry_keys: agg.keys.into_iter().collect(),
+                member_sources: agg.sources.into_iter().collect(),
+                score,
+            }
+        })
+        .collect();
+
+    // score 降順 → theme_key 昇順 (安定・決定的)。
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.theme_key.cmp(&b.theme_key))
+    });
+    candidates.truncate(config.max_candidates);
+    candidates
 }
 
 #[cfg(test)]
@@ -115,10 +160,17 @@ mod tests {
             entry("rust zero cost abstractions improve speed", "session_c"),
         ];
         let cands = detect_concept_candidates(&entries, &ConceptConfig::default());
-        assert_eq!(cands.len(), 1, "3 source が rust を共有 → 1 候補: {cands:?}");
+        assert_eq!(
+            cands.len(),
+            1,
+            "3 source が rust を共有 → 1 候補: {cands:?}"
+        );
         let c = &cands[0];
         assert_eq!(c.theme_key, "rust");
-        assert_eq!(c.member_sources, vec!["session_a", "session_b", "session_c"]);
+        assert_eq!(
+            c.member_sources,
+            vec!["session_a", "session_b", "session_c"]
+        );
         assert_eq!(c.member_entry_keys.len(), 3);
         assert_eq!(c.score, 9, "3 source × 3 entry = 9");
     }
@@ -161,15 +213,15 @@ mod tests {
 
     #[test]
     fn t_max_candidates_truncates_by_score() {
-        let mut entries = Vec::new();
-        // beta/gamma は 2 source × 2 entry = score 4、alpha は 3 source × 3 entry = score 9。
-        for s in ["s1", "s2"] {
-            entries.push(entry("beta shared concept here", s));
-            entries.push(entry("gamma shared concept here", s));
-        }
-        for s in ["s1", "s2", "s3"] {
-            entries.push(entry("alpha shared concept here", s));
-        }
+        // 各 entry は theme 語 + 固有語のみ (テーマ間で偶発共有 term を作らない)。
+        // beta は 2 source × 2 entry = score 4、alpha は 3 source × 3 entry = score 9。
+        let entries = vec![
+            entry("beta apple", "s1"),
+            entry("beta banana", "s2"),
+            entry("alpha cat", "s1"),
+            entry("alpha dog", "s2"),
+            entry("alpha echo", "s3"),
+        ];
         let cfg = ConceptConfig {
             min_sources: 2,
             min_cluster_size: 2,
@@ -178,23 +230,26 @@ mod tests {
         let cands = detect_concept_candidates(&entries, &cfg);
         assert_eq!(cands.len(), 1, "max_candidates=1 で 1 件に制限");
         assert_eq!(cands[0].theme_key, "alpha", "score 最大の alpha が残る");
+        assert_eq!(cands[0].score, 9, "alpha = 3 source × 3 entry");
     }
 
     #[test]
     fn t_deterministic_order() {
+        // alpha/zeta どちらも 2 source × 2 entry = score 4。固有語で偶発共有を避ける。
         let entries = vec![
-            entry("zeta shared topic", "s1"),
-            entry("zeta shared topic", "s2"),
-            entry("alpha shared topic", "s1"),
-            entry("alpha shared topic", "s2"),
+            entry("zeta cat", "s1"),
+            entry("zeta dog", "s2"),
+            entry("alpha apple", "s1"),
+            entry("alpha banana", "s2"),
         ];
         let a = detect_concept_candidates(&entries, &ConceptConfig::default());
         let b = detect_concept_candidates(&entries, &ConceptConfig::default());
         assert_eq!(a, b, "同一入力で同一出力 (決定的)");
-        // 全候補が同 score の場合 theme_key 昇順。
         let keys: Vec<&str> = a.iter().map(|c| c.theme_key.as_str()).collect();
-        let mut sorted = keys.clone();
-        sorted.sort();
-        assert_eq!(keys, sorted, "同 score は theme_key 昇順: {keys:?}");
+        assert_eq!(
+            keys,
+            vec!["alpha", "zeta"],
+            "同 score は theme_key 昇順: {keys:?}"
+        );
     }
 }
