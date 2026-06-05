@@ -71,7 +71,7 @@ fn main() -> Result<()> {
         ..BenchConfig::default()
     };
 
-    let report = run_benchmark(&entries, &cfg)?;
+    let report = run_benchmark(&entries, &cfg, None)?;
 
     eprintln!(
         "[longmemeval-bench] processed={} overall_n={} per_type={}",

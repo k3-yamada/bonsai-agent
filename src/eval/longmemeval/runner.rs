@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::cancel::CancellationToken;
 use crate::domain::embedder::create_embedder;
+use crate::domain::llm::LlmBackend;
 use crate::eval::longmemeval::dataset::LongMemEvalEntry;
 use crate::eval::longmemeval::metrics::{mrr, ndcg_at_k, recall_any_at_k};
 use crate::memory::search::HybridSearch;
@@ -25,6 +27,10 @@ pub struct BenchConfig {
     /// Graph stream の重み (0.0-1.0、0.0 = 2-stream legacy)。
     /// `BONSAI_GRAPH_FUSION_ENABLED=1` で `BONSAI_GRAPH_FUSION_WEIGHT` (default 0.25) から populate される。
     pub graph_weight: f32,
+    /// 概念ページ ON arm (Phase 4b 証拠ゲート)。`BONSAI_CONCEPT_EVAL=1` から populate、default false。
+    /// true のとき各 entry の haystack を pseudo entry に写像→概念候補検出→実 backend 合成→
+    /// 概念 memory を同一 store に追加 index する (eval-only、production 不変)。backend 注入必須。
+    pub concept_eval: bool,
 }
 
 impl Default for BenchConfig {
@@ -35,6 +41,7 @@ impl Default for BenchConfig {
             top_k_retrieve: 20,
             progress_every: progress_every_from_env(50),
             graph_weight: graph_weight_from_env(),
+            concept_eval: crate::config::is_concept_eval_enabled(),
         }
     }
 }
@@ -118,15 +125,31 @@ pub struct BenchReport {
     pub overall: TypeAgg,
     pub per_type: HashMap<String, TypeAgg>,
     pub processed: usize,
+    /// concept ON arm (Phase 4b) で全 entry を通じて store に追加 index された概念 memory の総数。
+    /// OFF arm では常に 0。plumbing 検証用 (実 retrieval 数値とは独立)。
+    pub concept_memories_indexed: usize,
 }
 
-pub fn run_benchmark(entries: &[LongMemEvalEntry], cfg: &BenchConfig) -> Result<BenchReport> {
+/// LongMemEval-S retrieval ベンチマークを実行する。
+///
+/// `backend` は concept ON arm (`cfg.concept_eval == true`) の概念合成にのみ使用する。
+/// OFF arm では `None` で良い (既存経路、production recall 不変)。ON arm で `None` の場合は
+/// 概念 memory を index しない (合成 backend 不在のため graceful no-op)。
+pub fn run_benchmark(
+    entries: &[LongMemEvalEntry],
+    cfg: &BenchConfig,
+    backend: Option<&dyn LlmBackend>,
+) -> Result<BenchReport> {
     let mut per_type: HashMap<String, TypeAgg> = HashMap::new();
     let mut overall = TypeAgg::default();
     let mut processed = 0usize;
+    let mut concept_memories_indexed = 0usize;
+    let cancel = CancellationToken::new();
 
     let take_n = cfg.limit.unwrap_or(entries.len()).min(entries.len());
     let embedder = create_embedder();
+    // Phase 4b Red: ON arm 未実装 (Green で concept memory index)。unused 抑止のみ。
+    let _ = (&cancel, backend);
 
     for (idx, entry) in entries.iter().take(take_n).enumerate() {
         let store = MemoryStore::in_memory()?;
@@ -202,6 +225,7 @@ pub fn run_benchmark(entries: &[LongMemEvalEntry], cfg: &BenchConfig) -> Result<
         overall,
         per_type,
         processed,
+        concept_memories_indexed,
     })
 }
 
@@ -255,8 +279,9 @@ mod tests {
             top_k_retrieve: 20,
             progress_every: 9999,
             graph_weight: 0.0,
+            concept_eval: false,
         };
-        let report = run_benchmark(&[entry], &cfg).unwrap();
+        let report = run_benchmark(&[entry], &cfg, None).unwrap();
         assert_eq!(report.processed, 1);
         // 53 session を index して top-20 取得できれば良い (recall 数値は問わない)
         assert_eq!(report.overall.n, 1);
@@ -286,8 +311,9 @@ mod tests {
             top_k_retrieve: 20,
             progress_every: 9999,
             graph_weight: 0.25,
+            concept_eval: false,
         };
-        let report = run_benchmark(&[entry], &cfg).unwrap();
+        let report = run_benchmark(&[entry], &cfg, None).unwrap();
         assert_eq!(report.processed, 1);
         assert_eq!(report.overall.n, 1);
         // graph 経路が crash せず top-K を返却することを確認
@@ -306,12 +332,83 @@ mod tests {
             top_k_retrieve: 20,
             progress_every: 9999,
             graph_weight: 0.0,
+            concept_eval: false,
         };
-        let report = run_benchmark(&[e1, e2], &cfg).unwrap();
+        let report = run_benchmark(&[e1, e2], &cfg, None).unwrap();
         assert_eq!(report.processed, 2);
         assert!(report.per_type.contains_key("single-session-user"));
         assert!(report.per_type.contains_key("multi-session"));
         assert_eq!(report.per_type["single-session-user"].n, 1);
         assert_eq!(report.per_type["multi-session"].n, 1);
+    }
+
+    /// 2 session が共有テーマを持つ entry (concept 候補が成立する)。
+    fn entry_two_sessions_share_theme() -> LongMemEvalEntry {
+        LongMemEvalEntry {
+            question_id: "q-concept".to_string(),
+            question_type: "multi-session".to_string(),
+            question: "kernel".to_string(),
+            question_date: "2024-01-15".to_string(),
+            answer: "x".to_string(),
+            answer_session_ids: vec!["s-000".to_string()],
+            haystack_dates: vec!["2024-01-01".to_string(), "2024-01-02".to_string()],
+            haystack_session_ids: vec!["s-000".to_string(), "s-001".to_string()],
+            haystack_sessions: vec![
+                vec![HaystackTurn {
+                    role: "user".to_string(),
+                    content: "linux kernel scheduler design".to_string(),
+                    has_answer: Some(true),
+                }],
+                vec![HaystackTurn {
+                    role: "user".to_string(),
+                    content: "linux kernel memory management".to_string(),
+                    has_answer: None,
+                }],
+            ],
+        }
+    }
+
+    #[test]
+    fn test_concept_eval_off_indexes_no_concepts() {
+        let cfg = BenchConfig {
+            limit: None,
+            k_values: vec![5],
+            top_k_retrieve: 20,
+            progress_every: 9999,
+            graph_weight: 0.0,
+            concept_eval: false,
+        };
+        let report = run_benchmark(&[entry_two_sessions_share_theme()], &cfg, None).unwrap();
+        assert_eq!(
+            report.concept_memories_indexed, 0,
+            "OFF arm は概念 memory を index しない"
+        );
+    }
+
+    #[test]
+    fn test_concept_eval_on_adds_concept_memory() {
+        use crate::domain::llm::MockLlmBackend;
+        // 候補は "linux"/"kernel" 等 (2 source 共有) で複数発生しうるため応答を多めに用意。
+        let backend = MockLlmBackend::new(
+            (0..16)
+                .map(|_| "概要: linux kernel の知見 [[s-000]] [[s-001]]。".to_string())
+                .collect(),
+        );
+        let cfg = BenchConfig {
+            limit: None,
+            k_values: vec![5],
+            top_k_retrieve: 20,
+            progress_every: 9999,
+            graph_weight: 0.0,
+            concept_eval: true,
+        };
+        let report =
+            run_benchmark(&[entry_two_sessions_share_theme()], &cfg, Some(&backend)).unwrap();
+        // plumbing 検証: ON arm が概念 memory を store に追加 index する (実 retrieval 数値は問わない)。
+        assert!(
+            report.concept_memories_indexed >= 1,
+            "ON arm は概念 memory を index する: indexed={}",
+            report.concept_memories_indexed
+        );
     }
 }

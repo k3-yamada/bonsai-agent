@@ -370,6 +370,19 @@ pub fn is_concept_synthesis_enabled() -> bool {
     )
 }
 
+/// `BONSAI_CONCEPT_EVAL=1` で LongMemEval-S 証拠ゲート (知識基盤強化 Phase 4b) の concept ON arm を有効化。
+///
+/// 既定 OFF。ON arm は各 entry の haystack session を pseudo entry に写像して概念候補を検出し、
+/// 実 LLM backend で合成した概念 memory を同一 in-memory store に追加 index する (eval-only、
+/// production recall は不変)。ADR-003 paired で R@5 改善を判定するための eval scaffold。
+/// `is_concept_synthesis_enabled` (production 経路) とは独立: eval ON arm はこの getter のみで制御する。
+pub fn is_concept_eval_enabled() -> bool {
+    matches!(
+        std::env::var("BONSAI_CONCEPT_EVAL").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 /// `BONSAI_MLX_AUTO_CLAMP=1` の場合、起動時に MLX server の `/props` から `n_ctx` を取得して
 /// `ModelConfig.context_length` を `min(configured, server_n_ctx)` にクランプする。
 ///
