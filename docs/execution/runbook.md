@@ -129,6 +129,25 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_MLX_SPAWN_PROGRAM` | `~/.venvs/bonsai-mlx/bin/mlx-openai-server` | path | B-1: MLX server 起動プログラム (lazy respawn 用)。idle timeout>0 時のみ使用 |
 | `BONSAI_MLX_AUTO_CLAMP` | OFF | bool | B-3: 起動時 MLX `/props` の n_ctx で context_length を `min(configured, n_ctx)` にクランプ。server 未応答時 no-op。LocalAI fit_params 思想 |
 
+### Phase 2 メモリ最適化 sidecar (`scripts/start-mlx-sidecar.sh`)
+
+cubist `mlx-openai-server` の drop-in 代替 (`scripts/mlx_server/server.py`)。OpenAI 互換 (`/v1/models` + `/v1/chat/completions` SSE) のまま、MLX メモリ最適化を解禁する。**bonsai 側は `server_url` (port 8888) 経由の純粋 consumer で Rust 変更不要**。以下 env は sidecar 専用 (cubist は未対応)。
+
+| env | default | 型 | 説明 |
+| --- | --- | --- | --- |
+| `BONSAI_MLX_CACHE_LIMIT_GB` | None | float | sidecar: `mx.set_cache_limit`。MLX バッファ上限で swap 阻止 (99% ディスク環境で致命的な swap を回避) |
+| `BONSAI_MLX_WIRED_LIMIT_GB` | None | float | sidecar: `mx.set_wired_limit` |
+| `BONSAI_MLX_KV_BITS` | None | 4 or 8 | sidecar: KV cache 量子化。**実測: resident KV cache 0.926→0.267GB (-71%、kv4@6417tok)**。長文 sustained メモリの本命。8=保守/4=積極 |
+| `BONSAI_MLX_QUANTIZED_KV_START` | 0 | int | sidecar: 先頭 N tok を fp16 保持し量子化変換トランジェント/精度劣化を緩和 |
+| `BONSAI_MLX_KV_GROUP_SIZE` | 64 | int | sidecar: KV 量子化 group size |
+| `BONSAI_MLX_MAX_KV_SIZE` | None | int | sidecar: 回転 KV 上限 (長文でのメモリ暴走防止) |
+| `BONSAI_MLX_MODEL` / `BONSAI_MLX_PORT` | ternary 2bit / 8888 | str/int | sidecar: model id / port |
+
+- **使い方**: `start-mlx-server.sh` (cubist) の代わりに `start-mlx-sidecar.sh` を起動するだけで bonsai は memory-optimized server を使う。
+- **B-1 watchdog 併用**: `BONSAI_MLX_SPAWN_PROGRAM=<repo>/scripts/start-mlx-sidecar.sh` で idle respawn 対象を sidecar に。
+- **注意 (codex)**: KV量子化は長文 recall / tool-call 安定性を劣化させ得る → 長文 paired smoke で確認必須 (短 smoke では見逃す)。`peak_gb` でなく長文 sustained の resident KV で評価する。
+- 計測: `python scripts/mlx_server/measure_kv_memory.py --ctx-words N` で `/mem` の peak/cache を取得。
+
 ## 注意事項 (Phase 5 で「絶対に守るルール」化)
 
 詳細は CLAUDE.md「注意事項」セクション参照 (Phase 5 で本 runbook に再配置候補)。
