@@ -10,11 +10,14 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::agent::concept_synthesis::build_synthesis_messages;
 use crate::cancel::CancellationToken;
 use crate::domain::embedder::create_embedder;
 use crate::domain::llm::LlmBackend;
 use crate::eval::longmemeval::dataset::LongMemEvalEntry;
 use crate::eval::longmemeval::metrics::{mrr, ndcg_at_k, recall_any_at_k};
+use crate::knowledge::concept::{ConceptConfig, detect_concept_candidates, member_entries};
+use crate::knowledge::extractor::{StockCategory, StockEntry};
 use crate::memory::search::HybridSearch;
 use crate::memory::store::MemoryStore;
 
@@ -148,8 +151,6 @@ pub fn run_benchmark(
 
     let take_n = cfg.limit.unwrap_or(entries.len()).min(entries.len());
     let embedder = create_embedder();
-    // Phase 4b Red: ON arm 未実装 (Green で concept memory index)。unused 抑止のみ。
-    let _ = (&cancel, backend);
 
     for (idx, entry) in entries.iter().take(take_n).enumerate() {
         let store = MemoryStore::in_memory()?;
@@ -183,6 +184,49 @@ pub fn run_benchmark(
             }
         }
 
+        // Phase 4b concept ON arm: haystack を pseudo entry に写像し概念候補を検出、
+        // 実 backend で合成した概念 memory を同一 store に追加 index する (eval-only)。
+        // §9.1 橋渡し: source=session_id, content=narrative。cross-entry 汚染なし (store は per-entry)。
+        if cfg.concept_eval
+            && let Some(backend) = backend
+        {
+            let pseudo: Vec<StockEntry> = indexed
+                .iter()
+                .zip(entry.haystack_session_ids.iter())
+                .map(|((_, narrative), sess_id)| StockEntry {
+                    category: StockCategory::Fact,
+                    content: narrative.clone(),
+                    source: sess_id.clone(),
+                })
+                .collect();
+            let candidates = detect_concept_candidates(&pseudo, &ConceptConfig::default());
+            for candidate in &candidates {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                let members = member_entries(candidate, &pseudo);
+                if members.is_empty() {
+                    continue;
+                }
+                let messages = build_synthesis_messages(&candidate.theme_key, &members);
+                let body = match backend.generate(&messages, &[], &mut |_| {}, &cancel) {
+                    Ok(result) => result.text,
+                    Err(_) => continue, // 合成失敗は graceful skip (1bit backend の不安定吸収)
+                };
+                // §9.2: 概念 memory の tags = 全 member session_ids (retrieve 時に全件寄与)。
+                let cid = store.save_memory(&body, "concept", &candidate.member_sources)?;
+                #[cfg(feature = "embeddings")]
+                if let Ok(embs) = embedder.embed(&[body.as_str()])
+                    && let Some(emb) = embs.first()
+                {
+                    store.insert_memory_embedding(cid, emb)?;
+                }
+                #[cfg(not(feature = "embeddings"))]
+                let _ = cid;
+                concept_memories_indexed += 1;
+            }
+        }
+
         let mut search = HybridSearch::new(&store, &*embedder);
         if cfg.graph_weight > 0.0 {
             search = search.with_graph_weight(cfg.graph_weight);
@@ -194,12 +238,18 @@ pub fn run_benchmark(
         }
         let results = search.search(&entry.question, cfg.top_k_retrieve)?;
 
+        // §9.2: concept memory が retrieve されたら tags 全 member session_ids を寄与させる
+        // (「gold session を含む概念が surface したら hit」)。session memory は従来通り tags[0] のみ。
         let retrieved_ids: Vec<String> = results
             .iter()
-            .filter_map(|r| {
-                serde_json::from_str::<Vec<String>>(&r.memory.tags)
-                    .ok()
-                    .and_then(|v| v.into_iter().next())
+            .flat_map(|r| {
+                let tags: Vec<String> =
+                    serde_json::from_str::<Vec<String>>(&r.memory.tags).unwrap_or_default();
+                if r.memory.category == "concept" {
+                    tags
+                } else {
+                    tags.into_iter().take(1).collect()
+                }
             })
             .collect();
 

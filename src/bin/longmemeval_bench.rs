@@ -22,7 +22,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use bonsai_agent::config::{AppConfig, ServerBackend};
+use bonsai_agent::domain::llm::LlmBackend;
 use bonsai_agent::eval::longmemeval::{BenchConfig, load_dataset, run_benchmark};
+use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -42,6 +45,11 @@ struct Args {
     /// retrieval top-k 上限 (default=20)
     #[arg(long, default_value_t = 20)]
     top_k: usize,
+
+    /// 概念ページ ON arm (Phase 4b 証拠ゲート) を有効化。`BONSAI_CONCEPT_EVAL=1` でも可。
+    /// ON 時は実 LLM server (MLX) が必要 (概念合成のため)。
+    #[arg(long)]
+    concept_eval: bool,
 }
 
 fn default_dataset_path() -> Option<PathBuf> {
@@ -64,24 +72,72 @@ fn main() -> Result<()> {
         load_dataset(&path).with_context(|| format!("dataset load 失敗: {}", path.display()))?;
     eprintln!("[longmemeval-bench] loaded {} entries", entries.len());
 
+    // CLI flag は env (BONSAI_CONCEPT_EVAL) と OR。どちらかが立てば ON arm。
+    let concept_eval = args.concept_eval || bonsai_agent::config::is_concept_eval_enabled();
     let cfg = BenchConfig {
         limit: args.limit,
         k_values: vec![5, 10, 20],
         top_k_retrieve: args.top_k,
+        concept_eval,
         ..BenchConfig::default()
     };
 
-    let report = run_benchmark(&entries, &cfg, None)?;
+    // concept ON arm は概念合成に実 LLM backend (MLX) を要する。OFF arm は backend 不要。
+    let backend: Option<Box<dyn LlmBackend>> = if cfg.concept_eval {
+        let app = AppConfig::load().context("concept ON arm: AppConfig load 失敗")?;
+        let m = &app.model;
+        let b = LlamaServerBackend::connect_with_params(
+            &m.server_url,
+            &m.model_id,
+            m.inference.clone(),
+        )
+        .with_mlx_compatible(m.backend == ServerBackend::MlxLm)
+        .with_sse_timeout(m.sse_chunk_timeout_secs);
+        if !b.is_healthy() {
+            eprintln!(
+                "エラー: concept ON arm には LLM server が必要です ({})。MLX server を起動してください。",
+                m.server_url
+            );
+            std::process::exit(1);
+        }
+        eprintln!(
+            "[longmemeval-bench] concept ON arm: backend={} @ {}",
+            m.model_id, m.server_url
+        );
+        Some(Box::new(b))
+    } else {
+        None
+    };
+
+    let report = run_benchmark(&entries, &cfg, backend.as_deref())?;
 
     eprintln!(
-        "[longmemeval-bench] processed={} overall_n={} per_type={}",
+        "[longmemeval-bench] arm={} processed={} overall_n={} per_type={} concept_indexed={}",
+        if cfg.concept_eval {
+            "concept_ON"
+        } else {
+            "OFF"
+        },
         report.processed,
         report.overall.n,
-        report.per_type.len()
+        report.per_type.len(),
+        report.concept_memories_indexed,
     );
 
     // Console pretty summary
     println!("# LongMemEval-S report\n");
+    println!(
+        "arm = {}",
+        if cfg.concept_eval {
+            "concept_ON"
+        } else {
+            "OFF"
+        }
+    );
+    println!(
+        "concept_memories_indexed = {}",
+        report.concept_memories_indexed
+    );
     println!("processed = {}", report.processed);
     println!("\n## overall");
     let recall_avg = report.overall.recall_at_k_avg();
