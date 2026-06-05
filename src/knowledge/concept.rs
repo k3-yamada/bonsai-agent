@@ -79,6 +79,54 @@ fn content_key(content: &str) -> String {
     content.chars().take(60).collect()
 }
 
+/// 合成済み概念ページ (Phase 2 の出力)。
+///
+/// `body` は agent 層が LLM に **member raw entry を再読込** させて合成した本文
+/// (概要 / 横断的知見 / 未解決の問い、inline `[[source]]` 出典)。
+/// 永続化前は status="draft"。LLM 非依存の純粋データ型として knowledge 層に置く。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConceptPage {
+    /// 概念の主題キー (`ConceptCandidate::theme_key` 由来)。
+    pub theme_key: String,
+    /// 出典 source 集合 (frontmatter 用、昇順想定)。
+    pub sources: Vec<String>,
+    /// LLM 合成本文。
+    pub body: String,
+    /// ページ状態 ("draft" = 合成直後の未レビュー)。
+    pub status: String,
+}
+
+/// theme_key をファイル名 slug 化 (英数のみ残し、その他は `-`、連続 `-` 圧縮、小文字)。
+/// path traversal 防止 (`/`・`.` を含めない)。
+pub fn theme_slug(theme_key: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in theme_key.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "concept".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// 概念ページを markdown 文字列にレンダリング (frontmatter + 本文、決定的)。
+pub fn render_concept_markdown(page: &ConceptPage, updated_at: &str) -> String {
+    let sources = page.sources.join(", ");
+    format!(
+        "---\ntheme: {}\nsources: [{}]\nupdated_at: {}\nstatus: {}\n---\n\n# Concept: {}\n\n{}\n",
+        page.theme_key, sources, updated_at, page.status, page.theme_key, page.body
+    )
+}
+
 /// 概念候補を決定的に検出する純粋関数。
 ///
 /// アルゴリズム:
@@ -251,5 +299,33 @@ mod tests {
             vec!["alpha", "zeta"],
             "同 score は theme_key 昇順: {keys:?}"
         );
+    }
+
+    #[test]
+    fn t_theme_slug_sanitizes() {
+        assert_eq!(theme_slug("Rust"), "rust");
+        assert_eq!(theme_slug("memory/graph.rs"), "memory-graph-rs");
+        assert_eq!(theme_slug("  spaced  word  "), "spaced-word");
+        assert_eq!(theme_slug("../etc/passwd"), "etc-passwd");
+        assert_eq!(theme_slug("!!!"), "concept", "空 slug は fallback");
+    }
+
+    #[test]
+    fn t_render_concept_markdown_has_frontmatter_and_body() {
+        let page = ConceptPage {
+            theme_key: "rust".into(),
+            sources: vec!["session_a".into(), "session_b".into()],
+            body: "概要: rust は所有権で安全。横断的知見は [[session_a]] と [[session_b]] に由来。"
+                .into(),
+            status: "draft".into(),
+        };
+        let md = render_concept_markdown(&page, "2026-06-05 10:00");
+        assert!(md.starts_with("---\n"), "frontmatter 開始: {md}");
+        assert!(md.contains("theme: rust"));
+        assert!(md.contains("sources: [session_a, session_b]"));
+        assert!(md.contains("updated_at: 2026-06-05 10:00"));
+        assert!(md.contains("status: draft"));
+        assert!(md.contains("# Concept: rust"));
+        assert!(md.contains("[[session_a]]"), "inline 出典保持");
     }
 }

@@ -75,6 +75,42 @@ impl Vault {
         Ok(())
     }
 
+    /// 概念ページを `concepts/<slug>.md` に書き出す (Phase 2 永続化、knowledge 層)。
+    ///
+    /// agent 層が LLM 合成した `ConceptPage` を受け取り markdown 化して保存。
+    /// 既存ページは上書き (再合成で最新化、status はページ側が持つ)。
+    /// 戻り値: 書き出したファイルパス。
+    pub fn write_concept_page(
+        &self,
+        page: &crate::knowledge::concept::ConceptPage,
+        updated_at: &str,
+    ) -> Result<PathBuf> {
+        let dir = self.root.join("concepts");
+        std::fs::create_dir_all(&dir)?;
+        let slug = crate::knowledge::concept::theme_slug(&page.theme_key);
+        let path = dir.join(format!("{slug}.md"));
+        let md = crate::knowledge::concept::render_concept_markdown(page, updated_at);
+        std::fs::write(&path, md)?;
+        Ok(path)
+    }
+
+    /// 概念ページを `KnowledgeGraph` に記録 (concept ノード + 各 source への `synthesizes` エッジ)。
+    pub fn record_concept_to_graph(
+        &self,
+        page: &crate::knowledge::concept::ConceptPage,
+        graph: &crate::memory::graph::KnowledgeGraph,
+    ) -> Result<()> {
+        let concept_id = graph.add_node("concept", &page.theme_key)?;
+        for source in &page.sources {
+            if source.is_empty() {
+                continue;
+            }
+            let source_id = graph.add_node("source", source)?;
+            graph.add_edge(concept_id, source_id, "synthesizes", 1.0)?;
+        }
+        Ok(())
+    }
+
     /// 複数エントリをバッチ追記
     pub fn append_all(&self, entries: &[StockEntry]) -> Result<usize> {
         let mut count = 0;
@@ -308,6 +344,45 @@ mod tests {
             !neighbors.is_empty(),
             "カテゴリ→エントリのエッジが存在すべき"
         );
+    }
+
+    #[test]
+    fn test_write_concept_page() {
+        use crate::knowledge::concept::ConceptPage;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        let page = ConceptPage {
+            theme_key: "rust".into(),
+            sources: vec!["s1".into(), "s2".into()],
+            body: "概要本文 [[s1]]".into(),
+            status: "draft".into(),
+        };
+        let path = vault.write_concept_page(&page, "2026-06-05 10:00").unwrap();
+        assert!(path.exists(), "concept md が作成される");
+        assert!(path.ends_with("concepts/rust.md"));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("theme: rust"));
+        assert!(content.contains("status: draft"));
+        assert!(content.contains("[[s1]]"));
+    }
+
+    #[test]
+    fn test_record_concept_to_graph() {
+        use crate::knowledge::concept::ConceptPage;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::new(dir.path()).unwrap();
+        let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+        let graph = crate::memory::graph::KnowledgeGraph::new(store.conn());
+        let page = ConceptPage {
+            theme_key: "rust".into(),
+            sources: vec!["s1".into(), "s2".into()],
+            body: "本文".into(),
+            status: "draft".into(),
+        };
+        vault.record_concept_to_graph(&page, &graph).unwrap();
+        let neighbors = graph.neighbors("rust", 1).unwrap();
+        assert_eq!(neighbors.len(), 2, "2 source への synthesizes エッジ");
+        assert!(neighbors.iter().all(|(_, rel, _)| rel == "synthesizes"));
     }
 
     #[test]
