@@ -55,10 +55,37 @@ pub fn synthesize_concepts(
     config: &ConceptConfig,
     updated_at: &str,
 ) -> Result<Vec<PathBuf>> {
-    // STUB (Red): 未実装。Green で合成経路を入れる。
-    let _ = (entries, vault, graph, backend, cancel, config, updated_at);
-    let _ = build_synthesis_messages("", &[]);
-    Ok(Vec::new())
+    if !crate::config::is_concept_synthesis_enabled() {
+        return Ok(Vec::new());
+    }
+
+    let candidates = detect_concept_candidates(entries, config);
+    let mut written = Vec::new();
+    for candidate in &candidates {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let members = member_entries(candidate, entries);
+        if members.is_empty() {
+            continue;
+        }
+        let messages = build_synthesis_messages(&candidate.theme_key, &members);
+        // raw 再読込済の member を LLM に渡し横断的知見を合成。Err は graceful skip。
+        let body = match backend.generate(&messages, &[], &mut |_| {}, cancel) {
+            Ok(result) => result.text,
+            Err(_) => continue,
+        };
+        let page = ConceptPage {
+            theme_key: candidate.theme_key.clone(),
+            sources: candidate.member_sources.clone(),
+            body,
+            status: "draft".to_string(),
+        };
+        let path = vault.write_concept_page(&page, updated_at)?;
+        vault.record_concept_to_graph(&page, graph)?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 #[cfg(test)]
