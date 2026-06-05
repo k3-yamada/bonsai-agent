@@ -6,6 +6,17 @@
 
 > 本計画は **fresh session で pickup 可能**な自己完結 doc。前提知識は memory `zenn_tsurubee_llm_wiki_learnings` / `qiita_2do_brain_learnings`、本 doc、現コードで足りる。
 
+## 0. 実装ステータス (2026-06-05)
+
+- ✅ **Phase 1** 完遂 — `src/knowledge/concept.rs`: `detect_concept_candidates` (純粋クラスタリング)、`ConceptCandidate`/`ConceptConfig`。TDD strict (Red `336f58d` / Green `72cc79c`)。
+- ✅ **Phase 2a** 完遂 — `concept.rs`: `ConceptPage`/`theme_slug`/`render_concept_markdown`/`member_entries`、`vault.rs`: `write_concept_page`/`record_concept_to_graph`。commit `8ddcfd7`。
+- ✅ **Phase 2b** 完遂 — `src/agent/concept_synthesis.rs`: `synthesize_concepts` (env-gated, raw 再読込, MockLlm 検証) + `config.rs::is_concept_synthesis_enabled` (`BONSAI_CONCEPT_SYNTHESIS`, default OFF)。TDD strict (Red `e2e0503` / Green `b88ea52`)。
+- ✅ **Phase 4a** 完遂 — `concept.rs::knowledge_gap_sources` (未統合 source = 知識ギャップ、純粋)。commit `7f52225`。VaultLintReport 6 軸への field 追加は assertion 結合が重く、独立純粋関数として decouple (lint pass への wiring は ACCEPT 後)。
+- ⏸ **Phase 4b (証拠ゲート) = 次の必須ステップ** — LongMemEval-S 500Q paired で concept ON/OFF の R@5 比較。**ACCEPT (R@5 改善) が出るまで `BONSAI_CONCEPT_SYNTHESIS` default OFF 維持**。実 MLX で数時間の paired run、別 session 推奨 (Lab 系と同じ規律、ADR-003)。
+- ⏸ **Phase 3 (recall premium) = Phase 4b ACCEPT 後** — `RecallTool` は現状 `db_path` のみ保持で vault root 非参照のため新規 wiring 要。概念ページは 1bit モデルで recall 劣化リスクあり (本 doc §6)、ACCEPT 前の wiring は計画違反のため未着手。
+
+全 commit local のみ (未 push)。1480 passed / clippy clean / structural (DEP-001 層) clean / fmt clean、退行ゼロ。
+
 ## 1. なぜ概念ページか (gap 分析、コード接地済 2026-06-05)
 
 LLM Wiki の 3 オペ (Ingest / Query / Lint) に対し bonsai の現状:
