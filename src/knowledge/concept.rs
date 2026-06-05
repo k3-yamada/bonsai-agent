@@ -137,6 +137,22 @@ pub fn theme_slug(theme_key: &str) -> String {
     }
 }
 
+/// 知識ギャップ検出 (Phase 4a、純粋): どの概念ページにも属さない source を列挙する。
+///
+/// 記事 (Karpathy LLM Wiki) の Lint「知識ギャップ提案」相当。entry に存在するが
+/// 既存概念ページの出典 (`covered_sources`) に含まれない source = 未統合の知識ギャップ。
+/// 戻り値は重複なし・昇順 (決定的)。空 source は対象外。
+pub fn knowledge_gap_sources(entries: &[StockEntry], covered_sources: &[String]) -> Vec<String> {
+    let covered: HashSet<&str> = covered_sources.iter().map(|s| s.as_str()).collect();
+    let mut gaps: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in entries {
+        if !e.source.is_empty() && !covered.contains(e.source.as_str()) {
+            gaps.insert(e.source.clone());
+        }
+    }
+    gaps.into_iter().collect()
+}
+
 /// 概念ページを markdown 文字列にレンダリング (frontmatter + 本文、決定的)。
 pub fn render_concept_markdown(page: &ConceptPage, updated_at: &str) -> String {
     let sources = page.sources.join(", ");
@@ -334,6 +350,24 @@ mod tests {
         assert!(members.iter().all(|e| e.content.contains("rust")));
         // python entry は除外
         assert!(!members.iter().any(|e| e.content.contains("python")));
+    }
+
+    #[test]
+    fn t_knowledge_gap_sources_finds_uncovered() {
+        let entries = vec![
+            entry("rust topic", "session_a"),
+            entry("rust topic", "session_b"),
+            entry("orphan topic", "session_z"),
+            entry("no source entry", ""),
+        ];
+        // session_a/b は概念ページに統合済、session_z は未統合 = gap。
+        let covered = vec!["session_a".to_string(), "session_b".to_string()];
+        let gaps = knowledge_gap_sources(&entries, &covered);
+        assert_eq!(
+            gaps,
+            vec!["session_z"],
+            "未統合 source のみ gap、空 source 除外"
+        );
     }
 
     #[test]
