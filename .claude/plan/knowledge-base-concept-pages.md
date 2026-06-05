@@ -87,6 +87,52 @@ LLM Wiki の 3 オペ (Ingest / Query / Lint) に対し bonsai の現状:
 ## 7. 推奨着手順序
 Phase 1 (純粋検出、低リスク・LLM 不要) → Phase 2 (mock で合成経路) → Phase 4 証拠ゲート (LongMemEval-S paired) で ACCEPT 確認 → Phase 3 recall 統合。**ACCEPT 出るまで env default OFF**。
 
+## 9. Phase 4b Run-Spec (証拠ゲート、未実装 — 別 session/MLX で launch)
+
+> 目的: 概念ページが LongMemEval-S retrieval の **R@5 を改善するか** を paired で定量し、ACCEPT 判定する。
+> production/eval コードは現状未変更。本 spec は「実装 → 起動 → 判定」を決定的に再現するための完全手順。
+
+### 9.1 データモデル橋渡し (実装時の決定事項、固定)
+現 `run_benchmark` は 1 haystack session = 1 memory (`category="session"`, `tags=[session_id]`) を index し、`recall_any_at_k(retrieved_ids, answer_session_ids, k)` で評価 (`retrieved_ids` = 各 hit の `tags[0]`)。橋渡しは以下で固定:
+- 各 entry の haystack session narrative を擬似 `StockEntry{content=narrative, source=session_id}` に写像。
+- `detect_concept_candidates(pseudo_entries, ConceptConfig{min_sources:2,..})` で候補抽出 (entry スコープ ephemeral、cross-entry 汚染なし)。
+- 各候補を **実 backend** で合成 (`build_synthesis_messages` → `generate`)、概念 memory を **同一 in-memory store** に index: `category="concept"`, `content=合成body`, `tags=member_session_ids` (JSON 配列)。
+
+### 9.2 指標定義 (採用 1 案・固定)
+- **採用**: 概念 memory が retrieve されたら、その `tags` の **全 member session_ids** を `retrieved_ids` に寄与させる (session memory は従来通り `tags[0]` のみ)。⇒「gold session を含む概念が surface したら hit」。`recall_any_at_k` 本体は不変、`retrieved_ids` 構築のみ category 分岐で拡張。
+- **不採用**: 概念を half-credit (0.5) 計上案は、既存 metric を汚し解釈を難しくするため却下 (単純性優先)。
+- k_values=[5,10,20] 据え置き、主判定は **R@5**。
+
+### 9.3 paired プロトコル (ADR-003 準拠、項目 266/268 と同方法論)
+- 同一 dataset・同一順序・同一 store seed で **OFF arm** (`BONSAI_CONCEPT_EVAL` 未設定) と **ON arm** (`=1`) を per-entry で走らせ、**per-entry R@5 の paired Δ** を収集。
+- 集計: mean Δ / Cohen's dz / Wilcoxon signed-rank (既存 `scripts/lab_v22_metric.py` 系の判定器に倣う)。
+- **ACCEPT 条件**: mean Δ(R@5) > 0 かつ dz が改善方向・noise floor (~5%) 超、Wilcoxon が destructive 方向でないこと。FAIL なら `BONSAI_CONCEPT_SYNTHESIS` default OFF 恒久維持 (unpaired の見かけ改善は採用しない)。
+
+### 9.4 実装タスク (未着手、eval-only・production recall 不変)
+1. `BenchConfig` に `concept_eval: bool` 追加 (env `BONSAI_CONCEPT_EVAL=1` から populate、default false)。
+2. `run_benchmark` 内 ON 分岐で 9.1 の概念 memory を追加 index + 9.2 の `retrieved_ids` 拡張。real backend は CLI/env で注入 (eval は `agent::concept_synthesis::{build_synthesis_messages}` + `knowledge::concept::detect_concept_candidates` を consume。`eval` は LAYER_ORDER 外で層制約 OK)。
+3. TDD: MockLlm で「ON arm が concept memory を corpus に追加する」plumbing を検証 (実数値は assert しない、`graph_fusion smoke` と同型)。
+4. CLI: `--concept-eval` フラグ + 出力に arm 表示。
+
+### 9.5 起動コマンド (実装後)
+```bash
+# dataset (one-time、既存 bin docstring 参照)
+#   ~/.cache/bonsai-agent/longmemeval/longmemeval_s_cleaned.json
+
+# OFF arm (baseline、MLX 不要・既存経路)
+cargo run --release --bin longmemeval-bench -- --limit 100 > /tmp/concept_off.txt
+
+# ON arm (要 MLX 起動: port 8888、prism-ml Ternary 2bit。real 合成のため数時間)
+BONSAI_CONCEPT_EVAL=1 BONSAI_CONCEPT_SYNTHESIS=1 \
+  cargo run --release --bin longmemeval-bench -- --limit 100 > /tmp/concept_on.txt
+# per-entry paired Δ(R@5) を 9.3 の判定器に通す
+```
+- **計算量**: 500Q × 候補 1-3 × 1 合成 call。MLX 2-bit latency で **full は数時間**。まず `--limit 100` smoke → ACCEPT 兆候があれば full。
+- **MLX 必須**: ON arm は real 合成必須 (MockLlm body では retrieval 信号が無意味)。OFF arm は MLX 不要。
+
+### 9.6 完了基準
+ON/OFF paired の R@5 比較で ACCEPT/REJECT を `docs/quality/lab-history.md` に追記 + 本 §0 を更新。ACCEPT 時のみ Phase 3 (production recall premium) 着手 + `BONSAI_CONCEPT_SYNTHESIS` default 化検討。
+
 ## 8. 関連
 - memory: [[zenn_tsurubee_llm_wiki_learnings]] / [[qiita_2do_brain_learnings]] / [[knowledge_synthesis_2026_04_20]]
 - plan: `.claude/plan/vault-ingest-compile-separation.md` (Ingest 品質ゲート) / `vault-status-state-machine.md` (項目254 完遂、status 軸)
