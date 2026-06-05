@@ -2,6 +2,7 @@ pub mod agent_loop;
 pub mod benchmark;
 pub mod checkpoint;
 pub mod compaction;
+pub mod concept_synthesis;
 pub mod error_recovery;
 pub mod experiment;
 pub mod experiment_log;

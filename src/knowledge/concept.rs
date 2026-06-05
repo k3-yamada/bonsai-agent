@@ -79,6 +79,25 @@ fn content_key(content: &str) -> String {
     content.chars().take(60).collect()
 }
 
+/// 候補のメンバ entry を全件から復元する純粋関数 (Phase 2 の raw 再読込用)。
+///
+/// content key (先頭 60 字) が候補の `member_entry_keys` に含まれる entry を返す。
+/// agent 層はこの **生 content** を LLM 合成に渡し、要約の要約 (再帰的要約劣化) を避ける。
+pub fn member_entries<'a>(
+    candidate: &ConceptCandidate,
+    entries: &'a [StockEntry],
+) -> Vec<&'a StockEntry> {
+    let keyset: HashSet<&str> = candidate
+        .member_entry_keys
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    entries
+        .iter()
+        .filter(|e| keyset.contains(content_key(&e.content).as_str()))
+        .collect()
+}
+
 /// 合成済み概念ページ (Phase 2 の出力)。
 ///
 /// `body` は agent 層が LLM に **member raw entry を再読込** させて合成した本文
@@ -299,6 +318,22 @@ mod tests {
             vec!["alpha", "zeta"],
             "同 score は theme_key 昇順: {keys:?}"
         );
+    }
+
+    #[test]
+    fn t_member_entries_recovers_raw_content() {
+        let entries = vec![
+            entry("rust ownership prevents data races", "session_a"),
+            entry("rust borrow checker enforces lifetimes", "session_b"),
+            entry("python dynamic typing unrelated", "session_c"),
+        ];
+        let cands = detect_concept_candidates(&entries, &ConceptConfig::default());
+        assert_eq!(cands.len(), 1);
+        let members = member_entries(&cands[0], &entries);
+        assert_eq!(members.len(), 2, "rust 2 entry が復元される");
+        assert!(members.iter().all(|e| e.content.contains("rust")));
+        // python entry は除外
+        assert!(!members.iter().any(|e| e.content.contains("python")));
     }
 
     #[test]

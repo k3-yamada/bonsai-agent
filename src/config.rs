@@ -358,6 +358,18 @@ pub fn is_lab_mlx_warmup() -> bool {
     )
 }
 
+/// `BONSAI_CONCEPT_SYNTHESIS=1` で概念ページ合成 (知識基盤強化 Phase 2) を有効化。
+///
+/// 既定 OFF (env unset = 後方互換 no-op)。概念ページは複数 source 横断の合成成果物で
+/// LLM call を伴うため、daemon/手動トリガで明示有効化する。証拠ゲート (LongMemEval-S paired)
+/// で recall 改善が ACCEPT されるまで default OFF を維持する。
+pub fn is_concept_synthesis_enabled() -> bool {
+    matches!(
+        std::env::var("BONSAI_CONCEPT_SYNTHESIS").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 /// `BONSAI_MLX_AUTO_CLAMP=1` の場合、起動時に MLX server の `/props` から `n_ctx` を取得して
 /// `ModelConfig.context_length` を `min(configured, server_n_ctx)` にクランプする。
 ///
