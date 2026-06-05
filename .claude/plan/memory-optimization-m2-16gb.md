@@ -76,4 +76,21 @@
 
 **落とし穴 (codex)**: `max_kv_size` 過小→文脈欠落 / `set_cache_limit` 過小→再計算 latency 悪化 / sidecar に prompt整形・tool policy を持たせ過ぎると chat template の source-of-truth 分裂 (sidecar は推論実行 + メモリ制御に限定 = クリーンアーキ境界厳守)。
 
+## 実施結果 (2026-06-05) — Phase 2 完了
+
+- **Phase 2a/2b/2c 完遂** (commit 24d3582 / 21e59d4 / 6873191、push 済、`src/` 変更ゼロ)。
+  sidecar (`scripts/mlx_server/server.py`) + helper 11 test + `/mem` + runbook 配線。
+- **メモリ削減 実測** (resident KV @6417tok): fp16 0.926GB → **kv8 0.496GB(-46%)** → kv4 0.267GB(-71%)。
+- **E2E 実証**: 実 config 既に `backend=mlx-lm`/`server_url=8888` → sidecar 起動だけで bonsai 使用。
+  `--exec` で baseline / kv8 構成とも正答 ("PONG" / "2,3,5")。
+- **採用判断**: **kv8 + cache_limit + quantized_kv_start=256 + max_kv_size を推奨 default 確定**
+  (低リスク・即採用可、runbook 反映済)。
+
+### Deferred タスク: kv4 (-71%) 品質検証
+- **着手条件**: メモリが kv8 (-46%) で不足し、kv4 (-71%) の追加削減が実需要化した時のみ。
+- **前段工数**: 既存 smoke (5 短文タスク) は KV を膨らませず KV量子化劣化を検出不能 →
+  **長文 (recall/tool-call 依存) 評価タスクセットを新規構築**が必要。
+- **検証**: 長文 paired smoke baseline vs kv4 を ≥5 cycle (ADR-003、Wilcoxon/Cohen's dz)、
+  実機実測で **~10-17h (一晩)**。`quantized_kv_start` の peak トランジェント緩和計測も併せて。
+
 関連: [[mlx_context_expansion_2026_06_05]] (案B は context 拡張と同一 keystone) / [[memory_optimization_2026_06_05]] / [[feedback_clean_architecture]]。
