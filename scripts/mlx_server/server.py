@@ -144,6 +144,7 @@ def build_app():
     import mlx.core as mx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, StreamingResponse
+    from starlette.concurrency import run_in_threadpool
     from mlx_lm import load, stream_generate
     from mlx_lm.sample_utils import make_sampler
 
@@ -174,6 +175,18 @@ def build_app():
     def health():
         return {"status": "ok"}
 
+    @app.get("/mem")
+    def mem():
+        """MLX allocator のメモリ計測 (Phase 2b RSS 計測用)。
+        peak は直近 chat request 開始時に reset される。"""
+        gb = 1024.0**3
+        return {
+            "active_gb": round(mx.get_active_memory() / gb, 3),
+            "peak_gb": round(mx.get_peak_memory() / gb, 3),
+            "cache_gb": round(mx.get_cache_memory() / gb, 3),
+            "kv_kwargs": gen_kw,
+        }
+
     def _prompt(messages: list[dict[str, Any]]) -> Any:
         # chat template は backend tokenizer に委譲 (ADR-011)。
         return tokenizer.apply_chat_template(
@@ -199,6 +212,7 @@ def build_app():
         prompt = _prompt(messages)
         args = _gen_args(body)
         stream = bool(body.get("stream", False))
+        mx.reset_peak_memory()  # この request の peak を /mem で読めるように
 
         if stream:
             def event_stream():
@@ -214,13 +228,18 @@ def build_app():
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-        # 非ストリーム
-        text, last = "", None
-        for resp in stream_generate(model, tokenizer, prompt, **args):
-            last = resp
-            text += resp.text
-        pt = getattr(last, "prompt_tokens", 0) if last else 0
-        ct = getattr(last, "generation_tokens", 0) if last else 0
+        # 非ストリーム: 同期生成は threadpool で実行しイベントループをブロックしない
+        # (/health /mem を生成中も応答可能に保つ。bonsai supervisor の health poll 対策)。
+        def _blocking_generate():
+            text, last = "", None
+            for resp in stream_generate(model, tokenizer, prompt, **args):
+                last = resp
+                text += resp.text
+            pt = getattr(last, "prompt_tokens", 0) if last else 0
+            ct = getattr(last, "generation_tokens", 0) if last else 0
+            return text, pt, ct
+
+        text, pt, ct = await run_in_threadpool(_blocking_generate)
         return JSONResponse(completion_response(model_id, text, pt, ct))
 
     return app
