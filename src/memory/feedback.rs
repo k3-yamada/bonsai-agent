@@ -25,7 +25,7 @@ static CORRECTION_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         r"(?i)(that'?s\s+wrong|incorrect|not\s+right|redo|try\s+again|fix\s+(this|that|it))",
         r"(?i)(no,?\s+i\s+(meant|want|need)|that'?s\s+not\s+what)",
         r"(違う|間違|やり直|もう一度|そうじゃな|ちがう|正しくない|修正して|直して)",
-        r"(ダメ|だめ|使えない|おかしい|変だ|へんだ)",
+        r"(ダメ|だめ|使えない|おかしい|変だ|へんだ|訂正|誤り)",
     ]
     .iter()
     .map(|p| Regex::new(p).unwrap())
@@ -36,7 +36,7 @@ static REINFORCEMENT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"(?i)(perfect|exactly|that'?s\s+(right|correct|great|it)|well\s+done|nice|good\s+job)",
         r"(?i)(yes,?\s+that'?s\s+what|thanks|thank\s+you|awesome|excellent)",
-        r"(完璧|正解|そうそう|その通り|ありがとう|いいね|素晴らしい|OK|おk|ok)",
+        r"(完璧|正解|そうそう|その通り|ありがとう|いいね|素晴らしい|OK|おk|ok|なるほど|それです|そうです)",
         r"(合ってる|あってる|正しい|良い|いい感じ|バッチリ|ばっちり)",
     ]
     .iter()

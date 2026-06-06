@@ -16,6 +16,7 @@ use crate::cancel::CancellationToken;
 use crate::domain::conversation::{Message, Role, Session};
 use crate::domain::event::EventType;
 use crate::domain::llm::LlmBackend;
+use crate::memory::feedback::detect_feedback;
 use crate::memory::store::MemoryStore;
 use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::model_router::CriticConfig;
@@ -104,6 +105,20 @@ pub fn run_agent_loop_with_session(
         .find(|m| matches!(m.role, Role::User))
         .map(|m| m.content.clone())
         .unwrap_or_default();
+
+    // [VALUES V1] ユーザーの表層発話から
+    // フィードバック種別を推定する。
+    // 結果は現時点でログのみ。
+    // DB保存・重み更新は別タスクで実装予定。
+    let feedback = detect_feedback(&task_context);
+    log_event(
+        LogLevel::Debug,
+        "feedback",
+        &format!(
+            "type={:?} confidence={:.2} pattern={:?}",
+            feedback.feedback_type, feedback.confidence, feedback.matched_pattern
+        ),
+    );
 
     let secrets_filter = SecretsFilter::default();
 
