@@ -274,8 +274,8 @@ impl<'a> AuditLog<'a> {
         if stats.total_calls > 0 {
             stats.avg_prompt_len = prompt_len_sum / stats.total_calls as u64;
         }
-        if remote_duration_count > 0 {
-            stats.avg_remote_duration_ms = duration_sum / remote_duration_count;
+        if let Some(avg) = duration_sum.checked_div(remote_duration_count) {
+            stats.avg_remote_duration_ms = avg;
         }
         Ok(stats)
     }

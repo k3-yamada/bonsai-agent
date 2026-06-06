@@ -474,7 +474,7 @@ impl ToolRegistry {
                 match embedder.embed(&tool_descs) {
                     Ok(vecs) if vecs.len() == tool_names.len() => {
                         let mut map = HashMap::with_capacity(tool_names.len());
-                        for (name, v) in tool_names.into_iter().zip(vecs.into_iter()) {
+                        for (name, v) in tool_names.into_iter().zip(vecs) {
                             map.insert(name, v);
                         }
                         *cache_guard = Some(SemanticCache {

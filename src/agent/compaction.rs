@@ -974,7 +974,7 @@ pub(crate) fn overflow_axes(
         result.push((MemoryKind::Kg, usage.kg - allocated.kg));
     }
     // 超過量降順
-    result.sort_by(|a, b| b.1.cmp(&a.1));
+    result.sort_by_key(|b| std::cmp::Reverse(b.1));
     result
 }
 
