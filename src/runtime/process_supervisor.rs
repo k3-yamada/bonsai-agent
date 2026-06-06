@@ -347,7 +347,10 @@ mod tests {
     fn t_real_process_spawn_health_idle_kill_respawn() {
         let port = free_port();
         let health_url = format!("http://127.0.0.1:{port}/health");
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake_mlx_server.py");
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fake_mlx_server.py"
+        );
         let s = ProcessSupervisor::with_spawn(
             health_url,
             1, // idle_timeout=1s

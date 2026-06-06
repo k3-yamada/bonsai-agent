@@ -226,7 +226,11 @@ mod tests {
             .join("snapshots")
             .join("abc123");
         std::fs::create_dir_all(&snap).unwrap();
-        std::fs::write(snap.join("config.json"), r#"{"max_position_embeddings": 40960}"#).unwrap();
+        std::fs::write(
+            snap.join("config.json"),
+            r#"{"max_position_embeddings": 40960}"#,
+        )
+        .unwrap();
         let got = hf_ctx_from_cache_root(&root, "prism-ml/Ternary-Bonsai-8B-mlx-2bit");
         std::fs::remove_dir_all(&root).ok();
         assert_eq!(got, Some(40960));
