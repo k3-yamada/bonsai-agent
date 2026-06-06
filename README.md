@@ -6,12 +6,13 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 
 ## 特徴
 
-- **1.1GBのLLM** — Bonsai-8B（1ビット量子化）でツール呼び出し・コード理解・Web検索が可能
+- **1.28GBのLLM** — Bonsai-8B（1ビット量子化）でツール呼び出し・コード理解・Web検索が可能
 - **自己進化** — 経験を自動記録、3回成功でスキルに昇格、arxiv論文を自動収集して知識を蓄積
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
-- **269+のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（1400+ テスト、詳細は CLAUDE.md / [docs/quality/lab-history.md](docs/quality/lab-history.md)）
+- **269+のハーネスパターン** — 1ビットモデルの信頼性をスキャフォールディングで底上げ（1480+ テスト、詳細は CLAUDE.md / [docs/quality/lab-history.md](docs/quality/lab-history.md)）
+- **設計思想の錨（[VALUES.md](docs/VALUES.md)）** — V1〜V7 の価値観を明文化、Goodhart's Law 監視（指標の形骸化検出、env-gated）で自己の変質を警戒
 - **ADK 取込ロードマップ** — Phase A/B1/B2/C 完了（LLM-as-judge + Judge Gate + ベンチマーク 22→40）、Phase D は YAGNI 判定で見送り
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
 - **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
@@ -292,7 +293,7 @@ arxiv論文自動収集 → 知識蓄積 ─────────────
 
 - 成功/失敗/洞察を自動記録（`ExperienceStore`）
 - 同じツールチェーンが3回成功 → スキルに自動昇格（`SkillStore`）
-- ユーザーの修正（「違う」）/強化（「完璧」）を検出し高信頼度で記録
+- ユーザーの修正（「違う」「訂正」）/強化（「完璧」「なるほど」）を agent loop で検出しログ記録（日英対応、`detect_feedback`。DB永続化・検索重み更新は今後の課題）
 - arxiv APIから関心領域の論文を自動収集（`EvolutionEngine`）
 - 定期振り返りレポート（`Dreamer`）
 - **能動的自己改善**（`apply_improvements`）:
@@ -304,29 +305,19 @@ arxiv論文自動収集 → 知識蓄積 ─────────────
 
 ## Lab実機テスト結果
 
-Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
+Bonsai-8B 1bit、k=3、10 cycle paired による変異評価。全履歴・詳細は [docs/quality/lab-history.md](docs/quality/lab-history.md) を参照。
 
-### v8結果（最新、2026-04-19）— 全10実験REJECT、最適解収束
-- ベースライン: **score=0.8517**, pass@k=0.9167
-- 全10実験REJECT — デフォルト設定が最適解に完全収束
-- Adam's Lawリライト+6機能追加後もベースライン維持（劣化なし）
+### 現状（2026-06時点）
+- **天井 10 連続 REJECT**（v17〜v21）— デフォルト設定が最適解に収束し、ハーネス機構は最適化済み
+- **paired evidence 規律**（[ADR-003](docs/decisions/ADR-003-paired-evidence-over-unpaired.md)）— unpaired single-cycle の ACCEPT 3 件（項目 262/263/264）が paired re-eval で全て覆る → cherry-picked noise を決定的に排除
+- **能力プロファイル**（AgentFloor T1-T6）: T1 Instruct=0.68 / T3 ToolSelect=0.77 / **T6 LongHorizon=0.47（最弱）** — tier-targeted 変異は T6 偏向で攻略
+- baseline score ≈ 0.82（項目 265 G-MCT2 smoke: score=0.8209 / pass@k=1.0）
 
-### v6.2結果
-- ベースライン: score=0.8517, pass@k=0.9167
-
-### v5結果 — 承認率40%（v3の4倍）
-- ベースライン: score=0.8429, pass@k=0.9167
-- **ACCEPT 1**: 「ツール使用前に思考を強制」(+0.032) → デフォルト化済
-- **ACCEPT 2**: 「フォールバック戦略」(+0.001) → デフォルト化済
-- 承認率: **2/5 (40%)**
-
-### v3結果 — ベースライン+1.9%
-- ベースライン: **score=0.8762**, pass@k=1.0（完全安定）
-- 全変異REJECT → デフォルト設定が最適解に収束
-
-### v1結果 — 初回計測
-- ベースライン: score=0.8596, pass@k=1.0
-- 唯一のACCEPT: 「計画強制」ルール（+0.025）→ デフォルト化
+### デフォルト化済み変異（Lab ACCEPT → 恒久適用）
+- 「計画強制」ルール（+0.025、v1）
+- 「ツール使用前に `<think>` で意図記述」（+0.032、v5）
+- 「フォールバック戦略」（+0.001、v5）
+- 「回答前ファイル内容確認」（+0.0157、v9）
 
 ## ハーネスパターン（269+項目）
 
@@ -353,13 +344,13 @@ Bonsai-8B 1bit、k=3、自律的自己改善ループによる変異評価。
 ## 開発
 
 ```bash
-cargo test --lib               # 1400+ テスト
+cargo test --lib               # 1480+ テスト
 cargo test --test structural   # レイヤー/サイズ/eprintln lint（Z-4）
 cargo clippy --lib -- -D warnings  # リント
 cargo fmt -- --check           # フォーマット
 ```
 
-開発フローの詳細（Lab 起動、env 一覧、smoke 手順）は [docs/execution/runbook.md](docs/execution/runbook.md)、設計判断は [docs/decisions/](docs/decisions/)（ADR-001〜009）を参照。
+開発フローの詳細（Lab 起動、env 一覧、smoke 手順）は [docs/execution/runbook.md](docs/execution/runbook.md)、設計判断は [docs/decisions/](docs/decisions/)（ADR-001〜011）、設計思想は [docs/VALUES.md](docs/VALUES.md) を参照。
 
 ## 必要環境
 
