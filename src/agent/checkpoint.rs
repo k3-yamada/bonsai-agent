@@ -118,23 +118,16 @@ impl<'a> CheckpointManager<'a> {
         Ok(count as usize)
     }
 
-    /// チェックポイントを作成し、git stash と DB（設定時）に記録
+    /// チェックポイントを作成し、git スナップショット (commit SHA) と DB（設定時）に記録
     ///
-    /// 追跡済みファイルの変更のみstashする（未追跡ファイルは対象外）。
-    /// Lab実行中にClaude Codeが新規ファイルを作成しても干渉しない。
+    /// **非破壊**: `git stash create` で追跡済み変更の commit オブジェクトを作るのみ。
+    /// working tree も stash list も一切変更しないため、Lab / REPL 実行中に
+    /// ユーザーの未コミット作業を奪わない（旧 `git stash push` は作業を退避させ
+    /// stash を累積させる罠だった）。未追跡ファイルは対象外。変更なしなら None。
     pub fn create(&mut self, desc: &str) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         let git_ref = if is_git() && !cfg!(test) {
-            let o = Command::new("git")
-                .args(["stash", "push", "-m", &format!("bonsai-cp-{desc}")])
-                .output()?;
-            if o.status.success()
-                && !String::from_utf8_lossy(&o.stdout).contains("No local changes")
-            {
-                Some(format!("stash@{{{}}}", self.cps.len()))
-            } else {
-                None
-            }
+            snapshot_tracked_changes()
         } else {
             None
         };
@@ -260,6 +253,25 @@ fn is_git() -> bool {
         .unwrap_or(false)
 }
 
+/// 追跡済み変更の非破壊スナップショットを作成し、その commit SHA を返す。
+///
+/// `git stash create` は stash オブジェクト (commit) を生成するだけで
+/// **working tree も stash list も変更しない**。`push` と違いユーザーの
+/// 作業を退避させない。変更なし / 失敗時は None。返した SHA は
+/// `git stash apply <sha>` で復元でき、index がずれて壊れる `stash@{N}`
+/// 形式より安定。
+fn snapshot_tracked_changes() -> Option<String> {
+    let o = Command::new("git")
+        .args(["stash", "create"])
+        .output()
+        .ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +296,31 @@ mod tests {
     #[test]
     fn t_git() {
         assert!(is_git());
+    }
+
+    // 回帰防止: snapshot_tracked_changes は `git stash create` ベースで
+    // working tree も stash list も変更しない (旧 `git stash push` は
+    // ユーザーの未コミット作業を退避させ stash を 709 件累積させた)。
+    #[test]
+    fn t_snapshot_does_not_grow_stash_list() {
+        if !is_git() {
+            return;
+        }
+        let before = git_stash_list_count();
+        let _ = snapshot_tracked_changes();
+        let after = git_stash_list_count();
+        assert_eq!(
+            before, after,
+            "snapshot は stash list を変更してはならない (非破壊)"
+        );
+    }
+
+    fn git_stash_list_count() -> usize {
+        Command::new("git")
+            .args(["stash", "list"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+            .unwrap_or(0)
     }
 
     #[test]
