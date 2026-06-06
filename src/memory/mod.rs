@@ -1,3 +1,4 @@
+pub mod consistency;
 pub mod decay;
 pub mod dreams;
 pub mod evolution;
