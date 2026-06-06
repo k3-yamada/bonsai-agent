@@ -131,6 +131,84 @@ fn test_single_tool_call() {
     assert!(result.tools_called.contains(&"echo".to_string()));
 }
 
+// REPL 会話継続: 複数ターンが単一 Session に蓄積されることを保証する
+// (handle_repl_mode が None を渡して毎ターン独立実行する UX バグの回帰防止)
+#[test]
+fn test_repl_threads_session_across_turns() {
+    let mock = MockLlmBackend::new(vec![
+        "私はBonsaiです".to_string(),
+        "あなたの名前はKeizoです".to_string(),
+    ]);
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let mut session = Session::new();
+    session.add_message(Message::system("テスト用システムプロンプト"));
+
+    let input = b"who are you\nwhat is my name\nexit\n";
+    let mut reader = std::io::Cursor::new(&input[..]);
+    let mut writer: Vec<u8> = Vec::new();
+
+    let io = ReplIo {
+        backend: &mock,
+        tools: &tools,
+        path_guard: &guard,
+        config: &config,
+        cancel: &cancel,
+        store: None,
+    };
+    run_repl(&mut reader, &mut writer, &mut session, &io).unwrap();
+
+    // 2 ターンのユーザー入力が同一 session に保持される (毎ターン reset されない)
+    let user_msgs: Vec<&str> = session
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::User))
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(user_msgs, vec!["who are you", "what is my name"]);
+
+    // 両ターンのアシスタント応答が蓄積される
+    let assistant_count = session
+        .messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::Assistant))
+        .count();
+    assert_eq!(assistant_count, 2);
+}
+
+// REPL: "exit" で即終了し session を変更しない
+#[test]
+fn test_repl_exit_immediately() {
+    let mock = MockLlmBackend::single("使われない応答");
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let mut session = Session::new();
+    session.add_message(Message::system("sys"));
+    let before = session.messages.len();
+
+    let input = b"exit\n";
+    let mut reader = std::io::Cursor::new(&input[..]);
+    let mut writer: Vec<u8> = Vec::new();
+
+    let io = ReplIo {
+        backend: &mock,
+        tools: &tools,
+        path_guard: &guard,
+        config: &config,
+        cancel: &cancel,
+        store: None,
+    };
+    run_repl(&mut reader, &mut writer, &mut session, &io).unwrap();
+
+    assert_eq!(session.messages.len(), before);
+}
+
 // テスト3: 最大イテレーション到達
 #[test]
 fn test_max_iterations() {

@@ -63,17 +63,7 @@ pub fn run_agent_loop(
     cancel: &CancellationToken,
     store: Option<&MemoryStore>,
 ) -> Result<AgentLoopResult> {
-    let mut session = Session::new();
-    let now = chrono::Local::now();
-    let date_str = now.format("%Y年%m月%d日(%A) %H:%M");
-    let system_with_date = format!(
-        "{}
-
-## 現在の日時
-現在は{}です。正確な現在時刻が必要な場合は shell ツールで date コマンドを実行してください。",
-        config.system_prompt, date_str
-    );
-    session.add_message(Message::system(&system_with_date));
+    let mut session = new_session_with_system(config);
     session.add_message(Message::user(input));
 
     run_agent_loop_with_session(
@@ -85,6 +75,25 @@ pub fn run_agent_loop(
         cancel,
         store,
     )
+}
+
+/// system プロンプト + 現在日時を seed した新規 `Session` を返す。
+///
+/// `run_agent_loop`（単発）と REPL（会話継続）の双方が同一の初期 system
+/// メッセージを使えるよう抽出。日時注入ロジックの SSOT。
+pub fn new_session_with_system(config: &AgentConfig) -> Session {
+    let mut session = Session::new();
+    let now = chrono::Local::now();
+    let date_str = now.format("%Y年%m月%d日(%A) %H:%M");
+    let system_with_date = format!(
+        "{}
+
+## 現在の日時
+現在は{}です。正確な現在時刻が必要な場合は shell ツールで date コマンドを実行してください。",
+        config.system_prompt, date_str
+    );
+    session.add_message(Message::system(&system_with_date));
+    session
 }
 
 /// 既存セッションでエージェントループを実行（セッション再開用）

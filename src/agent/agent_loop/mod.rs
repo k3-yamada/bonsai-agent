@@ -10,12 +10,14 @@ mod advisor_inject;
 mod config;
 mod core;
 mod outcome;
+mod repl;
 mod state;
 mod step;
 mod support;
 
 pub use config::{AgentConfig, inference_for_task};
-pub use core::{run_agent_loop, run_agent_loop_with_session};
+pub use core::{new_session_with_system, run_agent_loop, run_agent_loop_with_session};
+pub use repl::{ReplIo, run_repl};
 pub use state::{
     AgentLoopResult, LoopState, OutcomeAction, StallDetector, StepContext, StepOutcome,
     TokenBudgetTracker,

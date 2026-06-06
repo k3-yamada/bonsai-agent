@@ -1,15 +1,16 @@
-use std::io::{self, BufRead, Write};
+use std::io;
 
 use anyhow::Result;
 use clap::Parser;
 
-use bonsai_agent::agent::agent_loop::{AgentConfig, run_agent_loop, run_agent_loop_with_session};
+use bonsai_agent::agent::agent_loop::{
+    AgentConfig, ReplIo, new_session_with_system, run_agent_loop, run_repl,
+};
 use bonsai_agent::agent::checkpoint::CheckpointManager;
 use bonsai_agent::agent::experiment::{ExperimentLoopConfig, run_experiment_loop};
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::{AppConfig, ServerBackend};
-use bonsai_agent::domain::conversation::Message;
 use bonsai_agent::domain::llm::{LlmBackend, MockLlmBackend};
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::cache::CachedBackend;
@@ -1108,7 +1109,7 @@ fn handle_resume_mode(ctx: &AppContext, store: &MemoryStore, resume_id: &str) ->
     println!("\n--- 続きからどうぞ ---\n");
 
     let backend = create_backend(ctx);
-    run_repl_loop(ctx, store, &*backend, Some(&mut session))
+    run_repl_stdio(ctx, store, &*backend, &mut session)
 }
 
 fn handle_exec_mode(ctx: &AppContext, store: &MemoryStore, input: &str) -> Result<()> {
@@ -1141,80 +1142,34 @@ fn handle_repl_mode(ctx: &AppContext, store: &MemoryStore) -> Result<()> {
     }
 
     let backend = create_backend(ctx);
-    run_repl_loop(ctx, store, &*backend, None)
+    // [会話継続] fresh session を 1 つ生成し全ターンで共有する。
+    // 旧実装は毎ターン独立実行 (None) で履歴を失っていた。
+    let mut session = new_session_with_system(&ctx.config);
+    run_repl_stdio(ctx, store, &*backend, &mut session)
 }
 
-/// REPLループ（REPL/resume共通）
-fn run_repl_loop(
+/// stdin/stdout を lib 側の会話継続 REPL (`run_repl`) へ橋渡しする glue。
+/// REPL / resume の双方が単一 `Session` をターン間で共有する。
+fn run_repl_stdio(
     ctx: &AppContext,
     store: &MemoryStore,
     backend: &dyn LlmBackend,
-    mut session: Option<&mut bonsai_agent::domain::conversation::Session>,
+    session: &mut bonsai_agent::domain::conversation::Session,
 ) -> Result<()> {
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let mut reader = stdin.lock();
+    let stdout = io::stdout();
+    let mut writer = stdout.lock();
 
-    loop {
-        if ctx.cancel.is_cancelled() {
-            break;
-        }
-        print!("bonsai> ");
-        stdout.flush()?;
-        let mut input = String::new();
-        if stdin.lock().read_line(&mut input)? == 0 {
-            break;
-        }
-        let input = input.trim();
-        if input.is_empty() {
-            continue;
-        }
-        if input == "exit" || input == "quit" {
-            break;
-        }
-
-        // セッション再開/通常モードで呼び出し関数を分岐
-        let result = if let Some(ref mut sess) = session {
-            sess.add_message(Message::user(input));
-            run_agent_loop_with_session(
-                sess,
-                backend,
-                &ctx.tools,
-                &ctx.path_guard,
-                &ctx.config,
-                &ctx.cancel,
-                Some(store),
-            )
-        } else {
-            eprint!("\x1b[2m");
-            run_agent_loop(
-                input,
-                backend,
-                &ctx.tools,
-                &ctx.path_guard,
-                &ctx.config,
-                &ctx.cancel,
-                Some(store),
-            )
-        };
-
-        match result {
-            Ok(loop_result) => {
-                eprint!("\x1b[0m");
-                let answer = &loop_result.answer;
-                if answer.starts_with("[中断]") {
-                    println!("\n\x1b[33m{answer}\x1b[0m\n");
-                } else {
-                    println!();
-                }
-            }
-            Err(e) => {
-                eprint!("\x1b[0m");
-                eprintln!("\n\x1b[31mエラー: {e}\x1b[0m\n");
-            }
-        }
-    }
-
-    Ok(())
+    let repl_io = ReplIo {
+        backend,
+        tools: &ctx.tools,
+        path_guard: &ctx.path_guard,
+        config: &ctx.config,
+        cancel: &ctx.cancel,
+        store: Some(store),
+    };
+    run_repl(&mut reader, &mut writer, session, &repl_io)
 }
 
 // --- ユーティリティ ---
