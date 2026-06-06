@@ -36,6 +36,44 @@ from typing import Any, Optional
 # ───────────────────────── pure helpers (mlx 非依存・テスト可能) ─────────────────────────
 
 
+def sampler_params_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    """request body から sampler/penalty の数値を抽出 (mlx 非依存・テスト可能)。
+
+    bonsai は repeat_penalty/repetition_penalty/top_k/min_p も送るが、旧実装は
+    temperature/top_p しか拾わず反復ペナルティが効かなかった (1bit モデルの
+    token 反復崩壊「おっ！おっ！…」の原因)。repeat_penalty を優先し、
+    OpenAI 互換 alias repetition_penalty も拾う。欠損 / 不正値は安全な既定へ。"""
+
+    def _f(key: str, default: float) -> float:
+        v = body.get(key, default)
+        try:
+            return float(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def _i(key: str, default: int) -> int:
+        v = body.get(key, default)
+        try:
+            return int(v) if v is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    rep_raw = body.get("repeat_penalty", body.get("repetition_penalty"))
+    try:
+        rep = float(rep_raw) if rep_raw is not None else 1.0
+    except (TypeError, ValueError):
+        rep = 1.0
+
+    return {
+        "temp": _f("temperature", 0.0),
+        "top_p": _f("top_p", 1.0) or 1.0,
+        "top_k": _i("top_k", 0),
+        "min_p": _f("min_p", 0.0),
+        "max_tokens": _i("max_tokens", 512),
+        "repetition_penalty": rep,
+    }
+
+
 def env_int(name: str) -> Optional[int]:
     """env を Optional[int] で読む。未設定 / 空 / parse 不能で None。"""
     v = os.environ.get(name, "").strip()
@@ -146,7 +184,7 @@ def build_app():
     from fastapi.responses import JSONResponse, StreamingResponse
     from starlette.concurrency import run_in_threadpool
     from mlx_lm import load, stream_generate
-    from mlx_lm.sample_utils import make_sampler
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
     model_id = os.environ.get("BONSAI_MLX_MODEL", "prism-ml/Ternary-Bonsai-8B-mlx-2bit")
 
@@ -194,14 +232,22 @@ def build_app():
         )
 
     def _gen_args(body: dict[str, Any]) -> dict[str, Any]:
+        p = sampler_params_from_body(body)
         sampler = make_sampler(
-            temp=float(body.get("temperature", 0.0)),
-            top_p=float(body.get("top_p", 1.0) or 1.0),
+            temp=p["temp"],
+            top_p=p["top_p"],
+            min_p=p["min_p"],
+            top_k=p["top_k"],
         )
         args: dict[str, Any] = {
-            "max_tokens": int(body.get("max_tokens", 512)),
+            "max_tokens": p["max_tokens"],
             "sampler": sampler,
         }
+        # 反復ペナルティ (>1.0 のときのみ): 1bit モデルの token 反復崩壊を抑止。
+        if p["repetition_penalty"] and p["repetition_penalty"] != 1.0:
+            args["logits_processors"] = make_logits_processors(
+                repetition_penalty=p["repetition_penalty"]
+            )
         args.update(gen_kw)  # KV量子化 / max_kv_size (env 由来)
         return args
 
@@ -217,14 +263,25 @@ def build_app():
         if stream:
             def event_stream():
                 last = None
-                for resp in stream_generate(model, tokenizer, prompt, **args):
-                    last = resp
-                    if resp.text:
-                        yield sse_line(delta_chunk(model_id, resp.text))
-                pt = getattr(last, "prompt_tokens", 0) if last else 0
-                ct = getattr(last, "generation_tokens", 0) if last else 0
-                yield sse_line(final_chunk(model_id, pt, ct))
-                yield SSE_DONE
+                try:
+                    for resp in stream_generate(model, tokenizer, prompt, **args):
+                        last = resp
+                        if resp.text:
+                            yield sse_line(delta_chunk(model_id, resp.text))
+                    pt = getattr(last, "prompt_tokens", 0) if last else 0
+                    ct = getattr(last, "generation_tokens", 0) if last else 0
+                    yield sse_line(final_chunk(model_id, pt, ct))
+                    yield SSE_DONE
+                except GeneratorExit:
+                    # クライアント切断 (bonsai の Ctrl+C / キャンセル)。同期せず
+                    # generator が破棄されると進行中の Metal command buffer が
+                    # 途中解放され segfault する → mx.synchronize() で GPU を
+                    # 一貫状態にしてから unwind する。
+                    try:
+                        mx.synchronize()
+                    except Exception:
+                        pass
+                    raise
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
 

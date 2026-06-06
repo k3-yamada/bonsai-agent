@@ -101,6 +101,36 @@ def test_sse_line_unicode_preserved():
     assert "日本語" in line
 
 
+def test_sampler_params_forwards_penalties():
+    """bonsai が送る repeat_penalty/top_k/min_p が転送される (反復崩壊対策)。
+    旧 _gen_args は temperature/top_p しか拾わず repeat_penalty を破棄していた。"""
+    body = {
+        "temperature": 0.5,
+        "top_p": 0.85,
+        "top_k": 20,
+        "min_p": 0.05,
+        "max_tokens": 1024,
+        "repeat_penalty": 1.15,
+    }
+    p = server.sampler_params_from_body(body)
+    assert p["temp"] == 0.5
+    assert p["top_p"] == 0.85
+    assert p["top_k"] == 20
+    assert p["min_p"] == 0.05
+    assert p["max_tokens"] == 1024
+    assert p["repetition_penalty"] == 1.15
+
+
+def test_sampler_params_defaults_and_alias():
+    """欠損時は安全な既定。repetition_penalty alias も拾い、空 body は penalty=1.0。"""
+    p = server.sampler_params_from_body({"repetition_penalty": 1.2})
+    assert p["temp"] == 0.0
+    assert p["top_k"] == 0
+    assert p["min_p"] == 0.0
+    assert p["repetition_penalty"] == 1.2  # alias 経由
+    assert server.sampler_params_from_body({})["repetition_penalty"] == 1.0
+
+
 if __name__ == "__main__":
     passed = 0
     for name in sorted(dir()):
