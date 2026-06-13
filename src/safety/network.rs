@@ -23,9 +23,11 @@ impl NetworkFilter {
             return true;
         }
         let domain = extract_domain(url);
+        // 完全一致 or サブドメイン境界 (".d") のみ許可。素の ends_with は
+        // `evil-huggingface.co` が `huggingface.co` を満たす suffix bypass になる。
         self.allowed_domains
             .iter()
-            .any(|d| domain.ends_with(d.as_str()))
+            .any(|d| domain == d.as_str() || domain.ends_with(&format!(".{d}")))
     }
 }
 fn extract_domain(url: &str) -> String {
@@ -70,6 +72,15 @@ mod tests {
     fn t_subdomain() {
         let f = NetworkFilter::strict(&["huggingface.co"]);
         assert!(f.is_allowed("https://huggingface.co/api"));
+        // 正規のサブドメインは許可
+        assert!(f.is_allowed("https://cdn.huggingface.co/file"));
+    }
+    #[test]
+    fn t_suffix_bypass_blocked() {
+        // `evil-huggingface.co` は `huggingface.co` の suffix だが別ドメイン → 拒否。
+        let f = NetworkFilter::strict(&["huggingface.co"]);
+        assert!(!f.is_allowed("https://evil-huggingface.co/steal"));
+        assert!(!f.is_allowed("https://nothuggingface.co/x"));
     }
     #[test]
     fn t_default_is_allow_all() {

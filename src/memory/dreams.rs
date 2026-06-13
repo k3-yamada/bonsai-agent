@@ -229,13 +229,17 @@ impl<'a> Dreamer<'a> {
         }
 
         // 繰り返し失敗パターン
+        // 3 回以上再発した error_detail の「種類数」を数える。
+        // 旧クエリは COUNT(DISTINCT) と GROUP BY を併用していたため各グループの distinct は
+        // 常に 1 になり、query_row が先頭グループのみ読むので結果が常に 0/1 だった。
         let repeated_failures: i64 = self
             .conn
             .query_row(
-                "SELECT COUNT(DISTINCT error_detail) FROM experiences
-             WHERE type = 'failure' AND created_at > ?1
-             GROUP BY error_detail HAVING COUNT(*) >= 3
-             LIMIT 1",
+                "SELECT COUNT(*) FROM (
+                 SELECT error_detail FROM experiences
+                 WHERE type = 'failure' AND created_at > ?1
+                 GROUP BY error_detail HAVING COUNT(*) >= 3
+             )",
                 params![cutoff],
                 |row| row.get(0),
             )

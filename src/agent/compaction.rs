@@ -1124,7 +1124,15 @@ pub fn compact_level2_with_budget(
     // Preserved Thinking: 削除対象から思考サマリーを抽出してから要約
     let thinking_summaries = extract_thinking_summary(&messages[..boundary]);
     for msg in messages[..boundary].iter_mut() {
-        if matches!(msg.role, Role::Assistant) && msg.content.len() > summary_max {
+        // 比較は byte (`len()`) ではなく char 数で行う (次行 `chars().take(summary_max)` と
+        // 単位を揃える。多バイト文字で byte>summary_max だが char<=summary_max のとき
+        // 切り詰めなしで marker だけ付く不整合を防ぐ)。
+        // 既に要約済み (marker を含む) は再要約しない → 毎ステップ呼ばれる compact が marker を
+        // 積み増して [Preserved Thinking] を侵食する非冪等性を防ぐ。
+        if matches!(msg.role, Role::Assistant)
+            && !msg.content.contains("...[summarized]")
+            && msg.content.chars().count() > summary_max
+        {
             let s: String = msg.content.chars().take(summary_max).collect();
             msg.content = format!("{s}...[summarized]");
         }

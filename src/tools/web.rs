@@ -74,8 +74,8 @@ impl TypedTool for WebFetchTool {
                 // 長すぎる場合は切り詰め
                 let truncated = if text.len() > 4000 {
                     format!(
-                        "{}...\n\n（{}文字中、最初の4000文字を表示）",
-                        &text[..4000],
+                        "{}...\n\n（{}バイト中、先頭約4000バイトを表示）",
+                        truncate_at_char_boundary(&text, 4000),
                         text.len()
                     )
                 } else {
@@ -139,7 +139,7 @@ fn format_ddg_response(body: &serde_json::Value, query: &str) -> String {
             .filter_map(|t| {
                 t.get("Text").and_then(|v| v.as_str()).map(|s| {
                     if s.len() > 200 {
-                        format!("- {}...", &s[..200])
+                        format!("- {}...", truncate_at_char_boundary(s, 200))
                     } else {
                         format!("- {s}")
                     }
@@ -157,6 +157,21 @@ fn format_ddg_response(body: &serde_json::Value, query: &str) -> String {
     } else {
         parts.join("\n\n")
     }
+}
+
+/// `max_bytes` を超えない最大の char 境界で `s` を切り詰める。
+///
+/// `&s[..n]` は `n` が UTF-8 char 境界でないと panic する。Web 取得テキストや
+/// 検索結果（多バイト文字を含む）を byte index で切る箇所の panic を防ぐ。
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// HTMLタグを簡易的に除去
@@ -219,6 +234,19 @@ mod tests {
         let result = strip_html_tags("<p>hello</p>   <p>world</p>");
         assert!(result.contains("hello"));
         assert!(result.contains("world"));
+    }
+
+    #[test]
+    fn test_truncate_at_char_boundary_no_panic_on_multibyte() {
+        // 多バイト文字 (3 byte/字) を境界をまたぐ位置で切っても panic しない。
+        let s = "あ".repeat(100); // 300 bytes
+        let out = truncate_at_char_boundary(&s, 200);
+        assert!(out.len() <= 200);
+        assert!(s.is_char_boundary(out.len()));
+        // 200 は「あ」境界 (3 の倍数) でないため 198 byte = 66 字に丸められる
+        assert_eq!(out.chars().count(), 66);
+        // 短い文字列はそのまま
+        assert_eq!(truncate_at_char_boundary("hi", 200), "hi");
     }
 
     #[test]

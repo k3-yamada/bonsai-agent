@@ -35,11 +35,13 @@ pub fn fetch_server_n_ctx(server_url: &str) -> Option<u32> {
 
 /// `configured` と `server_n_ctx` の小さい方を返す。
 ///
-/// `server_n_ctx` が `None`（サーバー未応答）の場合は `configured` をそのまま返す。
+/// `server_n_ctx` が `None`（サーバー未応答）または非正値（`Some(0)` 等の不正/不明値）の
+/// 場合は `configured` をそのまま返す。0 にクランプすると推論が壊れるため、非正値は
+/// 「未取得」と同義に扱う。
 pub fn clamp_context_to_server(configured: u32, server_n_ctx: Option<u32>) -> u32 {
     match server_n_ctx {
-        Some(n) => configured.min(n),
-        None => configured,
+        Some(n) if n > 0 => configured.min(n),
+        _ => configured,
     }
 }
 
@@ -146,6 +148,12 @@ mod tests {
     #[test]
     fn t_clamp_equal_values() {
         assert_eq!(clamp_context_to_server(8192, Some(8192)), 8192);
+    }
+
+    #[test]
+    fn t_clamp_ignores_non_positive_server_value() {
+        // Some(0) は不正/不明値 → configured を維持 (0 にクランプすると推論が壊れる)。
+        assert_eq!(clamp_context_to_server(8192, Some(0)), 8192);
     }
 
     #[test]

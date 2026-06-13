@@ -232,8 +232,11 @@ impl LlamaServerBackend {
                 continue;
             }
 
-            // "data: " プレフィックスを除去
-            let Some(data) = line.strip_prefix("data: ") else {
+            // "data:" プレフィックスを除去（SSE 仕様ではコロン後の空白は任意）
+            let Some(data) = line
+                .strip_prefix("data:")
+                .map(|s| s.strip_prefix(' ').unwrap_or(s))
+            else {
                 // コメント行やその他のSSEフィールドはスキップ
                 continue;
             };
