@@ -128,7 +128,16 @@ mod tests {
             .call(serde_json::json!({"subcommand": "branch"}))
             .unwrap();
         assert!(result.success);
-        assert!(result.output.contains("master") || result.output.contains("main"));
+        // `git branch -a` の出力にブランチ情報が含まれることを検証する。
+        // CI の PR チェックアウトは detached HEAD (`* (HEAD detached at <sha>)`) のため
+        // master/main 行が無い → "HEAD" も許容して非 hermetic な環境差で落ちないようにする。
+        assert!(
+            result.output.contains("master")
+                || result.output.contains("main")
+                || result.output.contains("HEAD"),
+            "branch 出力にブランチ情報が無い: {}",
+            result.output
+        );
     }
 
     #[test]
