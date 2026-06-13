@@ -5,7 +5,6 @@
 //! セッションに注入する責務を担う。
 
 use crate::domain::conversation::{Message, Session};
-use crate::domain::embedder::create_embedder;
 use crate::knowledge::vault::Vault;
 use crate::memory::experience::{ExperienceStore, ExperienceType};
 use crate::memory::graph::KnowledgeGraph;
@@ -14,6 +13,7 @@ use crate::memory::review::should_skip_for_freshness;
 use crate::memory::search::HybridSearch;
 use crate::memory::skill::SkillStore;
 use crate::memory::store::MemoryStore;
+use crate::runtime::http_embedder::create_embedder;
 
 /// 過去の経験を成功/失敗パターンに分離してセッションに注入
 ///

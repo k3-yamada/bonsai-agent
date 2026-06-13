@@ -24,6 +24,12 @@ env:
   BONSAI_MLX_KV_GROUP_SIZE      既定 64
   BONSAI_MLX_QUANTIZED_KV_START 既定 0 (>0 で先頭 N tok を fp16 保持し精度劣化緩和)
   BONSAI_MLX_MAX_KV_SIZE        設定時 回転 KV 上限
+  BONSAI_MLX_EMBED_MODEL        既定 mlx-community/all-MiniLM-L6-v2-4bit
+                                (/v1/embeddings 用、初回リクエストまで lazy load)
+
+`/v1/embeddings` (OpenAI 互換) も提供する。bonsai (Rust) の `HttpEmbedder` が
+`BONSAI_EMBED_URL` 経由でこれを叩き、ort/fastembed のバイナリDLなしにローカル埋め込みを
+得る (= 外部クラウドAPI不要のまま完結)。
 
 Usage: scripts/start-mlx-sidecar.sh  (uvicorn 起動)
 """
@@ -174,6 +180,37 @@ def sse_line(obj: dict[str, Any]) -> str:
 SSE_DONE = "data: [DONE]\n\n"
 
 
+def embeddings_input_to_list(body: dict[str, Any]) -> list[str]:
+    """OpenAI `/v1/embeddings` の `input` (str | list[str]) を list[str] に正規化。
+
+    str 単体・list・欠損のいずれも許容する (mlx 非依存・テスト可能)。"""
+    inp = body.get("input", [])
+    if isinstance(inp, str):
+        return [inp]
+    if isinstance(inp, list):
+        return [str(x) for x in inp]
+    return []
+
+
+def embeddings_response(
+    model_id: str, vectors: list[list[float]], prompt_tokens: int = 0
+) -> dict[str, Any]:
+    """OpenAI 互換 `/v1/embeddings` レスポンス (mlx 非依存・テスト可能)。
+
+    bonsai (Rust) 側 `HttpEmbedder` はこの `data[].embedding` を先頭 256 次元に
+    切詰めて使う (次元差は backend 任意)。"""
+    data = [
+        {"object": "embedding", "index": i, "embedding": list(vec)}
+        for i, vec in enumerate(vectors)
+    ]
+    return {
+        "object": "list",
+        "data": data,
+        "model": model_id,
+        "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
+    }
+
+
 # ───────────────────────── server (mlx 依存・起動時に import) ─────────────────────────
 
 
@@ -203,6 +240,30 @@ def build_app():
     gen_kw = kv_kwargs_from_env()
     print(f"[sidecar] ready. KV/memory kwargs = {gen_kw or '(none = cubist等価)'}")
 
+    # ── 埋め込みモデル (lazy: 初回 /v1/embeddings リクエストまでロードしない) ──
+    # chat 専用利用ではメモリを消費しない。bonsai (Rust) HttpEmbedder の供給元。
+    embed_model_id = os.environ.get(
+        "BONSAI_MLX_EMBED_MODEL", "mlx-community/all-MiniLM-L6-v2-4bit"
+    )
+    embed_state: dict[str, Any] = {"model": None, "tokenizer": None}
+
+    def _ensure_embed():
+        if embed_state["model"] is None:
+            from mlx_embeddings import load as load_embed
+
+            print(f"[sidecar] loading embed model {embed_model_id} ...")
+            m, t = load_embed(embed_model_id)
+            embed_state["model"], embed_state["tokenizer"] = m, t
+            print("[sidecar] embed model ready.")
+        return embed_state["model"], embed_state["tokenizer"]
+
+    def _embed_texts(texts: list[str]) -> list[list[float]]:
+        m, t = _ensure_embed()
+        enc = t(texts, padding=True, truncation=True, return_tensors="mlx")
+        out = m(enc["input_ids"], enc["attention_mask"])
+        # text_embeds: [batch, dim] の正規化済み mx.array → python list へ。
+        return out.text_embeds.tolist()
+
     app = FastAPI()
 
     @app.get("/v1/models")
@@ -212,6 +273,16 @@ def build_app():
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request):
+        body = await request.json()
+        texts = embeddings_input_to_list(body)
+        if not texts:
+            return JSONResponse(embeddings_response(embed_model_id, []))
+        # 同期 mlx 生成は threadpool で実行しイベントループをブロックしない。
+        vectors = await run_in_threadpool(_embed_texts, texts)
+        return JSONResponse(embeddings_response(embed_model_id, vectors))
 
     @app.get("/mem")
     def mem():

@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod http_agent;
+pub mod http_embedder;
 pub mod inference;
 pub mod llama_server;
 pub mod model_router;

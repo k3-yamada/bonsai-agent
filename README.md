@@ -154,6 +154,23 @@ cargo build --release --no-default-features --features cli,tree-sitter
 
 この場合 `HybridSearch::vector_search` は線形 scan path に切替 (compile-time exclusive、ランタイム分岐なし)。embedding は SimpleEmbedder (ハッシュベース) のため semantic search は機能しないが、ビルド/テストは完走する。
 
+### ローカル埋め込み（offline / MLX 経由）
+
+`embeddings` feature は内部で `ort`（ONNX Runtime）の prebuilt バイナリを **ビルド時に DL** し、`fastembed` モデルを **実行時に Hugging Face から DL** する。ネットワーク制限環境ではこの両方が失敗する。
+
+これを避けてローカル完結させるには、MLX sidecar の `/v1/embeddings`（OpenAI 互換）を使う:
+
+```bash
+# 1. sidecar を起動（mlx-embeddings 同梱、初回リクエストまで埋め込みモデルは lazy load）
+./scripts/start-mlx-sidecar.sh &
+
+# 2. bonsai 側で HttpEmbedder を有効化
+export BONSAI_EMBED_URL=http://localhost:8888
+cargo run --no-default-features --features cli,tree-sitter
+```
+
+`BONSAI_EMBED_URL` を設定すると `create_embedder()` が `HttpEmbedder`（fastembed/ONNX 非依存）を最優先で採用するため、**ort のバイナリDLなしに実埋め込みが使える**。sidecar が落ちている場合は hash 埋め込みに graceful fallback する。埋め込みモデルは `BONSAI_MLX_EMBED_MODEL`（既定 `mlx-community/all-MiniLM-L6-v2-4bit`）で変更可能。
+
 ## ツール
 
 | ツール | 権限 | 機能 |

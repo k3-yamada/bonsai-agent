@@ -861,12 +861,14 @@ pub fn get_available_ram() -> u64 {
     get_total_ram() * 60 / 100
 }
 
-/// vm_stat出力からページ数を抽出
+/// vm_stat出力からページ数を抽出（macOS専用 — `get_available_ram` からのみ使用）
+#[cfg(target_os = "macos")]
 fn parse_vm_stat_value(s: &str) -> u64 {
     s.trim().trim_end_matches('.').parse().unwrap_or(0)
 }
 
-/// vm_stat出力からページサイズを抽出
+/// vm_stat出力からページサイズを抽出（macOS専用 — `get_available_ram` からのみ使用）
+#[cfg(target_os = "macos")]
 fn parse_vm_stat_page_size(text: &str) -> Option<u64> {
     // "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
     let start = text.find("page size of ")? + 13;

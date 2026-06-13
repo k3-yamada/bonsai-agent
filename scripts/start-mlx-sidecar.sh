@@ -16,6 +16,11 @@
 #   BONSAI_MLX_QUANTIZED_KV_START=256  # 先頭 256 tok は fp16 保持
 #   BONSAI_MLX_MAX_KV_SIZE=16384   # 回転 KV 上限
 #
+# ローカル埋め込み (任意):
+#   /v1/embeddings を提供。bonsai 側で BONSAI_EMBED_URL=http://localhost:8888 を設定すると
+#   ort/fastembed なしでローカル埋め込みを使える。埋め込みモデルは下記 env で変更可:
+#   BONSAI_MLX_EMBED_MODEL=mlx-community/all-MiniLM-L6-v2-4bit  # 既定、初回まで lazy load
+#
 # 停止: Ctrl+C
 set -e
 
@@ -40,6 +45,7 @@ fi
 
 echo "=== bonsai MLX sidecar ==="
 echo "  モデル: ${BONSAI_MLX_MODEL}"
+echo "  埋め込み: ${BONSAI_MLX_EMBED_MODEL:-mlx-community/all-MiniLM-L6-v2-4bit} (lazy, /v1/embeddings)"
 echo "  URL:    http://localhost:${BONSAI_MLX_PORT}"
 echo "  cache_limit=${BONSAI_MLX_CACHE_LIMIT_GB:-(unset)} kv_bits=${BONSAI_MLX_KV_BITS:-(unset)} max_kv_size=${BONSAI_MLX_MAX_KV_SIZE:-(unset)}"
 echo "  Ctrl+C で停止"

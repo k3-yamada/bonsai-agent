@@ -70,7 +70,7 @@ const WHITELIST_EPRINTLN: &[&str] = &[
     "src/agent/agent_loop/step.rs",   // step 進捗
     "src/agent/context_inject.rs",    // context 注入 trace
     "src/runtime/llama_server.rs",    // server log
-    "src/domain/embedder.rs",         // embed log
+    "src/runtime/http_embedder.rs",   // embedder fallback warning (operator visibility)
     "src/observability/logger.rs",    // logger 内部 (log_event implementation)
     "src/safety/secrets.rs",          // security warning
     "src/knowledge/vault_lint.rs",    // 項目 246 implementation の意図的 eprintln
