@@ -61,9 +61,14 @@ impl SecretsFilter {
         for pattern in &self.patterns {
             for m in pattern.find_iter(text) {
                 let matched = m.as_str();
-                // マッチした文字列を短縮して表示（秘密値自体は隠す）
+                // マッチした文字列を短縮して表示（秘密値自体は隠す）。
+                // \S+? は多バイト非空白にもマッチするため char 境界で切る (raw slice 回避)。
                 let preview = if matched.len() > 20 {
-                    format!("{}...", &matched[..20])
+                    let mut end = 20;
+                    while end > 0 && !matched.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &matched[..end])
                 } else {
                     matched.to_string()
                 };

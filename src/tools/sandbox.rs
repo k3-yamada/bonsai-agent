@@ -78,11 +78,21 @@ impl Sandbox for DirectSandbox {
             }
         };
 
+        // pipe を wait 前に drain しないと、出力が OS パイプバッファ (Linux ~64KB) を超えた
+        // 時点で子プロセスが write() でブロックし、try_wait() が永久に None を返して偽の
+        // timeout になる (かつ出力も失われる)。reader thread で stdout/stderr を wait と
+        // 並行排出する。
+        let max_bytes = limits.max_output_bytes;
+        let out_pipe = child.stdout.take();
+        let err_pipe = child.stderr.take();
+        let out_handle = std::thread::spawn(move || read_output(out_pipe, max_bytes));
+        let err_handle = std::thread::spawn(move || read_output(err_pipe, max_bytes));
+
         // タイムアウト付きで待機
         match child.wait_timeout(limits.timeout) {
             Ok(Some(status)) => {
-                let stdout = read_output(child.stdout.take(), limits.max_output_bytes);
-                let stderr = read_output(child.stderr.take(), limits.max_output_bytes);
+                let stdout = out_handle.join().unwrap_or_default();
+                let stderr = err_handle.join().unwrap_or_default();
                 Ok(ExecResult {
                     stdout,
                     stderr,
@@ -91,9 +101,11 @@ impl Sandbox for DirectSandbox {
                 })
             }
             Ok(None) => {
-                // タイムアウト — プロセスをkill
+                // タイムアウト — プロセスをkill (reader thread は EOF で終了 → join)
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
                 Ok(ExecResult {
                     stdout: String::new(),
                     stderr: format!("タイムアウト: {}秒を超過しました", limits.timeout.as_secs()),
@@ -103,6 +115,9 @@ impl Sandbox for DirectSandbox {
             }
             Err(e) => {
                 let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
                 anyhow::bail!("プロセス待機中にエラー: {e}");
             }
         }
@@ -139,14 +154,30 @@ impl ChildExt for std::process::Child {
     }
 }
 
-/// 出力を読み取り、max_bytesで切り詰める
+/// 出力を EOF まで読み取り、保持は max_bytes で打ち切る。
+///
+/// 単発 `read()` だと 1 syscall 分しか取れず出力が途中で切れる。また上限到達後に
+/// 読むのを止めると pipe buffer が飽和して子プロセスが write ブロック → deadlock する
+/// ため、上限超過分は読み捨てつつ EOF まで drain し続ける。
 fn read_output(pipe: Option<impl std::io::Read>, max_bytes: usize) -> String {
     let Some(mut pipe) = pipe else {
         return String::new();
     };
-    let mut buf = vec![0u8; max_bytes];
-    let n = pipe.read(&mut buf).unwrap_or(0);
-    buf.truncate(n);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                if buf.len() < max_bytes {
+                    let take = n.min(max_bytes - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+                // 上限超過分は破棄 (drain は継続して deadlock を防ぐ)
+            }
+            Err(_) => break,
+        }
+    }
     String::from_utf8_lossy(&buf).to_string()
 }
 
@@ -198,6 +229,30 @@ mod tests {
             .execute("nonexistent_command_xyz", &[], &ResourceLimits::default())
             .unwrap();
         assert!(!result.success());
+    }
+
+    #[test]
+    fn test_exec_large_output_no_deadlock() {
+        // 出力が OS パイプバッファ (~64KB) を超えても deadlock せず全量捕捉できること。
+        // 修正前は wait_timeout が pipe を drain せず子プロセスが write ブロック →
+        // 偽 timeout + 出力欠落になっていた。
+        let sandbox = DirectSandbox;
+        let limits = ResourceLimits {
+            timeout: Duration::from_secs(20),
+            ..Default::default()
+        };
+        let result = sandbox.execute("seq", &["100000"], &limits).unwrap();
+        assert!(!result.timed_out, "大量出力で偽 timeout してはならない");
+        assert!(result.success());
+        assert!(
+            result.stdout.len() > 200_000,
+            "64KB を超える出力が捕捉されるべき (実際: {} bytes)",
+            result.stdout.len()
+        );
+        assert!(
+            result.stdout.contains("100000"),
+            "末尾まで drain されている"
+        );
     }
 
     #[test]

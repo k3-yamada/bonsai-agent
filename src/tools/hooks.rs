@@ -85,7 +85,12 @@ impl HookRunner {
                 cmd.env("BONSAI_HOOK", "post_tool");
                 cmd.env("BONSAI_TOOL_NAME", tool_name);
                 cmd.env("BONSAI_TOOL_SUCCESS", success.to_string());
-                cmd.env("BONSAI_TOOL_OUTPUT", &output[..output.len().min(1000)]);
+                // char 境界で切る (raw byte slice は多バイト文字を割ると panic)
+                let mut end = output.len().min(1000);
+                while end > 0 && !output.is_char_boundary(end) {
+                    end -= 1;
+                }
+                cmd.env("BONSAI_TOOL_OUTPUT", &output[..end]);
             }
             HookEvent::SessionStart { session_id } => {
                 cmd.env("BONSAI_HOOK", "session_start");

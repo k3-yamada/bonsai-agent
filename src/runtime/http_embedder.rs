@@ -110,16 +110,23 @@ impl HttpEmbedder {
 
 impl Embedder for HttpEmbedder {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        // リモート失敗時はハッシュ埋め込みに graceful fallback し、呼び出し側を
-        // ハードに失敗させない（FastEmbedder の構築時フォールバックと同思想）。
+        // リモート失敗 or 件数不一致時はハッシュ埋め込みに graceful fallback。
+        // 全 Embedder impl は「出力数 == 入力数」を保証する契約（呼び出し側の
+        // `query_vec[0]` 等の index 前提を守る）。HTTP-200 でも data 配列が空/不足だと
+        // 契約違反になり downstream で index out-of-bounds panic するため、件数を検査して
+        // 不一致なら fallback で正しい件数・次元を返す。
+        let fallback = |reason: String| -> Vec<Vec<f32>> {
+            eprintln!("[warn] HttpEmbedder {reason}、ハッシュ埋め込みにフォールバック");
+            texts.iter().map(|t| hash_embed(t, self.dim)).collect()
+        };
         match self.embed_remote(texts) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                eprintln!(
-                    "[warn] HttpEmbedder リモート埋め込み失敗、ハッシュ埋め込みにフォールバック: {e}"
-                );
-                Ok(texts.iter().map(|t| hash_embed(t, self.dim)).collect())
-            }
+            Ok(v) if v.len() == texts.len() => Ok(v),
+            Ok(v) => Ok(fallback(format!(
+                "が埋め込み件数不一致 ({} != 入力 {})",
+                v.len(),
+                texts.len()
+            ))),
+            Err(e) => Ok(fallback(format!("リモート失敗 ({e})"))),
         }
     }
 
@@ -288,6 +295,41 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].len(), DEFAULT_EMBEDDING_DIM);
         assert!((out[0][0] - 1.0).abs() < 1e-4, "[1,0,0] 正規化で先頭=1");
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn t_http_embedder_falls_back_on_count_mismatch() {
+        // HTTP 200 でも data 配列が空（入力数と不一致）→ ハッシュ fallback で入力数を維持。
+        // downstream の `query_vec[0]` index out-of-bounds panic を防ぐ契約の回帰テスト。
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let payload = r#"{"object":"list","data":[]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = s.write_all(resp.as_bytes());
+                let _ = s.flush();
+            }
+        });
+
+        let e = HttpEmbedder::new(
+            format!("http://127.0.0.1:{port}"),
+            "m",
+            DEFAULT_EMBEDDING_DIM,
+        );
+        let out = e.embed(&["a", "b"]).expect("件数不一致でも fallback で Ok");
+        assert_eq!(out.len(), 2, "入力数 == 出力数 の契約を維持");
+        assert_eq!(out[0].len(), DEFAULT_EMBEDDING_DIM);
         let _ = handle.join();
     }
 }
