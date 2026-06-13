@@ -45,6 +45,10 @@ pip install --quiet "mlx @ git+https://github.com/PrismML-Eng/mlx.git@prism"
 echo "4. mlx-openai-server インストール..."
 pip install --quiet mlx-openai-server
 
+# mlx-embeddings インストール（sidecar の /v1/embeddings 用、ローカル埋め込み）
+echo "5. mlx-embeddings インストール..."
+pip install --quiet mlx-embeddings
+
 echo ""
 echo "=== セットアップ完了 ==="
 echo ""

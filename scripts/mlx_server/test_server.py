@@ -131,6 +131,33 @@ def test_sampler_params_defaults_and_alias():
     assert server.sampler_params_from_body({})["repetition_penalty"] == 1.0
 
 
+def test_embeddings_input_to_list_normalizes():
+    """input は str 単体 / list / 欠損を許容し list[str] に揃える。"""
+    assert server.embeddings_input_to_list({"input": "hello"}) == ["hello"]
+    assert server.embeddings_input_to_list({"input": ["a", "b"]}) == ["a", "b"]
+    assert server.embeddings_input_to_list({}) == []
+    assert server.embeddings_input_to_list({"input": [1, 2]}) == ["1", "2"]
+
+
+def test_embeddings_response_openai_shape():
+    r = server.embeddings_response("embed-m", [[0.1, 0.2], [0.3, 0.4]], prompt_tokens=7)
+    assert r["object"] == "list"
+    assert r["model"] == "embed-m"
+    assert len(r["data"]) == 2
+    assert r["data"][0]["object"] == "embedding"
+    assert r["data"][0]["index"] == 0
+    assert r["data"][1]["index"] == 1
+    assert r["data"][0]["embedding"] == [0.1, 0.2]
+    assert r["usage"]["prompt_tokens"] == 7
+    assert r["usage"]["total_tokens"] == 7
+
+
+def test_embeddings_response_empty():
+    r = server.embeddings_response("embed-m", [])
+    assert r["data"] == []
+    assert r["object"] == "list"
+
+
 if __name__ == "__main__":
     passed = 0
     for name in sorted(dir()):

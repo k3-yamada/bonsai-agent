@@ -12,7 +12,6 @@ use serde::Serialize;
 
 use crate::agent::concept_synthesis::build_synthesis_messages;
 use crate::cancel::CancellationToken;
-use crate::domain::embedder::create_embedder;
 use crate::domain::llm::LlmBackend;
 use crate::eval::longmemeval::dataset::LongMemEvalEntry;
 use crate::eval::longmemeval::metrics::{mrr, ndcg_at_k, recall_any_at_k};
@@ -20,6 +19,7 @@ use crate::knowledge::concept::{ConceptConfig, detect_concept_candidates, member
 use crate::knowledge::extractor::{StockCategory, StockEntry};
 use crate::memory::search::HybridSearch;
 use crate::memory::store::MemoryStore;
+use crate::runtime::http_embedder::create_embedder;
 
 #[derive(Debug, Clone)]
 pub struct BenchConfig {

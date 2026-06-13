@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### 追加
+- **ローカル埋め込み (MLX 経由 / offline 対応)**: MLX sidecar に OpenAI 互換 `/v1/embeddings` エンドポイントを追加し、Rust 側に `HttpEmbedder` を新設。`BONSAI_EMBED_URL` 設定時に `create_embedder()` が fastembed より優先採用する。`embeddings` feature (fastembed/ONNX) 非依存のため、`ort` バイナリの **ビルド時 DL** と fastembed モデルの **実行時 HF DL** の両方を回避でき、ネットワーク制限環境でもローカル完結で実埋め込みが使える。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持)。埋め込みモデルは `BONSAI_MLX_EMBED_MODEL` (既定 `mlx-community/all-MiniLM-L6-v2-4bit`、初回まで lazy load)。
+
+### 修正
+- `parse_vm_stat_value` / `parse_vm_stat_page_size` (macOS 専用 vm_stat ヘルパー) に `#[cfg(target_os = "macos")]` を付与。非 macOS ビルドでの dead_code 警告 (= `clippy -D warnings` 失敗) を解消。
+
 ## v0.1.0 (2026-04-10)
 
 初回リリース。

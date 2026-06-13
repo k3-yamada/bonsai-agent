@@ -18,8 +18,9 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::domain::embedder::{Embedder, cosine_similarity, create_embedder};
+use crate::domain::embedder::{Embedder, cosine_similarity};
 use crate::domain::tool_schema::ToolSchema;
+use crate::runtime::http_embedder::create_embedder;
 use crate::tools::permission::Permission;
 
 /// ツールの実行結果

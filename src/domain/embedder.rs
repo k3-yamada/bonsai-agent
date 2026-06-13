@@ -41,21 +41,29 @@ impl Embedder for SimpleEmbedder {
     }
 }
 
-/// 文字列をハッシュベースで固定長ベクトルに変換（簡易実装）
-fn hash_embed(text: &str, dim: usize) -> Vec<f32> {
+/// 文字列をハッシュベースで固定長ベクトルに変換（簡易実装）。
+///
+/// `runtime::http_embedder` のフォールバックからも使うため `pub(crate)`。
+pub(crate) fn hash_embed(text: &str, dim: usize) -> Vec<f32> {
     let mut vec = vec![0.0f32; dim];
     for (i, c) in text.chars().enumerate() {
         let idx = (c as usize).wrapping_mul(31).wrapping_add(i) % dim;
         vec[idx] += 1.0;
     }
-    // L2正規化
+    l2_normalize(&mut vec);
+    vec
+}
+
+/// ベクトルをL2正規化（in-place）。ゼロベクトルは変更しない。
+///
+/// `runtime::http_embedder` のレスポンス整形からも使うため `pub(crate)`。
+pub(crate) fn l2_normalize(vec: &mut [f32]) {
     let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
-        for v in &mut vec {
+        for v in vec.iter_mut() {
             *v /= norm;
         }
     }
-    vec
 }
 
 /// fastembed有効時のローカルONNX埋め込みラッパー（AllMiniLML6V2）
@@ -99,19 +107,9 @@ impl Embedder for FastEmbedder {
     }
 }
 
-/// 最適なEmbedderを作成（fastembed有効時はFastEmbedder、無効時はSimpleEmbedder）
-pub fn create_embedder() -> Box<dyn Embedder> {
-    #[cfg(feature = "embeddings")]
-    {
-        match FastEmbedder::new() {
-            Ok(e) => return Box::new(e),
-            Err(err) => {
-                eprintln!("FastEmbedder初期化失敗、SimpleEmbedderにフォールバック: {err}");
-            }
-        }
-    }
-    Box::new(SimpleEmbedder::default())
-}
+// NOTE: Embedder の合成ルート `create_embedder()` は `runtime::http_embedder` に置く。
+// `HttpEmbedder`（HTTP = runtime 関心事）を wire するため、port trait より上の
+// runtime layer に factory を持たせる（DEP-001 / ADR-010 クリーンアーキテクチャ準拠）。
 
 /// コサイン類似度
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -184,8 +182,17 @@ mod tests {
     }
 
     #[test]
-    fn test_create_embedder() {
-        let embedder = create_embedder();
-        assert_eq!(embedder.dim(), DEFAULT_EMBEDDING_DIM);
+    fn test_hash_embed_normalized() {
+        let v = hash_embed("hello world", DEFAULT_EMBEDDING_DIM);
+        assert_eq!(v.len(), DEFAULT_EMBEDDING_DIM);
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_l2_normalize_zero_vector_unchanged() {
+        let mut v = vec![0.0f32; 4];
+        l2_normalize(&mut v);
+        assert_eq!(v, vec![0.0f32; 4]);
     }
 }
