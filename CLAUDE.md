@@ -1,6 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+General autonomous agent guidelines are maintained in [AGENTS.md](AGENTS.md).
 
 ## プロジェクト概要
 
@@ -107,3 +108,95 @@ VALUES.md は [docs/VALUES.md](docs/VALUES.md) に置く。
 ## 設計思想
 → [docs/VALUES.md](docs/VALUES.md)（実装判断に迷ったときは必ず参照）
 特にフィードバック設計（V1,V4）・評価指標追加時（V6,V7）
+
+---
+
+## サブエージェント委譲ルール（オーケストレーション）
+
+> 参考: yui「オーケストレーターに徹させる運用」。メイン＝**オーケストレーターに徹する**。コードは書かず、
+> 計画・分解・統合と委譲のみ行う。
+
+### 絶対規則（恒久・使用モデルによらず適用）
+- メインエージェントは**恒久的にオーケストレーターに徹する**。実装・テスト実行・ファイル編集を自分で行わず、**必ず**サブエージェントへ委譲する。単純作業に見えても自己判断で直接手を出さない。
+- **委譲時は必ずタスクに適したモデルとスキルの両方を明示すること。** どちらか一方でも省略した委譲は禁止。
+  - モデル: 下記ワークフローの指定（scope-planner/architect/qa-reviewer=opus、builder/shipper=sonnet）に従う。表にない新規タスクは難度で判断（設計判断・高リスク=opus、標準実装=sonnet、軽量作業=haiku）。
+  - スキル: 委譲先に、そのタスクで使うべきSkillツールのスキル名を具体的に指示する（例:「rust-specialistへ委譲。skill: rust-idiomatic」）。スキル選定をエージェント任せにしない。
+- **メインオーケストレーター自身のモデルはSonnet 5を推奨。** Opus/Fableではない。理由: メインの仕事は委譲判断・進捗管理・結果統合であり、深い設計判断は既にopus指定のサブエージェント（architect等）に委譲される設計のため、メイン自身が高単価モデルである必要はない（Fable 5はOpusの2倍単価、雑談・進捗確認等の軽いターンにまで課金されコスト効率が悪い）。
+- **Fable（`claude-fable-5`）はメインモデルにしない。** 通常のOpus級サブエージェント（architect等）でも力不足と判断される、突出して難度が高い個別タスク1件に限り、そのサブエージェント呼び出し1回に`model: fable`を指定してエスカレーションする（例: 極めて複雑なアーキ判断、成果物完成時の最終レビュー）。乱用しない——Anthropic報告値でも「Fable常時使用」は同品質の代替構成に対し2倍以上のコストになる。
+
+### コードレビュー・セキュリティレビューのコスト最適化（2026-09-04導入）
+上司フィードバック: 編集の都度発火するコードレビュー・セキュリティレビューがopus固定だと高頻度作業でコストが辛い。**一次実行をAntigravity CLI（`agy`）に委ねてコストを下げる。**
+- **コードレビューの一次実行**: `agy -p "<レビュー観点>" --model gemini-3.8-flash-high`（専用レビューエージェント未整備のため無指定）
+- **セキュリティレビューの一次実行**: 同上
+- 既定モデルは `gemini-3.8-flash-high`（安価・高速）。精度不足を感じたら `gemini-3.1-pro-high` に上げてから判断する。
+- **Claude opus の `code-reviewer` / `security-reviewer` へのエスカレーションは以下に限定する**（`~/.claude/rules/common/security.md` のSTOPトリガーに準拠）:
+  - 認証・認可、決済、暗号処理、DB操作、外部API呼び出し、個人情報等の高リスク領域を触っている
+  - Antigravity側の一次レビューでCRITICAL/HIGH相当の指摘が出た、または判断に自信が持てない
+  - アーキテクチャ変更を伴う
+- push / 本番デプロイ前の最終ゲートは、上記条件に関わらずClaude opusでの最終レビューを推奨する（コストより正確性を優先する局面のため）。
+> 実装の詳細でコンテキストを汚さないことで、長時間セッションでも判断がブレない。
+
+### ワークフロー（依頼を受けたら）
+1. **scope-planner**（opus）— 要件確定・スコープ削り・受入条件の明文化
+2. **architect**（opus）— 設計判断・builderへの割当（高リスク/非可逆な変更時。小さな変更はスキップ可）
+3. **builder**（sonnet, 技術スペシャリスト）— 実装
+4. **qa-reviewer**（opus）— 実装者と独立した検証（自己LGTM禁止）
+5. **shipper**（sonnet）— qa-reviewerのApprove後にコミット等の出荷作業
+
+### この環境の builder（実装担当）
+- `rust-specialist` — crate実装/tokio/エラー設計/clippy/テスト
+
+### 追加レビュー観点（必要に応じ qa-reviewer と並行起動）
+- （専用レビュアー未配置。qa-reviewer が code-review-expert / security-review スキルで代替）
+
+### 委譲の原則
+- 各エージェントの `description` を見て最適な担当へ振る。境界ケースは scope-planner / architect に相談してから割り当てる。
+- **実装と検証は必ず別エージェント**（builderに自己承認させない）。
+- サブエージェントは各自 **Skillツール** で該当スキルを起動してよい（例: `flutter-*`, `dart-*`, `rust-idiomatic`, `clean-architecture`, `code-review-expert`, `security-review`, `japanese-tech-writing` 等）。各エージェント定義の「活用するスキル」節を参照。
+- push / 本番デプロイ / リリースは**上司の明示指示があるまで実行しない**（承認ゲート）。
+- 工数が小さい単純作業は 1〜4 を簡略化し、builder→qa-reviewer の2段でよい。
+### 既存の共有エージェント（グローバル `~/.claude/agents`）の活用
+オーケストレーターは、上記チームに加えて以下の既存エージェントも状況に応じて**併用**してよい（必須段ではなく補助レンズ）。
+- `researcher` — 一次情報の収集・競合/技術/企業調査（scope-planner・architect の前工程）
+- `oh-my-claudecode:document-specialist` — 外部SDK/API/フレームワークの公式ドキュメント確認（architect の設計裏付け）
+- `security-auditor` / `oh-my-claudecode:security-reviewer` — セキュリティ監査（qa-reviewer の補強。認証/権限/入力/決済/機密に触れる変更時）
+- `code-refactorer` — 機能を変えない構造改善・重複除去
+- `oh-my-claudecode:critic` — 高リスク・非可逆な計画/設計のセカンドオピニオン（architect の設計を別視点で叩く）
+- `reporter` — 作業サマリ・日報の集計
+
+> 使い分け: 「自プロジェクトの team（scope-planner/architect/builder/qa-reviewer/shipper）」を主軸に、上記の汎用エージェントは調査・監査・別視点が要る局面でオーケストレーターが差し込む。委譲先が曖昧なら description で判断する。
+
+## ツール選択ルール
+
+このプロジェクトには4つのコード解析ツールが入っている（Serena / code-review-graph / better-code-review-graph / Graphify）。
+
+**Serenaのrust-analyzerは `.serena/project.local.yml` で意図的に無効化している**（コメント: 「Serenaのrust-analyzerを無効化（Write/Editの巻き戻し防止）」）。したがって `find_symbol` / `get_symbols_overview` / `find_referencing_symbols` / `find_implementations` / `rename_symbol` 等のSerenaのシンボル系ツールは**使用不可**（呼び出すとエラーになる）。**この無効化設定を誤って戻さないこと。** 有効化が必要になった場合は上司に確認する。Serenaの `read_memory` / `write_memory` / `list_memories` 等メモリ系ツールは言語サーバーに依存しないため通常どおり利用可能。
+
+代わりに、シンボル解析はすべて言語非依存の better-code-review-graph / Graphify で行う。better-code-review-graph はアクション型の統合ツール構成で、`query` / `review` / `security` に `action` パラメータを渡して使う。
+
+| 質問の種類 | 使うツール | 例 |
+| :--- | :--- | :--- |
+| 意味・目的でコードを探す | better-code-review-graph `query`（`action=search`） | 「認証してる処理ある？」「エラーハンドリングどこ？」 |
+| 変更の影響範囲 | better-code-review-graph `query`（`action=impact`） | 「この変更どこに影響する？」「blast radiusは？」 |
+| 呼び出し元・依存の追跡、定義元・実装クラス | better-code-review-graph `query`（`action=query`、pattern=callers_of / definitions 等） | 「〇〇の呼び出し元は？」「〇〇の定義元は？」 |
+| リポジトリ全体の構造・横断質問 | `graphify query` | 「全体構成は？」「設計書とコードの関係は？」 |
+| コード変更のレビュー | better-code-review-graph `review` | 「直近の変更をレビューして」 |
+| セキュリティスキャン | better-code-review-graph `security`（`action=scan`） | 「脆弱性ない？」「セキュリティチェックして」 |
+| リネーム・シンボル単位の編集 | Read で該当箇所を特定した上で Edit | 「関数名を変えたい」「メソッドの中身を書き換えて」 |
+| 設定ファイル・ドキュメント・非コードファイル | Read / Grep | いずれのツールの解析対象外 |
+
+### 競合回避
+- **code-review-graph のツールは質問に使わない**（pre-commitフックでのレビュー用コンテキスト供給が専任）
+- 検索・影響範囲・レビューは code-review-graph と better-code-review-graph で機能が重複するが、**better-code-review-graph 側を使う**
+
+### フォールバック
+better-code-review-graph の `query`（`action=search`）が0件 → `graphify query` で広域検索 → Grep / Glob / Read。
+
+### グラフを最新に保つ
+| ツール | 更新方法 |
+| --- | --- |
+| code-review-graph | 自動（pre-commitフック + 編集時フック） |
+| better-code-review-graph | **自動**（pre-commitフックで `graph build`＋`graph embed` を実行、2026-09-03導入）。手動が要るのは大規模リファクタ直後のフルリビルドのみ（`graph build --full-rebuild`） |
+| Graphify | **自動**（`graphify hook install` のpost-commit/post-checkoutフック、2026-09-03導入。バックグラウンド実行でコミットをブロックしない）。手動が要るのはレポート再生成のみ（`graphify cluster-only --no-label`） |
+
+**注意（このリポジトリ固有）**: `git config core.hooksPath` が `/Users/keizo/bonsai-agent/.git/hooks`（このリポジトリ外の絶対パス）を指している。旧配置場所からの移動時の設定残骸と思われる。上記フックの実体は `~/Dev/rust/bonsai-agent/.git/hooks/` ではなくそちらに存在する。フック関連のトラブル時は `git config core.hooksPath` を先に確認すること。

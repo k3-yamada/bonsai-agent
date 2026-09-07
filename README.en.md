@@ -18,7 +18,7 @@ Runs entirely on a Mac M2 (16 GB). No external cloud API required. It executes t
 - **LLM-as-judge evaluation harness** — Judge Gate + rubric scoring, expanding the benchmark from 22 → 40 tasks
 - **MLX backend support** — in addition to llama-server, inference can run on mlx-lm (Apple Silicon optimized)
 - **Memory-optimized sidecar** — `start-mlx-sidecar.sh` enables KV-cache quantization (-71%) + `mx.set_cache_limit` control to prevent swap on a 16 GB M2
-- **Middleware chain** — a 5-stage pipeline informed by DeerFlow (Audit → ToolTrack → Stall → Compact → TokenBudget)
+- **Middleware chain** — a 4-stage pipeline informed by DeerFlow (Audit → ToolTrack → Compact → TokenBudget; stall replan is handled in the upper path)
 - **Parallel read tools** — two or more consecutive reads are auto-parallelized (writes act as a sequential barrier)
 - **Type-driven tool definitions** — schemars `JsonSchema` derive auto-generates schemas + type-safe parsing (the `TypedTool` trait)
 - **TTL freshness management** — an `expires_at` column + auto-purge at session start prevents stale information
@@ -210,10 +210,9 @@ Parse → validate → execute tool
  ↓                              ↓
 Apply secret filter           Record audit log
  ↓
-Middleware chain (5-stage pipeline)
+Middleware chain (4-stage pipeline)
  ├── AuditMiddleware       — per-step audit
  ├── ToolTrackMiddleware   — tool-usage tracking
- ├── StallMiddleware       — stall detection → replan
  ├── CompactMiddleware     — context compaction
  └── TokenBudgetMiddleware — token-budget management
  ↓
@@ -355,7 +354,7 @@ Reliability-improvement patterns for a 1-bit model, based on the "Scaffolding > 
 - **Staged separation pipeline**: complex-task detection → auto-injects a planning pre-step
 - **Event Sourcing**: a unified event stream (replay/analysis ready)
 - **Advisor Tool**: simplification directives + pre-completion self-verification + HttpAdvisor (delegation to an OpenAI-compatible API)
-- **Middleware chain**: `trait Middleware` + `MiddlewareChain` (5-stage pipeline)
+- **Middleware chain**: `trait Middleware` + `MiddlewareChain` (4-stage pipeline)
 - **Parallel read tools**: `is_read_only()` + `std::thread::scope`
 - **MLX backend**: `ServerBackend` enum (llama-server/mlx-lm switch)
 - **InferenceParams**: temperature/top_p/top_k/min_p/max_tokens/repeat_penalty configurable

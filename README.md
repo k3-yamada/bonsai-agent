@@ -18,7 +18,7 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **LLM-as-judge 評価基盤** — Judge Gate + ルーブリック採点でベンチマークを 22→40 タスクに拡張
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
 - **メモリ最適化 sidecar** — `start-mlx-sidecar.sh` で KV cache 量子化 (-71%) + `mx.set_cache_limit` 制御。M2 16GB で swap 阻止
-- **ミドルウェアチェーン** — DeerFlow知見による5段パイプライン（Audit→ToolTrack→Stall→Compact→TokenBudget）
+- **ミドルウェアチェーン** — DeerFlow知見による4段パイプライン（Audit→ToolTrack→Compact→TokenBudget、stall再計画は上位経路で処理）
 - **読取ツール並列実行** — 連続読取2件以上で自動並列化（書き込みはバリア逐次）
 - **型駆動ツール定義** — schemars JsonSchema deriveでスキーマ自動生成+型安全パース（TypedToolトレイト）
 - **TTL情報鮮度管理** — expires_atカラム+セッション開始時自動パージで陳腐化情報を防止
@@ -112,12 +112,26 @@ cargo run -- --rollback <id>           # チェックポイント復元
 cargo run -- --lab                     # 自律的自己改善ループ
 cargo run -- --init                    # config.tomlテンプレート生成
 cargo run -- --skills-export           # スキルをMarkdownにエクスポート
+cargo run -- --visualize               # 記憶・ナレッジグラフ力学可視化HTML生成 (memory_graph.html)
+cargo run -- --visualize --visualize-open # 可視化HTML生成後にデフォルトブラウザで自動表示
 cargo run -- --diagnose                # サーバー接続診断
 cargo run -- --evolve                  # arxiv収集+自己改善
 cargo run -- --serve --api-port <PORT> # REST API サーバー
 cargo run -- --mcp-server              # MCP サーバーとして起動
 cargo run -- --server-url <URL>        # カスタムサーバーURL
 ```
+
+### 対話モード (REPL) 内省・知能コマンド
+
+対話プロンプト（`bonsai> `）では、通常の対話に加え、自律知能・記憶・監視の状態を確認・操作するスラッシュコマンドが利用可能です:
+
+- `/dmn`: DMN（デフォルト・モード・ネットワーク自発思考ループ）の直近内省履歴を表示
+- `/dream`: 即座に Deep Dreaming をキックし、メタ認知レポート（成功率、ツール統計、洞察）を表示
+- `/magi`: MAGI 三重監視合議（MELCHIOR / BALTHASAR / CASPAR）の判定・ブロック統計を表示
+- `/vault`: ナレッジ Vault（`insights.md`）に蓄積されたストック知見を一覧表示
+- `/graph` または `/graph open`: 現在の A-MEM 記憶およびナレッジグラフから自己完結型力学 HTML ビューア（SVG + 2D 力学シミュレーション）を生成・ブラウザ表示
+- `/help`: コマンド一覧を表示
+
 
 ### 環境変数（主要）
 
@@ -210,10 +224,9 @@ LLM推論（Bonsai-8B via llama-server / mlx-lm）
  ↓                              ↓
 秘密フィルタ適用              監査ログ記録
  ↓
-ミドルウェアチェーン（5段パイプライン）
+ミドルウェアチェーン（4段パイプライン）
  ├── AuditMiddleware      — ステップ監査
  ├── ToolTrackMiddleware   — ツール使用追跡
- ├── StallMiddleware       — 停滞検出→再計画
  ├── CompactMiddleware     — コンテキスト圧縮
  └── TokenBudgetMiddleware — トークン予算管理
  ↓
@@ -355,7 +368,7 @@ Bonsai-8B 1bit、k=3、10 cycle paired による変異評価。全履歴・詳�
 - **段階分離パイプライン**: 複雑タスク検出→計画プレステップ自動注入
 - **Event Sourcing**: 統一イベントストリーム（リプレイ・分析対応）
 - **Advisor Tool**: 簡潔化指示 + 完了前自己検証 + HttpAdvisor（OpenAI互換API委託）
-- **ミドルウェアチェーン**: trait Middleware + MiddlewareChain（5段パイプライン）
+- **ミドルウェアチェーン**: trait Middleware + MiddlewareChain（4段パイプライン）
 - **読取ツール並列実行**: is_read_only() + std::thread::scope
 - **MLXバックエンド**: ServerBackend enum（llama-server/mlx-lm切替）
 - **InferenceParams**: temperature/top_p/top_k/min_p/max_tokens/repeat_penalty設定可能
