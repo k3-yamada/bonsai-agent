@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use super::advisor_inject::{
-    AdvisorResolution, inject_planning_step, inject_replan_on_stall, inject_verification_step,
-    log_advisor_call, resolve_advisor_prompt,
+    AdvisorResolution, StallAction, inject_planning_step, inject_replan_on_stall,
+    inject_verification_step, log_advisor_call, resolve_advisor_prompt,
 };
 use super::core::create_task_start_checkpoint;
 use super::outcome::{detect_task_complexity, handle_outcome};
@@ -10,7 +10,7 @@ use super::support::{check_invariants, compute_output_hash};
 use super::*;
 
 use crate::agent::context_inject::inject_experience_context;
-use crate::agent::error_recovery::{CircuitBreaker, TrialSummary};
+use crate::agent::error_recovery::{CircuitBreaker, FileStuckGuard, TrialSummary};
 use crate::agent::middleware::MiddlewareChain;
 use crate::agent::tool_exec::{ToolExecResult, apply_tool_result, execute_validated_calls};
 use crate::agent::validate::PathGuard;
@@ -23,6 +23,7 @@ use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::MemoryStore;
 use crate::observability::audit::AuditLog;
 use crate::runtime::model_router::{AdvisorConfig, AdvisorRole};
+use crate::safety::secrets::SecretsFilter;
 use crate::tools::permission::Permission;
 use crate::tools::{TaskType, Tool, ToolRegistry, ToolResult, ToolResultCache};
 
@@ -735,42 +736,51 @@ fn test_inject_replan_on_stall_triggers_after_threshold() {
     let mut stall = StallDetector::new(3);
     let mut advisor = AdvisorConfig::default();
     // 1〜2回目: 検出されない
-    assert!(!inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        false,
-        0,
-        None,
-        &TrialSummary::default()
-    ));
-    assert!(!inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        false,
-        0,
-        None,
-        &TrialSummary::default()
-    ));
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::None
+    );
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::None
+    );
     // 3回目: 停滞検出→再計画注入
-    assert!(inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        false,
-        0,
-        None,
-        &TrialSummary::default()
-    ));
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::ReplanInjected
+    );
     assert_eq!(advisor.calls_used, 1);
     assert!(session.messages.iter().any(|m| m.content.contains("停滞")));
 }
 
-// テスト: inject_replan_on_stall — advisor max_uses超過時はreset+スキップ
+// テスト: inject_replan_on_stall — advisor max_uses超過時はExhaustedAndAborted
 #[test]
 fn test_inject_replan_on_stall_respects_advisor_max_uses() {
     let mut session = Session::new();
@@ -780,17 +790,20 @@ fn test_inject_replan_on_stall_respects_advisor_max_uses() {
         calls_used: 1,
         ..Default::default()
     };
-    assert!(!inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        false,
-        0,
-        None,
-        &TrialSummary::default()
-    ));
-    let injected = inject_replan_on_stall(
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            false,
+            0,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::None
+    );
+    let action = inject_replan_on_stall(
         &mut session,
         &mut stall,
         &mut advisor,
@@ -800,7 +813,10 @@ fn test_inject_replan_on_stall_respects_advisor_max_uses() {
         None,
         &TrialSummary::default(),
     );
-    assert!(!injected, "max_uses超過時は注入しない");
+    assert!(
+        matches!(action, StallAction::ExhaustedAndAborted(_)),
+        "max_uses超過時はExhaustedAndAborted"
+    );
     assert_eq!(advisor.calls_used, 1, "calls_usedは増えない");
 }
 
@@ -810,36 +826,45 @@ fn test_inject_replan_on_stall_skips_on_progress() {
     let mut session = Session::new();
     let mut stall = StallDetector::new(2);
     let mut advisor = AdvisorConfig::default();
-    assert!(!inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        true,
-        1,
-        None,
-        &TrialSummary::default()
-    ));
-    assert!(!inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        true,
-        2,
-        None,
-        &TrialSummary::default()
-    ));
-    assert!(!inject_replan_on_stall(
-        &mut session,
-        &mut stall,
-        &mut advisor,
-        "task",
-        true,
-        3,
-        None,
-        &TrialSummary::default()
-    ));
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            true,
+            1,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::None
+    );
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            true,
+            2,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::None
+    );
+    assert_eq!(
+        inject_replan_on_stall(
+            &mut session,
+            &mut stall,
+            &mut advisor,
+            "task",
+            true,
+            3,
+            None,
+            &TrialSummary::default()
+        ),
+        StallAction::None
+    );
     assert_eq!(advisor.calls_used, 0);
 }
 
@@ -948,7 +973,10 @@ fn test_handle_outcome_final_answer_returns() {
 fn test_handle_outcome_continue_returns_continue() {
     let mut session = Session::new();
     let mut state = LoopState::new(AdvisorConfig::default());
-    let outcome = StepOutcome::Continue(vec!["shell".to_string()]);
+    let outcome = StepOutcome::Continue {
+        tools: vec!["shell".to_string()],
+        tools_succeeded: true,
+    };
     let backend = MockLlmBackend::single("noop");
     let inference = InferenceParams::default();
     let cancel = CancellationToken::new();
@@ -1070,11 +1098,16 @@ fn test_execute_validated_calls_empty() {
     let sf = SecretsFilter::default();
     let mut cache = ToolResultCache::new();
     let mut cycle = MultiFileEditCycleDetector::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
     let config = AgentConfig::default();
-    let result = execute_validated_calls(
+    let (result, all_succeeded) = execute_validated_calls(
         &[],
         &mut session,
         &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
         &sf,
         None,
         &mut cache,
@@ -1082,6 +1115,7 @@ fn test_execute_validated_calls_empty() {
         &config,
     );
     assert!(result.is_empty());
+    assert!(all_succeeded);
 }
 
 #[test]
@@ -1114,6 +1148,8 @@ fn test_apply_tool_result_records_graph_tool_usage() {
     let mut session = Session::new();
     let mut cb = CircuitBreaker::default();
     let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
 
     let r = ToolExecResult {
         name: "file_read".to_string(),
@@ -1122,7 +1158,17 @@ fn test_apply_tool_result_records_graph_tool_usage() {
         success: true,
         is_error: false,
     };
-    apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store), 4000);
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        Some(&store),
+        4000,
+    );
 
     // グラフにツール使用が記録されていることを確認
     let graph = KnowledgeGraph::new(store.conn());
@@ -1144,6 +1190,8 @@ fn test_apply_tool_result_records_graph_error_pattern() {
     let mut session = Session::new();
     let mut cb = CircuitBreaker::default();
     let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
 
     let r = ToolExecResult {
         name: "shell".to_string(),
@@ -1152,7 +1200,17 @@ fn test_apply_tool_result_records_graph_error_pattern() {
         success: false,
         is_error: true,
     };
-    apply_tool_result(&r, &mut session, &mut cb, &sf, Some(&store), 4000);
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        Some(&store),
+        4000,
+    );
 
     // グラフにエラーパターンが記録されていることを確認
     let graph = KnowledgeGraph::new(store.conn());
@@ -1163,6 +1221,8 @@ fn test_apply_tool_result_records_graph_error_pattern() {
             .any(|(name, rel, _)| name == "src/lib.rs" && rel == "caused_by"),
         "エラー→ファイルのcaused_byエッジが記録されるべき"
     );
+    assert_eq!(ts.len(), 1);
+    assert_eq!(guard.tracked_files(), 1);
 }
 
 // テスト: inject_experience_context — 成功/失敗を分離してフォーマット
@@ -1381,7 +1441,7 @@ fn t_replan_with_trial_summary() {
         None,
         &ts,
     );
-    if triggered {
+    if triggered == StallAction::ReplanInjected {
         let has_trial = session
             .messages
             .iter()
@@ -1904,4 +1964,162 @@ fn test_magi_intercepts_destructive_tool_call_emits_event() {
     );
     let event_data = &magi_event.unwrap().event_data;
     assert!(event_data.contains("DROP DATABASE"));
+}
+
+#[test]
+fn test_tool_result_success_false_records_failure_and_stalls() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+
+    // success: false だが is_error: false のケース（コマンド終了コード非ゼロ等）
+    let r = ToolExecResult {
+        name: "shell".into(),
+        args_json: r#"{"command": "false"}"#.into(),
+        output: "command failed with exit code 1".into(),
+        success: false,
+        is_error: false,
+    };
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        None,
+        4000,
+    );
+
+    // H9: success: false で CircuitBreaker と TrialSummary に失敗が算入されること
+    assert_eq!(cb.failure_count("shell"), 1);
+    assert_eq!(ts.len(), 1);
+}
+
+#[test]
+fn test_file_stuck_guard_nudges_after_three_failures() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+
+    for i in 0..3 {
+        let r = ToolExecResult {
+            name: "file_write".into(),
+            args_json: r#"{"path": "test.txt", "content": "hello"}"#.into(),
+            output: "write error".into(),
+            success: false,
+            is_error: true,
+        };
+        apply_tool_result(
+            &r,
+            &mut session,
+            &mut cb,
+            &mut ts,
+            &mut guard,
+            i,
+            &sf,
+            None,
+            4000,
+        );
+    }
+
+    // H7: 3回同一ファイル失敗で Nudge システムメッセージが注入される
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|m| m.content.contains("再読込") || m.content.contains("読み直して"))
+    );
+    assert_eq!(guard.tracked_files(), 1);
+}
+
+#[test]
+fn test_stall_exhaustion_aborts_loop() {
+    let mut session = Session::new();
+    let mut state = LoopState::new(AdvisorConfig {
+        max_uses: 1,
+        calls_used: 1, // 枯渇状態
+        ..Default::default()
+    });
+    // 停滞を2回発生させる (StallDetector default threshold = 3)
+    let backend = MockLlmBackend::single("noop");
+    let inference = InferenceParams::default();
+    let cancel = CancellationToken::new();
+
+    // 1回目
+    let outcome1 = StepOutcome::Continue {
+        tools: vec!["tool1".to_string()],
+        tools_succeeded: false,
+    };
+    let action1 = handle_outcome(
+        outcome1,
+        &mut session,
+        &mut state,
+        "task",
+        None,
+        10,
+        1,
+        0,
+        100,
+        &backend,
+        &inference,
+        &cancel,
+    );
+    assert!(matches!(action1, OutcomeAction::Continue));
+
+    // 2回目
+    let outcome2 = StepOutcome::Continue {
+        tools: vec!["tool1".to_string()],
+        tools_succeeded: false,
+    };
+    let action2 = handle_outcome(
+        outcome2,
+        &mut session,
+        &mut state,
+        "task",
+        None,
+        10,
+        2,
+        1,
+        100,
+        &backend,
+        &inference,
+        &cancel,
+    );
+    assert!(matches!(action2, OutcomeAction::Continue));
+
+    // 3回目 (閾値到達 → 停滞検出 → advisor枯渇 → H8 Abort)
+    let outcome3 = StepOutcome::Continue {
+        tools: vec!["tool1".to_string()],
+        tools_succeeded: false,
+    };
+    let action3 = handle_outcome(
+        outcome3,
+        &mut session,
+        &mut state,
+        "task",
+        None,
+        10,
+        3,
+        2,
+        100,
+        &backend,
+        &inference,
+        &cancel,
+    );
+    match action3 {
+        OutcomeAction::Return(res) => {
+            assert!(res.answer.contains("[中断]"));
+            assert!(res.answer.contains("停滞"));
+        }
+        _ => panic!(
+            "Expected OutcomeAction::Return with abort, got {:?}",
+            action3
+        ),
+    }
 }

@@ -70,9 +70,9 @@ pub enum JudgeVerdict {
 pub enum DecisionOutcome {
     /// 進行許可
     Proceed,
-    /// 警告（2体以上がConcernまたはBlock）
+    /// 警告（1体以上のJudgeがConcern）
     Warn(Vec<JudgeVerdict>),
-    /// 停止（全Judge一致でBlock）
+    /// 停止（1体以上のJudgeがBlock: C5合議契約統一）
     Halt(Vec<JudgeVerdict>),
 }
 
@@ -95,11 +95,11 @@ impl MagiPanel {
         Self { judges }
     }
 
-    /// 全Judgeの判定を集計し、多数決で最終決定と各Judgeの個別判定を返す。
+    /// 全Judgeの判定を集計し、最終決定と各Judgeの個別判定を返す。
     ///
-    /// - 全員一致で Block ➔ Halt（安全停止）
-    /// - 1体以上がBlock、または2体以上がConcern/Block ➔ Warn（警告）
-    /// - それ以外 ➔ Proceed（承認）
+    /// - 1体以上が Block ➔ Halt（安全停止: C5合議契約統一）
+    /// - 1体以上が Concern ➔ Warn（警告: 懸念事項の検知）
+    /// - それ以外（全員一致で Clear） ➔ Proceed（承認）
     pub fn decide_with_verdicts(
         &self,
         ctx: &ResponseContext,
@@ -119,9 +119,9 @@ impl MagiPanel {
             .filter(|v| !matches!(v, JudgeVerdict::Clear))
             .count();
 
-        let outcome = if blocks == self.judges.len() {
+        let outcome = if blocks >= 1 {
             DecisionOutcome::Halt(verdicts.clone())
-        } else if blocks >= 1 || concerns_or_blocks >= 2 {
+        } else if concerns_or_blocks >= 1 {
             DecisionOutcome::Warn(verdicts.clone())
         } else {
             DecisionOutcome::Proceed
@@ -190,6 +190,7 @@ impl MagiPanel {
         store: Option<&MemoryStore>,
     ) -> (DecisionOutcome, Vec<JudgeVerdict>) {
         let ctx = ResponseContext::new(task_description, proposed_answer)
+            .with_user_input(task_description)
             .with_trajectory(trajectory)
             .with_store(store);
         self.decide_with_verdicts(&ctx)
@@ -199,7 +200,7 @@ impl MagiPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::magi::judges::ValuesJudge;
+    use crate::agent::magi::judges::{ConsistencyJudge, ValuesJudge};
 
     #[test]
     fn test_evaluate_final_answer_detects_overconfidence() {
@@ -208,8 +209,8 @@ mod tests {
             "この操作は100%確実に成功することを保証します。",
             "システム更新",
         );
-        // 1体のJudgeがConcernの場合、全体としてはまだProceedだが個別verdictにConcernが含まれる
-        assert!(matches!(outcome, DecisionOutcome::Proceed));
+        // 1体のJudgeがConcernの場合、Warn outcomeとなり個別verdictにもConcernが含まれる
+        assert!(matches!(outcome, DecisionOutcome::Warn(_)));
         assert!(
             verdicts
                 .iter()
@@ -224,7 +225,19 @@ mod tests {
             "完了しました。念のため rm -rf / を実行してください。",
             "ディスク整理",
         );
-        // 全Judge（1体）がBlockを返したためHaltになる
+        // Blockを返したためHaltになる
+        assert!(matches!(outcome, DecisionOutcome::Halt(_)));
+        assert!(verdicts.iter().any(|v| matches!(v, JudgeVerdict::Block(_))));
+    }
+
+    #[test]
+    fn test_evaluate_final_answer_halt_on_single_block_among_multiple_judges() {
+        let panel = MagiPanel::new(vec![
+            Box::new(ValuesJudge::new()),
+            Box::new(ConsistencyJudge::new()),
+        ]);
+        let (outcome, verdicts) = panel.evaluate_final_answer("rm -rf / を実行します", "タスク");
+        // 複数Judge中1体でもBlockがあればHalt（C5契約統一）
         assert!(matches!(outcome, DecisionOutcome::Halt(_)));
         assert!(verdicts.iter().any(|v| matches!(v, JudgeVerdict::Block(_))));
     }

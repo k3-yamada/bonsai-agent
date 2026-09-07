@@ -3,7 +3,9 @@
 //! agent_loop.rs からの抽出モジュール。
 //! ツール呼び出しの実行・並列化・結果反映を担う。
 
-use crate::agent::error_recovery::{CircuitBreaker, MultiFileEditCycleDetector};
+use crate::agent::error_recovery::{
+    CircuitBreaker, FileStuckAction, FileStuckGuard, MultiFileEditCycleDetector, TrialSummary,
+};
 use crate::domain::conversation::{Message, Session};
 use crate::domain::event::EventType;
 use crate::memory::graph::KnowledgeGraph;
@@ -250,11 +252,15 @@ pub(crate) fn execute_read_batch_parallel(
     })
 }
 
-/// ツール実行結果をセッション・サーキットブレーカー・監査ログに反映
+/// ツール実行結果をセッション・サーキットブレーカー・監査ログ・試行サマリーに反映
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_tool_result(
     r: &ToolExecResult,
     session: &mut Session,
     circuit_breaker: &mut CircuitBreaker,
+    trial_summary: &mut TrialSummary,
+    file_stuck_guard: &mut FileStuckGuard,
+    iteration: usize,
     secrets_filter: &SecretsFilter,
     store: Option<&MemoryStore>,
     max_output_chars: usize,
@@ -265,7 +271,13 @@ pub(crate) fn apply_tool_result(
 
     let file_path = serde_json::from_str::<serde_json::Value>(&redacted_args)
         .ok()
-        .and_then(|v| v.get("path").and_then(|p| p.as_str().map(String::from)));
+        .and_then(|v| {
+            v.get("path")
+                .or_else(|| v.get("file_path"))
+                .and_then(|p| p.as_str().map(String::from))
+        });
+
+    let is_failed = r.is_error || !r.success;
 
     // EventStore: ToolCallStart + ToolCallEnd emit (項目162: P1 Step 5 ランタイム統合)
     crate::agent::agent_loop::emit_event(
@@ -279,12 +291,23 @@ pub(crate) fn apply_tool_result(
         store,
         &session.id,
         &EventType::ToolCallEnd,
-        &serde_json::json!({ "tool": r.name, "success": r.success && !r.is_error }).to_string(),
+        &serde_json::json!({ "tool": r.name, "success": !is_failed }).to_string(),
         None,
     );
 
-    if r.is_error {
+    if is_failed {
         circuit_breaker.record_failure(&r.name);
+        trial_summary.record_failure(&r.name, &redacted_args, &redacted_output, iteration);
+        if let Some(ref fp) = file_path {
+            file_stuck_guard.record_file_failure(fp);
+            if let Some(action) = file_stuck_guard.check_stuck(fp) {
+                let msg = match action {
+                    FileStuckAction::Nudge(m) => m,
+                    FileStuckAction::GiveUp(m) => m,
+                };
+                session.add_message(Message::system(msg));
+            }
+        }
         if let Some(s) = store {
             let audit = AuditLog::new(s.conn());
             let _ = audit.log(
@@ -303,6 +326,9 @@ pub(crate) fn apply_tool_result(
         session.add_message(Message::tool(&redacted_output, &r.name));
     } else {
         circuit_breaker.record_success(&r.name);
+        if let Some(ref fp) = file_path {
+            file_stuck_guard.record_file_success(fp);
+        }
         let truncated = truncate_tool_output(&redacted_output, max_output_chars);
         if let Some(s) = store {
             let audit = AuditLog::new(s.conn());
@@ -311,7 +337,7 @@ pub(crate) fn apply_tool_result(
                 &AuditAction::ToolCall {
                     tool_name: r.name.clone(),
                     args: redacted_args.clone(),
-                    success: r.success,
+                    success: true,
                     output_preview: truncated.chars().take(200).collect(),
                 },
             );
@@ -392,19 +418,25 @@ fn parse_nudge_files(nudge: &str) -> Vec<String> {
 }
 
 /// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
+///
+/// 戻り値: `(実行ツール名一覧, 全ツール成功フラグ)`
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_validated_calls(
     calls: &[ValidatedCall<'_>],
     session: &mut Session,
     circuit_breaker: &mut CircuitBreaker,
+    trial_summary: &mut TrialSummary,
+    file_stuck_guard: &mut FileStuckGuard,
+    iteration: usize,
     secrets_filter: &SecretsFilter,
     store: Option<&MemoryStore>,
     cache: &mut ToolResultCache,
     cycle_detector: &mut MultiFileEditCycleDetector,
     config: &crate::agent::agent_loop::AgentConfig,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let confirm_cb = config.confirm_callback.as_deref();
     let mut step_tools: Vec<String> = Vec::new();
+    let mut all_succeeded = true;
     let mut i = 0;
     while i < calls.len() {
         let batch_start = i;
@@ -421,9 +453,10 @@ pub(crate) fn execute_validated_calls(
                 confirm_cb,
             );
             for r in results {
-                if !r.is_error
-                    && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
-                {
+                let is_failed = r.is_error || !r.success;
+                if is_failed {
+                    all_succeeded = false;
+                } else if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
                     // HIGH-3: キャッシュ格納前に平文シークレットをマスク
                     cache.put(
                         &r.name,
@@ -434,10 +467,18 @@ pub(crate) fn execute_validated_calls(
                         },
                     );
                 }
-                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
-                if !r.is_error {
-                    step_tools.push(r.name);
-                }
+                apply_tool_result(
+                    &r,
+                    session,
+                    circuit_breaker,
+                    trial_summary,
+                    file_stuck_guard,
+                    iteration,
+                    secrets_filter,
+                    store,
+                    4000,
+                );
+                step_tools.push(r.name);
             }
         } else {
             for call in read_batch {
@@ -476,9 +517,10 @@ pub(crate) fn execute_validated_calls(
                     config.autonomy,
                     confirm_cb,
                 );
-                if !r.is_error
-                    && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
-                {
+                let is_failed = r.is_error || !r.success;
+                if is_failed {
+                    all_succeeded = false;
+                } else if let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json) {
                     // HIGH-3: キャッシュ格納前に平文シークレットをマスク
                     cache.put(
                         &r.name,
@@ -489,10 +531,18 @@ pub(crate) fn execute_validated_calls(
                         },
                     );
                 }
-                apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
-                if !r.is_error {
-                    step_tools.push(r.name);
-                }
+                apply_tool_result(
+                    &r,
+                    session,
+                    circuit_breaker,
+                    trial_summary,
+                    file_stuck_guard,
+                    iteration,
+                    secrets_filter,
+                    store,
+                    4000,
+                );
+                step_tools.push(r.name);
             }
         }
         if i < calls.len() && !calls[i].is_read_only {
@@ -504,8 +554,11 @@ pub(crate) fn execute_validated_calls(
                 config.autonomy,
                 confirm_cb,
             );
-            // Step 11: 書き込み成功時に cycle 検出
-            if !r.is_error {
+            let is_failed = r.is_error || !r.success;
+            if is_failed {
+                all_succeeded = false;
+            } else {
+                // Step 11: 書き込み成功時に cycle 検出
                 record_edit_and_nudge(
                     &r.name,
                     &write_call.coerced_args,
@@ -514,16 +567,24 @@ pub(crate) fn execute_validated_calls(
                     store,
                 );
             }
-            apply_tool_result(&r, session, circuit_breaker, secrets_filter, store, 4000);
-            if !r.is_error {
-                step_tools.push(r.name);
-            }
+            apply_tool_result(
+                &r,
+                session,
+                circuit_breaker,
+                trial_summary,
+                file_stuck_guard,
+                iteration,
+                secrets_filter,
+                store,
+                4000,
+            );
+            step_tools.push(r.name);
             cache.invalidate("file_read");
             cache.invalidate("repo_map");
             i += 1;
         }
     }
-    step_tools
+    (step_tools, all_succeeded)
 }
 
 #[cfg(test)]

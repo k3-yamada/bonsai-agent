@@ -120,9 +120,20 @@ pub(super) fn log_advisor_call(
     }
 }
 
+/// 停滞検出時のアクション
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StallAction {
+    /// 停滞未検出
+    None,
+    /// 再計画ステップを注入完了
+    ReplanInjected,
+    /// 停滞検出かつアドバイザー上限到達によるアボート（H8）
+    ExhaustedAndAborted(String),
+}
+
 /// 停滞検出時に再計画ステップを注入
 ///
-/// 戻り値: true なら再計画ステップ挿入済（StallDetectorをreset）
+/// 戻り値: `StallAction`（停滞なし、再計画注入、上限超過アボート）
 #[allow(clippy::too_many_arguments)]
 pub(super) fn inject_replan_on_stall(
     session: &mut Session,
@@ -133,18 +144,21 @@ pub(super) fn inject_replan_on_stall(
     output_hash: u64,
     store: Option<&MemoryStore>,
     trial_summary: &TrialSummary,
-) -> bool {
+) -> StallAction {
     if !stall_detector.record_step(tools_succeeded, output_hash) {
-        return false;
+        return StallAction::None;
     }
     if !advisor.can_advise() {
         log_event(
             LogLevel::Warn,
             "stall",
-            "停滞検出だが advisor max_uses 到達",
+            "停滞検出だが advisor max_uses 到達 (アボート)",
         );
         stall_detector.reset();
-        return false;
+        return StallAction::ExhaustedAndAborted(
+            "停滞が継続していますが、アドバイザーの再計画試行上限に達したため処理を中断します"
+                .to_string(),
+        );
     }
     let resolution = resolve_advisor_prompt(advisor, AdvisorRole::Replan, task_context);
     log_advisor_call(store, session, AdvisorRole::Replan, &resolution);
@@ -171,7 +185,7 @@ pub(super) fn inject_replan_on_stall(
             advisor.max_uses
         ),
     );
-    true
+    StallAction::ReplanInjected
 }
 
 /// 完了前自己検証ステップを注入

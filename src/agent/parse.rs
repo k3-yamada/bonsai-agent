@@ -106,6 +106,12 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
                 let think_content = &remaining[think_start + 7..think_start + think_end];
                 thinking = Some(think_content.trim().to_string());
                 remaining = &remaining[think_start + think_end + 8..];
+            } else if let Some(tc_offset) = remaining[think_start + 7..].find("<tool_call>") {
+                // H10: </think>が欠損していても<tool_call>が続く場合は、その手前までを思考として抽出し、
+                // tool_callの処理を後続ループに委ねる
+                let think_content = &remaining[think_start + 7..think_start + 7 + tc_offset];
+                thinking = Some(think_content.trim().to_string());
+                remaining = &remaining[think_start + 7 + tc_offset..];
             } else {
                 // 閉じタグなし — 残り全体を思考として扱う
                 let think_content = &remaining[think_start + 7..];
@@ -468,6 +474,25 @@ mod tests {
         let result = parse_assistant_output(input).unwrap();
         assert_eq!(result.thinking, Some("考え中...".to_string()));
         assert!(result.text.is_none());
+    }
+
+    #[test]
+    fn test_unclosed_think_recovers_tool_call() {
+        let input = r#"<think>コマンドを実行してファイルを確認しよう
+<tool_call>
+{"name": "shell", "arguments": {"command": "ls -la"}}
+</tool_call>"#;
+        let result = parse_assistant_output(input).unwrap();
+        assert_eq!(
+            result.thinking,
+            Some("コマンドを実行してファイルを確認しよう".to_string())
+        );
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "shell");
+        assert_eq!(
+            result.tool_calls[0].arguments["command"],
+            serde_json::json!("ls -la")
+        );
     }
 
     // テスト8: 空の<tool_call>
