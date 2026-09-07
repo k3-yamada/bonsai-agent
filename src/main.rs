@@ -6,15 +6,11 @@ use clap::Parser;
 use bonsai_agent::agent::agent_loop::{
     AgentConfig, ReplIo, new_session_with_system, run_agent_loop, run_repl,
 };
-use bonsai_agent::agent::checkpoint::CheckpointManager;
-use bonsai_agent::agent::experiment::{ExperimentLoopConfig, run_experiment_loop};
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::{AppConfig, ServerBackend};
 use bonsai_agent::domain::llm::{LlmBackend, MockLlmBackend};
 use bonsai_agent::memory::store::MemoryStore;
-use bonsai_agent::runtime::cache::CachedBackend;
-use bonsai_agent::runtime::http_agent::{shared_agent, short_agent};
 use bonsai_agent::runtime::inference::FallbackBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::ToolRegistry;
@@ -26,105 +22,13 @@ use bonsai_agent::tools::repomap::RepoMapTool;
 use bonsai_agent::tools::shell::ShellTool;
 use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
 
-#[derive(Parser)]
-#[command(name = "bonsai-agent", version, about = "Bonsai-8B自律型エージェント")]
-struct Cli {
-    /// llama-serverのURL（デフォルト: http://localhost:8080）
-    #[arg(long, default_value = "http://localhost:8080")]
-    server_url: String,
+mod cli_admin;
+mod cli_args;
+mod cli_diagnose;
+mod cli_init;
+mod cli_lab;
 
-    /// 単発実行モード
-    #[arg(long)]
-    exec: Option<String>,
-
-    /// モックモード（LLMなしでテスト）
-    #[arg(long)]
-    mock: bool,
-
-    /// セッション一覧を表示
-    #[arg(long)]
-    sessions: bool,
-
-    /// 過去セッションを再開（セッションIDの先頭数文字でOK）
-    #[arg(long)]
-    resume: Option<String>,
-
-    /// 監査ログを表示
-    #[arg(long)]
-    audit: bool,
-
-    /// 未完了タスク一覧
-    #[arg(long)]
-    tasks: bool,
-
-    /// ナレッジVault概要
-    #[arg(long)]
-    vault: bool,
-
-    /// 設定ファイルを初期生成（~/.config/bonsai-agent/config.toml）
-    #[arg(long)]
-    init: bool,
-
-    /// ケイパビリティ一覧
-    #[arg(long)]
-    manifest: bool,
-
-    /// 登録ツール一覧を表示（whitelist 適用後の live registry、BONSAI_ENABLED_TOOLS/LAB_SMOKE 反映）
-    #[arg(long)]
-    list_tools: bool,
-
-    /// arxiv収集+自己改善
-    #[arg(long)]
-    evolve: bool,
-
-    /// REST APIサーバー
-    #[arg(long)]
-    serve: bool,
-
-    /// APIポート
-    #[arg(long, default_value = "3030")]
-    api_port: u16,
-
-    /// MCPサーバー
-    #[arg(long)]
-    mcp_server: bool,
-
-    /// 実験ループ（自律的自己改善）
-    #[arg(long)]
-    lab: bool,
-
-    /// 実験回数上限
-    #[arg(long, default_value = "10")]
-    lab_experiments: usize,
-
-    /// ダッシュボード（advisor/checkpoint/実験統計）
-    #[arg(long)]
-    dashboard: bool,
-
-    /// チェックポイント一覧
-    #[arg(long)]
-    checkpoints: bool,
-
-    /// 指定IDのチェックポイントにロールバック
-    #[arg(long)]
-    rollback: Option<i64>,
-
-    /// サーバー診断（接続・モデル・推論テスト）
-    #[arg(long)]
-    diagnose: bool,
-
-    /// スキルをMarkdownにエクスポート（デフォルト: SKILLS.md）
-    #[arg(long)]
-    skills_export: bool,
-
-    /// ファイル/ディレクトリ(.md/.txt)を memory に取り込む（①知識デーモン Phase 2）
-    #[arg(long, value_name = "PATH")]
-    ingest: Option<std::path::PathBuf>,
-
-    /// --ingest と併用: 取込後、対象 dir から削除されたファイルの孤児 chunk を掃除する
-    #[arg(long)]
-    ingest_prune: bool,
-}
+use cli_args::Cli;
 
 /// 共有コンテキスト（各モードハンドラに渡す）
 struct AppContext {
@@ -140,6 +44,28 @@ struct AppContext {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut app_config = AppConfig::load()?;
+
+    if let Some(ref backend_str) = cli.backend {
+        match backend_str.to_lowercase().as_str() {
+            "unsloth" => app_config.model.backend = ServerBackend::Unsloth,
+            "mlx" | "mlx-lm" => app_config.model.backend = ServerBackend::MlxLm,
+            "bitnet" => app_config.model.backend = ServerBackend::BitNet,
+            "llama" | "llama-server" => app_config.model.backend = ServerBackend::LlamaServer,
+            other => eprintln!("[warn] 不明なバックエンド: {other}"),
+        }
+    }
+    if let Some(ref key) = cli.api_key {
+        app_config.model.api_key = Some(key.clone());
+    }
+    if let Some(ref model_id) = cli.model {
+        app_config.model.model_id = model_id.clone();
+    } else if let Ok(env_model) = std::env::var("UNSLOTH_MODEL") {
+        app_config.model.model_id = env_model;
+    } else if app_config.model.backend == ServerBackend::Unsloth
+        && app_config.model.model_id == "bonsai-8b"
+    {
+        app_config.model.model_id = "Aratako/Qwen3-8B-ERP-v0.1-GGUF".to_string();
+    }
 
     // 項目 247 Phase C: Lab 起動時のみ `BONSAI_LAB_TEMP` env で temperature override.
     // `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
@@ -190,25 +116,32 @@ fn main() -> Result<()> {
         && app_config.model.server_url == "http://localhost:8080"
     {
         "http://localhost:8090".to_string()
+    } else if app_config.model.backend == ServerBackend::Unsloth
+        && app_config.model.server_url == "http://localhost:8080"
+    {
+        "http://localhost:8888".to_string()
     } else {
         app_config.model.server_url.clone()
     };
 
-    // B-3: BONSAI_MLX_AUTO_CLAMP=1 のとき context 上限を取得し
+    // B-3: BONSAI_MLX_AUTO_CLAMP=1 または Unsloth バックエンドのとき context 上限を取得し
     // context_length を min(configured, server_n_ctx) にクランプ (LocalAI fit_params 思想)。
-    // llama.cpp は /props、MLX はローカル model dir の config.json (max_position_embeddings)
-    // から取得する 2 段 fallback。env unset / 両方失敗時は no-op で完全後方互換。
-    if bonsai_agent::config::is_mlx_auto_clamp() {
+    // llama.cpp は /props、Unsloth は /v1/models、MLX は config.json (max_position_embeddings)
+    // から取得する多段 fallback。
+    if bonsai_agent::config::is_mlx_auto_clamp()
+        || app_config.model.backend == ServerBackend::Unsloth
+    {
         let configured = app_config.model.context_length;
-        let server_n_ctx = bonsai_agent::runtime::server_props::resolve_server_n_ctx(
+        let server_n_ctx = bonsai_agent::runtime::server_props::resolve_server_n_ctx_with_key(
             &server_url,
             &app_config.model.model_id,
+            app_config.model.api_key.as_deref(),
         );
         let clamped =
             bonsai_agent::runtime::server_props::clamp_context_to_server(configured, server_n_ctx);
         if clamped != configured {
             eprintln!(
-                "[auto-clamp] BONSAI_MLX_AUTO_CLAMP=1 → context_length {} → {} (server n_ctx={:?})",
+                "[auto-clamp] context_length {} → {} (server n_ctx={:?})",
                 configured, clamped, server_n_ctx
             );
             app_config.model.context_length = clamped;
@@ -265,16 +198,26 @@ fn main() -> Result<()> {
 
     // 早期リターンモード（DB不要）
     if cli.diagnose {
-        return handle_diagnose_mode(&ctx);
+        return cli_diagnose::handle_diagnose_mode(&ctx.server_url, &ctx.app_config);
     }
     if cli.lab {
-        return handle_lab_mode(&ctx, cli.lab_experiments);
+        return cli_lab::handle_lab_mode(
+            &ctx.config,
+            &ctx.tools,
+            &ctx.path_guard,
+            &ctx.cancel,
+            &ctx.app_config,
+            ctx.mock,
+            cli.lab_experiments,
+            || create_backend(&ctx),
+            &get_db_path(),
+        );
     }
     if cli.evolve {
-        return handle_evolve_mode();
+        return cli_lab::handle_evolve_mode(&get_db_path());
     }
     if cli.init {
-        return handle_init_mode();
+        return cli_init::handle_init_mode();
     }
     if cli.manifest {
         println!("{}", bonsai_agent::safety::manifest::format_manifest());
@@ -286,7 +229,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if cli.vault {
-        return handle_vault_mode();
+        return cli_admin::handle_vault_mode();
     }
 
     // DB必要モード
@@ -306,25 +249,33 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if cli.skills_export {
-        return handle_skills_export_mode(&store);
+        return cli_admin::handle_skills_export_mode(&store);
+    }
+    if cli.visualize {
+        return cli_admin::handle_visualize_mode(
+            &store,
+            &cli.visualize_output,
+            cli.visualize_open,
+            !cli.no_privacy,
+        );
     }
     if cli.sessions {
-        return handle_sessions_mode(&store);
+        return cli_admin::handle_sessions_mode(&store);
     }
     if cli.tasks {
-        return handle_tasks_mode(&store);
+        return cli_admin::handle_tasks_mode(&store);
     }
     if cli.audit {
-        return handle_audit_mode(&store);
+        return cli_admin::handle_audit_mode(&store);
     }
     if cli.dashboard {
-        return handle_dashboard_mode(&store);
+        return cli_admin::handle_dashboard_mode(&store);
     }
     if cli.checkpoints {
-        return handle_checkpoints_mode(&store);
+        return cli_admin::handle_checkpoints_mode(&store);
     }
     if let Some(cp_id) = cli.rollback {
-        return handle_rollback_mode(&store, cp_id);
+        return cli_admin::handle_rollback_mode(&store, cp_id);
     }
     if let Some(resume_id) = &cli.resume {
         return handle_resume_mode(&ctx, &store, resume_id);
@@ -337,144 +288,6 @@ fn main() -> Result<()> {
 }
 
 // --- ツール初期化 ---
-
-fn handle_diagnose_mode(ctx: &AppContext) -> Result<()> {
-    println!("╔══════════════════════════════════════════╗");
-    println!("║       bonsai-agent サーバー診断            ║");
-    println!("╚══════════════════════════════════════════╝");
-
-    let backend_name = match ctx.app_config.model.backend {
-        bonsai_agent::config::ServerBackend::LlamaServer => "llama-server",
-        bonsai_agent::config::ServerBackend::MlxLm => "mlx-lm",
-        bonsai_agent::config::ServerBackend::BitNet => "bitnet.cpp",
-    };
-    let mlx_compat = ctx.app_config.model.backend == bonsai_agent::config::ServerBackend::MlxLm;
-
-    println!("\n📋 設定:");
-    println!("  server_url: {}", ctx.server_url);
-    println!("  backend: {}", backend_name);
-    println!("  model_id: {}", ctx.app_config.model.model_id);
-    println!("  context_length: {}", ctx.app_config.model.context_length);
-    println!("  mlx_compatible: {}", mlx_compat);
-
-    let inf = &ctx.app_config.model.inference;
-    println!("\n⚙️  InferenceParams:");
-    println!("  temperature: {}", inf.temperature);
-    println!("  top_p: {}", inf.top_p);
-    println!("  top_k: {}", inf.top_k);
-    println!("  min_p: {}", inf.min_p);
-    println!("  max_tokens: {}", inf.max_tokens);
-    println!("  repeat_penalty: {}", inf.repeat_penalty);
-
-    // 接続テスト
-    println!("\n🔌 接続テスト...");
-    let health_url = format!("{}/health", ctx.server_url);
-    let models_url = format!("{}/v1/models", ctx.server_url);
-
-    let agent = short_agent();
-    let health_ok = agent.get(&health_url).call().is_ok();
-    let models_resp = agent.get(&models_url).call();
-
-    if health_ok {
-        println!("  /health: ✓ OK");
-    } else {
-        println!("  /health: ✗ 応答なし");
-    }
-
-    // モデル一覧取得
-    match models_resp {
-        Ok(resp) => {
-            println!("  /v1/models: ✓ OK");
-            if let Ok(body) = resp.into_body().read_to_string()
-                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
-                && let Some(data) = json.get("data").and_then(|d| d.as_array())
-            {
-                println!("\n📦 モデル一覧:");
-                for model in data {
-                    if let Some(id) = model.get("id").and_then(|v| v.as_str()) {
-                        println!("  - {}", id);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("  /v1/models: ✗ エラー ({})", e);
-            println!("\nサーバーに接続できません。llama-serverが起動しているか確認してください。");
-            return Ok(());
-        }
-    }
-
-    // テストプロンプト
-    if !health_ok && short_agent().get(&models_url).call().is_err() {
-        println!("\nサーバーに接続できないため、テストプロンプトをスキップします。");
-        return Ok(());
-    }
-
-    println!("\n🧪 テストプロンプト: \"1+1=\"");
-    let chat_url = format!("{}/v1/chat/completions", ctx.server_url);
-    let request_body = serde_json::json!({
-        "messages": [{"role": "user", "content": "1+1="}],
-        "temperature": inf.temperature,
-        "max_tokens": 32_u32,
-        "stream": false,
-    });
-
-    let start = std::time::Instant::now();
-    match shared_agent()
-        .post(&chat_url)
-        .header("Content-Type", "application/json")
-        .send_json(&request_body)
-    {
-        Ok(resp) => {
-            let elapsed = start.elapsed();
-            if let Ok(body) = resp.into_body().read_to_string()
-                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
-            {
-                let answer = json["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("(応答なし)");
-                let prompt_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-                let completion_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
-                println!("  応答: {}", answer.trim());
-                println!("  応答時間: {:.1}ms", elapsed.as_secs_f64() * 1000.0);
-                println!(
-                    "  トークン数: prompt={}, completion={}",
-                    prompt_tokens, completion_tokens
-                );
-            } else {
-                println!("  応答パースエラー");
-            }
-        }
-        Err(e) => {
-            println!("  テストプロンプト失敗: {}", e);
-        }
-    }
-
-    println!("\n診断完了。");
-    Ok(())
-}
-
-fn handle_init_mode() -> Result<()> {
-    let path = AppConfig::config_path();
-    if path.exists() {
-        println!("設定ファイルが既に存在します: {}", path.display());
-        println!("上書きする場合は手動で削除してください。");
-        return Ok(());
-    }
-    let path = AppConfig::save_default()?;
-    println!("設定ファイルを生成しました: {}", path.display());
-    println!();
-    println!("Advisor API 設定例（config.toml の [advisor] セクション）:");
-    println!("  [advisor]");
-    println!("  api_endpoint = \"https://api.openai.com/v1/chat/completions\"");
-    println!("  api_model = \"gpt-4o-mini\"");
-    println!("  # api_key は環境変数 OPENAI_API_KEY から自動検出");
-    println!();
-    println!("ローカルLLMアドバイザー例:");
-    println!("  [advisor]");
-    println!("  api_endpoint = \"http://127.0.0.1:8081/v1/chat/completions\"");
-    Ok(())
-}
 
 fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
@@ -539,8 +352,10 @@ fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
         None => tools,
     };
 
-    // ツール数上限警告
-    tools.warn_if_exceeded(app_config.agent.max_tools_in_context);
+    // ツール数上限警告（whitelist適用時等、常時アクティブなツールがコンテキスト上限を超えている場合のみ）
+    if bonsai_agent::tools::whitelist::is_tool_whitelist_enabled() {
+        tools.warn_if_exceeded(app_config.agent.max_tools_in_context);
+    }
 
     tools
 }
@@ -616,18 +431,22 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
 
     // 単一バックエンド経路（既存）
     let backend = &ctx.app_config.model.backend;
-    let b = LlamaServerBackend::connect_with_params(
+    let mut b = LlamaServerBackend::connect_with_params(
         &ctx.server_url,
         &ctx.app_config.model.model_id,
         ctx.app_config.model.inference.clone(),
     )
     .with_mlx_compatible(*backend == ServerBackend::MlxLm)
     .with_sse_timeout(ctx.app_config.model.sse_chunk_timeout_secs);
+    if let Some(key) = &ctx.app_config.model.api_key {
+        b = b.with_api_key(key.clone());
+    }
     if !b.is_healthy() {
         let backend_name = match backend {
             ServerBackend::LlamaServer => "llama-server",
             ServerBackend::MlxLm => "mlx-lm",
             ServerBackend::BitNet => "bitnet.cpp",
+            ServerBackend::Unsloth => "unsloth",
         };
         eprintln!(
             "エラー: {} ({}) に接続できません。",
@@ -684,397 +503,6 @@ fn maybe_supervise(ctx: &AppContext, backend: Box<dyn LlmBackend>) -> Box<dyn Ll
 
 // --- モードハンドラ ---
 
-fn handle_lab_mode(ctx: &AppContext, max_experiments: usize) -> Result<()> {
-    let store = MemoryStore::open(&get_db_path())?;
-    // Lab モックは "1024" を返す特殊応答が必要（ベンチマークのキーワード評価で数値が必要）
-    // 非モック経路は create_backend() に委譲し、FallbackChain wrap を享受する
-    let backend: Box<dyn LlmBackend> = if ctx.mock {
-        Box::new(MockLlmBackend::new(
-            (0..10000).map(|_| "1024".to_string()).collect(),
-        ))
-    } else {
-        create_backend(ctx)
-    };
-    // 項目 252 Phase 2.5 wiring (F4 案 A): MLX server pre-warm gate.
-    // raw backend (CachedBackend wrap 前) で呼出 → 全 N 回 cache miss させ実 MLX server に
-    // 負荷投入、cold start latency を Lab cycle 計時前に消化。env-gated default OFF.
-    if bonsai_agent::config::is_lab_mlx_warmup() {
-        let n = bonsai_agent::config::lab_mlx_warmup_count().unwrap_or(3);
-        // critic M1 fix: caller の ctx.cancel を forward (Ctrl+C 中断応答性確保).
-        let succ =
-            bonsai_agent::agent::experiment::lab_mlx_prewarm(backend.as_ref(), n, &ctx.cancel);
-        // critic F3 follow-up: succ==0 で全 fail の場合 stderr 警告
-        // (Lab cycle 続行は graceful degradation 維持、但し silent failure 防止).
-        if n > 0 && succ == 0 {
-            // code-reviewer MEDIUM M-2 fix: env 表記混同回避.
-            // BONSAI_LAB_MLX_WARMUP=1 は ON/OFF flag、count は別 env _COUNT.
-            eprintln!(
-                "[lab] WARN: pre-warm 全失敗 (succ=0/n={n}, BONSAI_LAB_MLX_WARMUP_COUNT={n}). \
-                 MLX server 未起動か到達不可の可能性. \
-                 Lab cycle は続行するが cold start latency 未消化."
-            );
-        }
-    }
-
-    let tsv_path = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("bonsai-agent")
-        .join("experiments.tsv");
-    let loop_config = ExperimentLoopConfig {
-        tsv_path: Some(tsv_path),
-        max_experiments: Some(max_experiments),
-        dreamer_interval: ctx.app_config.experiment.dreamer_interval,
-        enable_prescreening: ctx.app_config.experiment.enable_prescreening,
-        prescreening_threshold: ctx.app_config.experiment.prescreening_threshold,
-        task_timeout_secs: ctx.app_config.experiment.task_timeout_secs,
-        judge_threshold: ctx.app_config.experiment.judge_threshold,
-        judge_sample_size: ctx.app_config.experiment.judge_sample_size,
-    };
-    let backend = CachedBackend::new(backend, 200);
-
-    // 項目 246 Phase 4 Green → 項目 251 helper extraction: Lab cycle 起動前の Vault sanity gate.
-    // env-gated (`BONSAI_VAULT_LINT_LAB=1` で active 化、default OFF で no-op).
-    // strict=`BONSAI_VAULT_LINT_STRICT=1` + not_clean で bail (cycle 浪費回避).
-    // helper 内で warn_log + audit emit + strict bail を集約 (項目 246 critic F1 follow-up).
-    if bonsai_agent::knowledge::vault_lint::is_vault_lint_lab_enabled() {
-        let vault_root = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("bonsai-agent")
-            .join("vault");
-        let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
-        let strict = bonsai_agent::knowledge::vault_lint::is_vault_lint_strict();
-        if let Err(e) = bonsai_agent::knowledge::vault_lint::run_vault_sanity_gate(
-            &vault_root,
-            bonsai_agent::knowledge::vault_lint::vault_lint_stale_days(),
-            strict,
-            Some(&audit),
-        ) {
-            // strict + not_clean は helper 内 bail を伝播 → Lab 起動を中断.
-            // warn-only mode (strict=false) の Vault::new 失敗等は eprintln で警告し続行
-            // (production CLI 初回起動で Vault dir 未作成 = non-fatal の従来 contract 維持).
-            if strict {
-                return Err(e);
-            }
-            eprintln!("[lab.vault_lint] sanity gate failed (warn-only): {e}");
-        }
-    }
-
-    let experiments = run_experiment_loop(
-        &ctx.config,
-        &backend,
-        &ctx.tools,
-        &ctx.path_guard,
-        &ctx.cancel,
-        &store,
-        &loop_config,
-    )?;
-    println!("\n実験完了: {}件", experiments.len());
-    Ok(())
-}
-
-fn handle_evolve_mode() -> Result<()> {
-    let store = MemoryStore::open(&get_db_path())?;
-    let engine = bonsai_agent::memory::evolution::EvolutionEngine::new(&store);
-    match engine.auto_collect() {
-        Ok(n) => println!("arxiv: {n}件の論文を収集"),
-        Err(e) => eprintln!("収集エラー: {e}"),
-    }
-    match engine.apply_improvements() {
-        Ok(applied) => {
-            for a in &applied {
-                println!("  改善: {a}");
-            }
-            if applied.is_empty() {
-                println!("  (新しい改善なし)");
-            }
-        }
-        Err(e) => eprintln!("改善エラー: {e}"),
-    }
-    match engine.suggest_improvements() {
-        Ok(suggestions) => {
-            if !suggestions.is_empty() {
-                println!("提案:");
-                for s in &suggestions {
-                    println!("  - {s}");
-                }
-            }
-        }
-        Err(e) => eprintln!("提案エラー: {e}"),
-    }
-    Ok(())
-}
-
-fn handle_vault_mode() -> Result<()> {
-    let vp = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("bonsai-agent")
-        .join("vault");
-    if let Ok(v) = bonsai_agent::knowledge::vault::Vault::new(&vp) {
-        println!("{}", v.summary().unwrap_or_default());
-    }
-    Ok(())
-}
-
-fn handle_skills_export_mode(store: &MemoryStore) -> Result<()> {
-    use bonsai_agent::memory::skill::SkillStore;
-
-    let skills = SkillStore::new(store.conn());
-    let path = std::path::Path::new("SKILLS.md");
-    skills.export_to_file(path)?;
-    println!("スキルをエクスポートしました: {}", path.display());
-    Ok(())
-}
-
-fn handle_sessions_mode(store: &MemoryStore) -> Result<()> {
-    let sessions = store.list_sessions(20)?;
-    if sessions.is_empty() {
-        println!("セッションはありません。");
-    } else {
-        println!("{:<38} {:<22} 内容", "ID", "日時");
-        println!("{}", "-".repeat(80));
-        for s in &sessions {
-            let preview: String = s
-                .first_user_message
-                .as_deref()
-                .unwrap_or("(空)")
-                .chars()
-                .take(30)
-                .collect();
-            let date = if s.created_at.len() >= 19 {
-                &s.created_at[..19]
-            } else {
-                &s.created_at
-            };
-            println!("{id:<38} {date:<22} {preview}", id = s.id);
-        }
-    }
-    Ok(())
-}
-
-fn handle_tasks_mode(store: &MemoryStore) -> Result<()> {
-    let mgr = bonsai_agent::agent::task::TaskManager::new(store.conn());
-    let tasks = mgr.list_incomplete()?;
-    if tasks.is_empty() {
-        println!("未完了タスクはありません。");
-    } else {
-        for t in &tasks {
-            let state = match t.state {
-                bonsai_agent::agent::task::TaskState::Pending => "待機",
-                bonsai_agent::agent::task::TaskState::InProgress => "実行中",
-                bonsai_agent::agent::task::TaskState::WaitingForHuman => "確認待ち",
-                bonsai_agent::agent::task::TaskState::Completed => "完了",
-                bonsai_agent::agent::task::TaskState::Failed => "失敗",
-            };
-            println!("[{state}] {} (ステップ: {})", t.goal, t.step_log.len());
-            println!("  ID: {}", &t.id[..8]);
-        }
-    }
-    Ok(())
-}
-
-fn handle_dashboard_mode(store: &MemoryStore) -> Result<()> {
-    use bonsai_agent::agent::experiment_log::ExperimentLog;
-    use bonsai_agent::observability::audit::AuditLog;
-
-    println!("╔══════════════════════════════════════════╗");
-    println!("║         bonsai-agent ダッシュボード        ║");
-    println!("╚══════════════════════════════════════════╝");
-
-    // --- Advisor 統計 ---
-    let audit = AuditLog::new(store.conn());
-    let advisor = audit.advisor_stats(None)?;
-    println!("\n📊 Advisor 統計:");
-    if advisor.total_calls == 0 {
-        println!("  (呼出なし)");
-    } else {
-        println!(
-            "  総呼出: {}  検証: {}  再計画: {}",
-            advisor.total_calls, advisor.verification_calls, advisor.replan_calls
-        );
-        println!(
-            "  remote: {}  local: {}",
-            advisor.remote_calls, advisor.local_calls
-        );
-        println!(
-            "  平均プロンプト長: {} 文字  平均remote所要: {} ms",
-            advisor.avg_prompt_len, advisor.avg_remote_duration_ms
-        );
-    }
-
-    // --- Checkpoint 統計 ---
-    let cp_stats = CheckpointManager::stats(store.conn(), None)?;
-    println!("\n💾 Checkpoint 統計:");
-    if cp_stats.total == 0 {
-        println!("  (チェックポイントなし)");
-    } else {
-        println!(
-            "  総CP: {}  ロールバック済: {} ({:.0}%)  git保存: {} ({:.0}%)",
-            cp_stats.total,
-            cp_stats.rolled_back,
-            cp_stats.rollback_rate() * 100.0,
-            cp_stats.with_git_ref,
-            cp_stats.git_capture_rate() * 100.0,
-        );
-    }
-
-    // --- 実験（Lab）統計 ---
-    let experiments = ExperimentLog::recent_experiments(store.conn(), 20)?;
-    println!("\n🧪 Lab 実験 (直近{}件):", experiments.len());
-    if experiments.is_empty() {
-        println!("  (実験なし)");
-    } else {
-        let accepted = experiments.iter().filter(|e| e.accepted).count();
-        let rejected = experiments.len() - accepted;
-        let best_delta = experiments
-            .iter()
-            .map(|e| e.delta)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let worst_delta = experiments
-            .iter()
-            .map(|e| e.delta)
-            .fold(f64::INFINITY, f64::min);
-        println!(
-            "  承認: {} / 却下: {} (承認率 {:.0}%)",
-            accepted,
-            rejected,
-            accepted as f64 / experiments.len() as f64 * 100.0
-        );
-        println!(
-            "  最良delta: {:+.4}  最悪delta: {:+.4}",
-            best_delta, worst_delta
-        );
-        // 直近3件を表示
-        println!("  ─── 直近3件 ───");
-        for exp in experiments.iter().take(3) {
-            let status = if exp.accepted { "✓" } else { "✗" };
-            println!(
-                "  {} {:+.4} | {} | {}",
-                status,
-                exp.delta,
-                exp.mutation_detail.chars().take(40).collect::<String>(),
-                exp.experiment_id.chars().take(8).collect::<String>()
-            );
-        }
-    }
-
-    // --- タスク完了統計 ---
-    let task_stats = audit.task_complete_stats(None)?;
-    println!("\n✅ タスク完了統計:");
-    if task_stats.total_completed == 0 {
-        println!("  (完了タスクなし)");
-    } else {
-        println!(
-            "  完了数: {}  平均ステップ: {:.1}  平均成功率: {:.0}%  平均所要: {:.0} ms",
-            task_stats.total_completed,
-            task_stats.avg_steps,
-            task_stats.avg_tool_success_rate * 100.0,
-            task_stats.avg_duration_ms,
-        );
-        if !task_stats.recent_summaries.is_empty() {
-            println!("  ─── 直近タスク ───");
-            for summary in &task_stats.recent_summaries {
-                println!("  ・{}", summary.chars().take(60).collect::<String>());
-            }
-        }
-    }
-
-    // --- 監査ログ概要 ---
-    let audit_count = audit.count()?;
-    println!("\n📋 監査ログ: {} 件", audit_count);
-
-    Ok(())
-}
-
-fn handle_checkpoints_mode(store: &MemoryStore) -> Result<()> {
-    let all = CheckpointManager::load_persisted(store.conn(), None)?;
-    if all.is_empty() {
-        println!("チェックポイントなし");
-        return Ok(());
-    }
-    let stats = CheckpointManager::stats(store.conn(), None)?;
-    println!(
-        "=== チェックポイント一覧 ({} 件, ロールバック率 {:.0}%) ===",
-        stats.total,
-        stats.rollback_rate() * 100.0
-    );
-    for cp in &all {
-        let rb = cp.rolled_back_at.as_deref().unwrap_or("-");
-        let git = cp.git_ref.as_deref().unwrap_or("(変更なし)");
-        println!(
-            "  [{}] {} | git:{} | rb:{} | {}",
-            cp.id, cp.description, git, rb, cp.timestamp
-        );
-    }
-    Ok(())
-}
-
-fn handle_rollback_mode(store: &MemoryStore, cp_id: i64) -> Result<()> {
-    let all = CheckpointManager::load_persisted(store.conn(), None)?;
-    let cp = all
-        .iter()
-        .find(|c| c.id == cp_id)
-        .ok_or_else(|| anyhow::anyhow!("チェックポイント {} が見つかりません", cp_id))?;
-    if cp.git_ref.is_none() {
-        println!(
-            "チェックポイント {} にはgit stashがありません（変更なしでした）",
-            cp_id
-        );
-        return Ok(());
-    }
-    // DB+gitで直接ロールバック実行
-    let git_ref = cp.git_ref.as_deref().expect("git_ref確認済み");
-    if let Err(e) = std::process::Command::new("git")
-        .args(["checkout", "."])
-        .output()
-    {
-        eprintln!("git checkout失敗: {e}");
-    }
-    let success = std::process::Command::new("git")
-        .args(["stash", "apply", git_ref])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    // DB 記録
-    let now = chrono::Utc::now().to_rfc3339();
-    store.conn().execute(
-        "UPDATE checkpoints SET rolled_back_at = ?1 WHERE id = ?2",
-        rusqlite::params![&now, cp_id],
-    )?;
-    if success {
-        println!(
-            "チェックポイント {} にロールバックしました: {}",
-            cp_id, cp.description
-        );
-    } else {
-        println!("ロールバック失敗: git stash apply {} がエラー", git_ref);
-    }
-    Ok(())
-}
-
-fn handle_audit_mode(store: &MemoryStore) -> Result<()> {
-    let audit = bonsai_agent::observability::audit::AuditLog::new(store.conn());
-    let entries = audit.recent(50)?;
-    if entries.is_empty() {
-        println!("監査ログはありません。");
-    } else {
-        for entry in entries.iter().rev() {
-            let ts = if entry.timestamp.len() >= 19 {
-                &entry.timestamp[..19]
-            } else {
-                &entry.timestamp
-            };
-            let sid = entry.session_id.as_deref().unwrap_or("-");
-            println!(
-                "{ts}  [{typ}]  session={sid}",
-                typ = entry.action_type,
-                sid = &sid[..8.min(sid.len())],
-            );
-            println!("  {}", entry.action_data);
-        }
-    }
-    Ok(())
-}
-
 fn handle_resume_mode(ctx: &AppContext, store: &MemoryStore, resume_id: &str) -> Result<()> {
     let sessions = store.list_sessions(100)?;
     let matched = sessions.iter().find(|s| s.id.starts_with(resume_id));
@@ -1108,11 +536,17 @@ fn handle_resume_mode(ctx: &AppContext, store: &MemoryStore, resume_id: &str) ->
     }
     println!("\n--- 続きからどうぞ ---\n");
 
-    let backend = create_backend(ctx);
-    run_repl_stdio(ctx, store, &*backend, &mut session)
+    let backend: std::sync::Arc<dyn LlmBackend> = create_backend(ctx).into();
+    run_repl_stdio(ctx, store, backend, &mut session)
 }
 
 fn handle_exec_mode(ctx: &AppContext, store: &MemoryStore, input: &str) -> Result<()> {
+    let mut fast_path = bonsai_agent::agent::fast_path::FastPathDispatcher::with_default_rules();
+    if let Some(fast_resp) = fast_path.try_handle(input) {
+        println!("{fast_resp}");
+        return Ok(());
+    }
+
     let backend = create_backend(ctx);
     let loop_result = run_agent_loop(
         input,
@@ -1141,11 +575,11 @@ fn handle_repl_mode(ctx: &AppContext, store: &MemoryStore) -> Result<()> {
         println!("[接続済み] {}", ctx.server_url);
     }
 
-    let backend = create_backend(ctx);
+    let backend: std::sync::Arc<dyn LlmBackend> = create_backend(ctx).into();
     // [会話継続] fresh session を 1 つ生成し全ターンで共有する。
     // 旧実装は毎ターン独立実行 (None) で履歴を失っていた。
     let mut session = new_session_with_system(&ctx.config);
-    run_repl_stdio(ctx, store, &*backend, &mut session)
+    run_repl_stdio(ctx, store, backend, &mut session)
 }
 
 /// stdin/stdout を lib 側の会話継続 REPL (`run_repl`) へ橋渡しする glue。
@@ -1153,7 +587,7 @@ fn handle_repl_mode(ctx: &AppContext, store: &MemoryStore) -> Result<()> {
 fn run_repl_stdio(
     ctx: &AppContext,
     store: &MemoryStore,
-    backend: &dyn LlmBackend,
+    backend: std::sync::Arc<dyn LlmBackend>,
     session: &mut bonsai_agent::domain::conversation::Session,
 ) -> Result<()> {
     let stdin = io::stdin();
@@ -1161,15 +595,110 @@ fn run_repl_stdio(
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
+    let is_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let db_path = store.path().map(|s| s.to_string());
+
+    // 外部知覚センサー (SensorHub) の常駐起動
+    let sensors_cfg = &ctx.app_config.sensors;
+    if sensors_cfg.enabled {
+        let mut sensors: Vec<std::sync::Arc<dyn bonsai_agent::agent::sensors::Sensor>> = Vec::new();
+
+        if sensors_cfg.file_watch {
+            let watch_dir =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            sensors.push(std::sync::Arc::new(
+                bonsai_agent::agent::sensors::FileWatchSensor::new("workspace", watch_dir),
+            ));
+        }
+
+        if sensors_cfg.idle_detection {
+            sensors.push(std::sync::Arc::new(
+                bonsai_agent::agent::sensors::IdleSensor::new(std::time::Duration::from_secs(
+                    sensors_cfg.idle_threshold_secs,
+                )),
+            ));
+        }
+
+        // フェーズ2: ウィンドウ監視（config または env override で明示有効化された場合）
+        let window_enabled = bonsai_agent::config::is_window_sensor_enabled_env()
+            .unwrap_or(sensors_cfg.window_focus);
+        if window_enabled {
+            sensors.push(std::sync::Arc::new(
+                bonsai_agent::agent::sensors::WindowChangedSensor::new(
+                    std::time::Duration::from_secs(sensors_cfg.window_cooldown_secs),
+                    bonsai_agent::safety::sensor_filter::AppDenylist::new(
+                        &sensors_cfg.window_denylist,
+                    ),
+                    bonsai_agent::safety::sensor_filter::PrivacyFilter::default(),
+                ),
+            ));
+        }
+
+        let hub = bonsai_agent::agent::sensors::SensorHub::new(sensors);
+        let (sensor_rx, _sensor_handles) = hub.spawn_all_with_permission_check(ctx.cancel.clone());
+
+        let sensor_cancel = ctx.cancel.clone();
+        let sensor_db_path = db_path.clone();
+        std::thread::spawn(move || {
+            let sensor_store = sensor_db_path
+                .as_deref()
+                .and_then(|p| MemoryStore::open(p).ok());
+            let handler = bonsai_agent::agent::sensors::SensorEventHandler::new();
+            while !sensor_cancel.is_cancelled() {
+                if let Ok(event) = sensor_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    handler.handle_event(&event, sensor_store.as_ref());
+                }
+            }
+        });
+    }
+
+    // DMN常駐バックグラウンドスレッドを起動（アイドル時に自発的思考・内省）
+    let vault_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("bonsai-agent")
+        .join("vault");
+    let dream_threshold = std::env::var("BONSAI_DMN_DREAM_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(300.0);
+    let worker = bonsai_agent::agent::dmn::worker::DmnWorker::new(120.0, 30.0, 0.75)
+        .with_vault(vault_path)
+        .with_dream_threshold(dream_threshold);
+    let dmn_backend = backend.clone();
+    let dmn_inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dmn_inbox_clone = dmn_inbox.clone();
+    let mut dmn_runner = bonsai_agent::agent::dmn::worker::DmnRunner::spawn(
+        worker,
+        is_busy.clone(),
+        ctx.cancel.clone(),
+        db_path,
+        move |store| {
+            bonsai_agent::agent::dmn::generator::DmnGenerator::generate_reflection_with_llm(
+                store,
+                Some(&*dmn_backend),
+            )
+        },
+        move |msg| {
+            if let Ok(mut inbox) = dmn_inbox_clone.lock() {
+                inbox.push(msg);
+            }
+        },
+    );
+
     let repl_io = ReplIo {
-        backend,
+        backend: &*backend,
         tools: &ctx.tools,
         path_guard: &ctx.path_guard,
         config: &ctx.config,
         cancel: &ctx.cancel,
         store: Some(store),
+        is_busy: Some(is_busy),
+        dmn_inbox: Some(dmn_inbox),
+        dmn_notify: None,
     };
-    run_repl(&mut reader, &mut writer, session, &repl_io)
+    let res = run_repl(&mut reader, &mut writer, session, &repl_io);
+    dmn_runner.stop();
+    res
 }
 
 // --- ユーティリティ ---

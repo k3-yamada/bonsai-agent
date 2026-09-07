@@ -52,7 +52,6 @@ const WHITELIST_OVER_800: &[&str] = &[
     "src/agent/event_store.rs",
     "src/agent/experiment.rs",
     "src/observability/audit.rs",
-    "src/main.rs",
 ];
 
 /// DEP-001 whitelist — Phase 1 Red baseline で検出された 32 件を許容.
@@ -65,6 +64,7 @@ const WHITELIST_DEP: &[(&str, &str, &str)] = &[];
 /// path string substr match.
 const WHITELIST_EPRINTLN: &[&str] = &[
     "src/main.rs",                    // CLI 出力、operator visibility
+    "src/cli_lab.rs",                 // Lab/Evolve CLI 出力
     "src/bin/longmemeval_bench.rs",   // bench CLI 出力
     "src/agent/experiment.rs",        // Lab 進捗 (log_event 化検討中)
     "src/agent/agent_loop/step.rs",   // step 進捗
