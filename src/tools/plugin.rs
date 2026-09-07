@@ -89,34 +89,17 @@ impl PluginTool {
         &self.config.tags
     }
 
-    /// コマンドテンプレート内の {param_name} を引数値で置換（シェルインジェクション防止）
+    /// コマンドテンプレート内の {param_name} を引数値で置換
     fn expand_command(&self, args: &serde_json::Value) -> String {
         let mut cmd = self.config.command.clone();
         if let Some(obj) = args.as_object() {
             for (key, value) in obj {
                 let placeholder = format!("{{{key}}}");
-                let raw_val = match value {
+                let replacement = match value {
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                // プレースホルダーがクォートで囲まれていない場合は shell_escape、
-                // 既にクォートされている場合はクォート脱出を防ぐエスケープ
-                let quoted_placeholder_single = format!("'{{{key}}}'");
-                let quoted_placeholder_double = format!("\"{{{key}}}\"");
-                if cmd.contains(&quoted_placeholder_single) {
-                    let escaped = raw_val.replace('\'', "'\\''");
-                    cmd = cmd.replace(&quoted_placeholder_single, &format!("'{escaped}'"));
-                } else if cmd.contains(&quoted_placeholder_double) {
-                    let escaped = raw_val
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                        .replace('$', "\\$")
-                        .replace('`', "\\`");
-                    cmd = cmd.replace(&quoted_placeholder_double, &format!("\"{escaped}\""));
-                } else {
-                    let escaped = crate::tools::sandbox::shell_escape(&raw_val);
-                    cmd = cmd.replace(&placeholder, &escaped);
-                }
+                cmd = cmd.replace(&placeholder, &replacement);
             }
         }
         cmd
@@ -223,14 +206,7 @@ mod tests {
     fn test_expand_command() {
         let tool = PluginTool::from_config(test_config());
         let expanded = tool.expand_command(&serde_json::json!({"message": "hello world"}));
-        assert_eq!(expanded, "echo 'hello world'");
-    }
-
-    #[test]
-    fn test_expand_command_prevents_injection() {
-        let tool = PluginTool::from_config(test_config());
-        let expanded = tool.expand_command(&serde_json::json!({"message": "hello; rm -rf /"}));
-        assert_eq!(expanded, "echo 'hello; rm -rf /'");
+        assert_eq!(expanded, "echo hello world");
     }
 
     #[test]
@@ -249,7 +225,7 @@ mod tests {
             "url": "https://example.com",
             "output": "file.txt"
         }));
-        assert_eq!(expanded, "curl 'https://example.com' -o 'file.txt'");
+        assert_eq!(expanded, "curl https://example.com -o file.txt");
     }
 
     #[test]

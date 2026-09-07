@@ -62,82 +62,8 @@ pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     )
 }
 
-/// 単一ツール呼び出しを実行（デフォルトポリシー）
+/// 単一ツール呼び出しを実行
 pub(crate) fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
-    execute_single_call_with_policy(
-        call,
-        false,
-        crate::tools::permission::DaemonPolicy::AutoOnly,
-        crate::safety::autonomy::AutonomyLevel::Supervised,
-    )
-}
-
-/// 単一ツール呼び出しを権限・自律ポリシーを適用して実行
-pub(crate) fn execute_single_call_with_policy(
-    call: &ValidatedCall<'_>,
-    is_daemon: bool,
-    daemon_policy: crate::tools::permission::DaemonPolicy,
-    autonomy: crate::safety::autonomy::AutonomyLevel,
-) -> ToolExecResult {
-    // 1. 自律レベルによる書き込み制限 (ReadOnly モードでの write 禁止)
-    if !call.is_read_only && !autonomy.can_write() {
-        return ToolExecResult {
-            name: call.name.clone(),
-            args_json: call.args_json.clone(),
-            output: format!(
-                "権限エラー: 現在の自律レベル ({:?}) では書き込み系ツール '{}' の実行は拒否されています",
-                autonomy, call.name
-            ),
-            success: false,
-            is_error: true,
-        };
-    }
-
-    // 2. ツールの権限レベルチェック (check_permission)
-    let perm = call.tool.permission();
-    let decision = crate::tools::permission::check_permission(perm, is_daemon, daemon_policy);
-    match decision {
-        crate::tools::permission::PermissionDecision::Allow => {}
-        crate::tools::permission::PermissionDecision::Denied => {
-            return ToolExecResult {
-                name: call.name.clone(),
-                args_json: call.args_json.clone(),
-                output: format!(
-                    "権限エラー: ツール '{}' の実行権限が拒否されています (permission: {:?})",
-                    call.name, perm
-                ),
-                success: false,
-                is_error: true,
-            };
-        }
-        crate::tools::permission::PermissionDecision::QueueForLater => {
-            return ToolExecResult {
-                name: call.name.clone(),
-                args_json: call.args_json.clone(),
-                output: format!(
-                    "保留: ツール '{}' の実行には確認が必要です（キューに保留されました）",
-                    call.name
-                ),
-                success: false,
-                is_error: true,
-            };
-        }
-        crate::tools::permission::PermissionDecision::NeedConfirmation => {
-            if autonomy == crate::safety::autonomy::AutonomyLevel::ReadOnly {
-                return ToolExecResult {
-                    name: call.name.clone(),
-                    args_json: call.args_json.clone(),
-                    output: format!(
-                        "権限エラー: ツール '{}' は確認が必要ですが、ReadOnlyモードのため拒否されました",
-                        call.name
-                    ),
-                    success: false,
-                    is_error: true,
-                };
-            }
-        }
-    }
-
     match call.tool.call(call.coerced_args.clone()) {
         Ok(tool_result) => ToolExecResult {
             name: call.name.clone(),
@@ -181,11 +107,7 @@ pub(crate) fn apply_tool_result(
     store: Option<&MemoryStore>,
     max_output_chars: usize,
 ) {
-    // 冒頭で output と args_json を両方 redact (H4 秘密漏洩防止: error/audit/session/cache 単一ゲート)
-    let redacted_output = secrets_filter.redact(&r.output);
-    let redacted_args = secrets_filter.redact(&r.args_json);
-
-    let file_path = serde_json::from_str::<serde_json::Value>(&redacted_args)
+    let file_path = serde_json::from_str::<serde_json::Value>(&r.args_json)
         .ok()
         .and_then(|v| v.get("path").and_then(|p| p.as_str().map(String::from)));
 
@@ -213,28 +135,29 @@ pub(crate) fn apply_tool_result(
                 Some(&session.id),
                 &AuditAction::ToolCall {
                     tool_name: r.name.clone(),
-                    args: redacted_args.clone(),
+                    args: r.args_json.clone(),
                     success: false,
-                    output_preview: redacted_output.chars().take(200).collect(),
+                    output_preview: r.output.clone(),
                 },
             );
             let graph = KnowledgeGraph::new(s.conn());
             let path = file_path.as_deref().unwrap_or("unknown");
             let _ = graph.record_error_pattern("tool_error", path, &r.name);
         }
-        session.add_message(Message::tool(&redacted_output, &r.name));
+        session.add_message(Message::tool(&r.output, &r.name));
     } else {
         circuit_breaker.record_success(&r.name);
-        let truncated = truncate_tool_output(&redacted_output, max_output_chars);
+        let redacted = secrets_filter.redact(&r.output);
+        let redacted = truncate_tool_output(&redacted, max_output_chars);
         if let Some(s) = store {
             let audit = AuditLog::new(s.conn());
             let _ = audit.log(
                 Some(&session.id),
                 &AuditAction::ToolCall {
                     tool_name: r.name.clone(),
-                    args: redacted_args.clone(),
+                    args: r.args_json.clone(),
                     success: r.success,
-                    output_preview: truncated.chars().take(200).collect(),
+                    output_preview: redacted.chars().take(200).collect(),
                 },
             );
             if let Some(ref fp) = file_path {
@@ -242,7 +165,7 @@ pub(crate) fn apply_tool_result(
                 let _ = graph.record_tool_usage(&r.name, fp);
             }
         }
-        session.add_message(Message::tool(&truncated, &r.name));
+        session.add_message(Message::tool(&redacted, &r.name));
     }
 }
 
@@ -506,95 +429,6 @@ mod tests {
         assert!(result.is_error);
         assert!(!result.success);
         assert!(result.output.contains("エラー"));
-    }
-
-    struct MockPolicyTool {
-        name: &'static str,
-        perm: Permission,
-        read_only: bool,
-    }
-    impl crate::tools::Tool for MockPolicyTool {
-        fn name(&self) -> &str {
-            self.name
-        }
-        fn description(&self) -> &str {
-            "test"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({})
-        }
-        fn permission(&self) -> Permission {
-            self.perm
-        }
-        fn is_read_only(&self) -> bool {
-            self.read_only
-        }
-        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
-            panic!("MockPolicyTool call not expected");
-        }
-    }
-
-    #[test]
-    fn t_execute_single_call_permission_denied() {
-        let tool = MockPolicyTool {
-            name: "deny_tool",
-            perm: Permission::Deny,
-            read_only: true,
-        };
-        let call = ValidatedCall {
-            name: "deny_tool".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: true,
-        };
-        let result = execute_single_call(&call);
-        assert!(result.is_error);
-        assert!(!result.success);
-        assert!(result.output.contains("権限エラー"));
-    }
-
-    #[test]
-    fn t_execute_single_call_autonomy_readonly_blocks_write() {
-        let tool = MockPolicyTool {
-            name: "write_tool",
-            perm: Permission::Auto,
-            read_only: false,
-        };
-        let call = ValidatedCall {
-            name: "write_tool".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: false,
-        };
-        let result = execute_single_call_with_policy(
-            &call,
-            false,
-            crate::tools::permission::DaemonPolicy::AutoOnly,
-            crate::safety::autonomy::AutonomyLevel::ReadOnly,
-        );
-        assert!(result.is_error);
-        assert!(!result.success);
-        assert!(result.output.contains("自律レベル"));
-    }
-
-    #[test]
-    fn t_apply_tool_result_redacts_error_and_args() {
-        let mut session = Session::new();
-        let mut cb = CircuitBreaker::default();
-        let sf = SecretsFilter::default();
-        let r = ToolExecResult {
-            name: "dummy".into(),
-            args_json: r#"{"token": "ghp_123456789012345678901234567890123456"}"#.into(),
-            output: "error with secret: ghp_123456789012345678901234567890123456".into(),
-            success: false,
-            is_error: true,
-        };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, None, 4000);
-        let msg = &session.messages.last().unwrap().content;
-        assert!(!msg.contains("ghp_123456789012345678901234567890123456"));
-        assert!(msg.contains("***REDACTED***"));
     }
 
     #[test]

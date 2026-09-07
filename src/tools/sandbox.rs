@@ -182,7 +182,7 @@ fn read_output(pipe: Option<impl std::io::Read>, max_bytes: usize) -> String {
 }
 
 /// シェルエスケープ（シングルクォートで囲む）
-pub(crate) fn shell_escape(s: &str) -> String {
+fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

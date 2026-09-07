@@ -235,19 +235,6 @@ fn main() -> Result<()> {
     // DB必要モード
     let store = MemoryStore::open(&get_db_path())?;
 
-    if cli.serve {
-        println!(
-            "REST API サーバーを起動します (ポート: {})...",
-            cli.api_port
-        );
-        bonsai_agent::server::start_api_server(&store, cli.api_port);
-        return Ok(());
-    }
-    if cli.mcp_server {
-        bonsai_agent::mcp_server::run_mcp_server(&store);
-        return Ok(());
-    }
-
     if let Some(path) = &cli.ingest {
         let n = bonsai_agent::memory::ingest::ingest_path(&store, path)?;
         println!("ingest 完了: {n} chunk を保存しました ({})", path.display());
