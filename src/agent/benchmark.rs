@@ -2121,6 +2121,7 @@ impl BenchmarkSuite {
                     soul_path: config.soul_path.clone(),
                     n_ctx_budget: config.n_ctx_budget,
                     memory_blocks: config.memory_blocks.clone(),
+                    ..config.clone()
                 };
                 // 項目 225: per-run wallclock 計測。`run_agent_loop` 内 retry 含む total
                 // が論文 (arxiv 2604.14877) の interaction depth 定義と整合する。
@@ -2236,6 +2237,7 @@ impl BenchmarkSuite {
                             soul_path: config.soul_path.clone(),
                             n_ctx_budget: config.n_ctx_budget,
                             memory_blocks: config.memory_blocks.clone(),
+                            ..config.clone()
                         };
                         let inject_result = run_agent_loop(
                             &injected_input,
@@ -2349,6 +2351,7 @@ impl BenchmarkSuite {
                 soul_path: config.soul_path.clone(),
                 n_ctx_budget: config.n_ctx_budget,
                 memory_blocks: config.memory_blocks.clone(),
+                ..config.clone()
             };
 
             let store = MemoryStore::in_memory()?;

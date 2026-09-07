@@ -60,14 +60,14 @@ impl TypedTool for WebFetchTool {
     type Args = WebFetchArgs;
     const NAME: &'static str = "web_fetch";
     const DESCRIPTION: &'static str = super::descriptions::WEB_FETCH;
-    const PERMISSION: Permission = Permission::Auto;
+    const PERMISSION: Permission = Permission::Confirm;
     const READ_ONLY: bool = true;
 
     fn execute(&self, args: WebFetchArgs) -> Result<ToolResult> {
         let url = &args.url;
 
         // SSRF 防御: スキーム、プライベートIP、ループバック、メタデータIPの検証
-        let filter = crate::safety::network::NetworkFilter::allow_all();
+        let filter = crate::safety::network::NetworkFilter::from_env();
         if let Err(e) = crate::safety::network::validate_fetch_url(url, &filter) {
             return Ok(ToolResult {
                 output: format!("セキュリティエラー: {e}"),
@@ -320,7 +320,7 @@ mod tests {
     fn test_web_fetch_metadata() {
         let tool = WebFetchTool;
         assert_eq!(tool.name(), "web_fetch");
-        assert_eq!(tool.permission(), Permission::Auto);
+        assert_eq!(tool.permission(), Permission::Confirm);
     }
 
     #[test]

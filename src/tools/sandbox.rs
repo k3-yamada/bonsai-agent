@@ -45,7 +45,6 @@ pub struct DirectSandbox;
 
 impl Sandbox for DirectSandbox {
     fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult> {
-        // macOSではulimitをシェル経由で適用
         let full_command = if args.is_empty() {
             command.to_string()
         } else {
@@ -59,9 +58,12 @@ impl Sandbox for DirectSandbox {
             )
         };
 
+        // ulimit をシェル経由で適用 (ファイルサイズ上限 256MB, CPU 時間 60秒)
+        let limited_command = format!("ulimit -f 524288 -t 60 2>/dev/null; {full_command}");
+
         let child = Command::new("sh")
             .arg("-c")
-            .arg(&full_command)
+            .arg(&limited_command)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn();

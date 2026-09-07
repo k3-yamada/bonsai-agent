@@ -157,6 +157,19 @@ fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     ctrlc_handler(cancel.clone());
 
+    let autonomy_level = if let Some(ref a) = cli.autonomy {
+        a.parse::<bonsai_agent::safety::autonomy::AutonomyLevel>()
+            .unwrap_or_else(|e| {
+                eprintln!("警告: {e}。デフォルトの supervised を使用します。");
+                bonsai_agent::safety::autonomy::AutonomyLevel::Supervised
+            })
+    } else {
+        app_config
+            .safety
+            .autonomy
+            .unwrap_or(bonsai_agent::safety::autonomy::AutonomyLevel::Supervised)
+    };
+
     let ctx = AppContext {
         tools,
         path_guard: PathGuard::new(app_config.safety.deny_paths.clone()),
@@ -188,6 +201,7 @@ fn main() -> Result<()> {
                 None
             },
             memory_blocks: app_config.memory.blocks.clone(),
+            autonomy: autonomy_level,
             ..Default::default()
         },
         cancel,
@@ -236,15 +250,19 @@ fn main() -> Result<()> {
     let store = MemoryStore::open(&get_db_path())?;
 
     if cli.serve {
+        let api_key = cli
+            .api_key
+            .as_deref()
+            .or(ctx.app_config.model.api_key.as_deref());
         println!(
             "REST API サーバーを起動します (ポート: {})...",
             cli.api_port
         );
-        bonsai_agent::server::start_api_server(&store, cli.api_port);
+        bonsai_agent::server::start_api_server(&store, cli.api_port, api_key);
         return Ok(());
     }
     if cli.mcp_server {
-        bonsai_agent::mcp_server::run_mcp_server(&store);
+        bonsai_agent::mcp_server::run_mcp_server_with_guard(&store, &ctx.path_guard);
         return Ok(());
     }
 

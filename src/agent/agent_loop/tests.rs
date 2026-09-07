@@ -1078,6 +1078,9 @@ fn test_execute_validated_calls_empty() {
         None,
         &mut cache,
         &mut cycle,
+        false,
+        crate::tools::permission::DaemonPolicy::AutoOnly,
+        crate::safety::autonomy::AutonomyLevel::Supervised,
     );
     assert!(result.is_empty());
 }

@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long)]
     pub exec: Option<String>,
 
+    /// 自律性レベル (readonly, supervised, full)
+    #[arg(long)]
+    pub autonomy: Option<String>,
+
     /// モックモード（LLMなしでテスト）
     #[arg(long)]
     pub mock: bool,

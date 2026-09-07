@@ -62,7 +62,8 @@ pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     )
 }
 
-/// 単一ツール呼び出しを実行（デフォルトポリシー）
+/// 単一ツール呼び出しを実行（デフォルトポリシー、テスト用）
+#[cfg(test)]
 pub(crate) fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
     execute_single_call_with_policy(
         call,
@@ -123,13 +124,13 @@ pub(crate) fn execute_single_call_with_policy(
             };
         }
         crate::tools::permission::PermissionDecision::NeedConfirmation => {
-            if autonomy == crate::safety::autonomy::AutonomyLevel::ReadOnly {
+            if !matches!(autonomy, crate::safety::autonomy::AutonomyLevel::Full) {
                 return ToolExecResult {
                     name: call.name.clone(),
                     args_json: call.args_json.clone(),
                     output: format!(
-                        "権限エラー: ツール '{}' は確認が必要ですが、ReadOnlyモードのため拒否されました",
-                        call.name
+                        "確認エラー: ツール '{}' (権限: {:?}) の実行には確認が必要です。現在の自律レベル ({:?}) では未確認実行は拒否されました",
+                        call.name, perm, autonomy
                     ),
                     success: false,
                     is_error: true,
@@ -157,7 +158,12 @@ pub(crate) fn execute_single_call_with_policy(
 }
 
 /// 読取専用ツールをstd::thread::scopeで並列実行
-pub(crate) fn execute_read_batch_parallel(batch: &[ValidatedCall<'_>]) -> Vec<ToolExecResult> {
+pub(crate) fn execute_read_batch_parallel(
+    batch: &[ValidatedCall<'_>],
+    is_daemon: bool,
+    daemon_policy: crate::tools::permission::DaemonPolicy,
+    autonomy: crate::safety::autonomy::AutonomyLevel,
+) -> Vec<ToolExecResult> {
     log_event(
         LogLevel::Debug,
         "parallel",
@@ -166,7 +172,11 @@ pub(crate) fn execute_read_batch_parallel(batch: &[ValidatedCall<'_>]) -> Vec<To
     std::thread::scope(|s| {
         let handles: Vec<_> = batch
             .iter()
-            .map(|call| s.spawn(move || execute_single_call(call)))
+            .map(|call| {
+                s.spawn(move || {
+                    execute_single_call_with_policy(call, is_daemon, daemon_policy, autonomy)
+                })
+            })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
@@ -313,6 +323,7 @@ fn parse_nudge_files(nudge: &str) -> Vec<String> {
 }
 
 /// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_validated_calls(
     calls: &[ValidatedCall<'_>],
     session: &mut Session,
@@ -321,6 +332,9 @@ pub(crate) fn execute_validated_calls(
     store: Option<&MemoryStore>,
     cache: &mut ToolResultCache,
     cycle_detector: &mut MultiFileEditCycleDetector,
+    is_daemon: bool,
+    daemon_policy: crate::tools::permission::DaemonPolicy,
+    autonomy: crate::safety::autonomy::AutonomyLevel,
 ) -> Vec<String> {
     let mut step_tools: Vec<String> = Vec::new();
     let mut i = 0;
@@ -331,7 +345,8 @@ pub(crate) fn execute_validated_calls(
         }
         let read_batch = &calls[batch_start..i];
         if read_batch.len() >= 2 {
-            let results = execute_read_batch_parallel(read_batch);
+            let results =
+                execute_read_batch_parallel(read_batch, is_daemon, daemon_policy, autonomy);
             for r in results {
                 if !r.is_error
                     && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
@@ -378,7 +393,7 @@ pub(crate) fn execute_validated_calls(
                     );
                     continue;
                 }
-                let r = execute_single_call(call);
+                let r = execute_single_call_with_policy(call, is_daemon, daemon_policy, autonomy);
                 if !r.is_error
                     && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
                 {
@@ -399,7 +414,7 @@ pub(crate) fn execute_validated_calls(
         }
         if i < calls.len() && !calls[i].is_read_only {
             let write_call = &calls[i];
-            let r = execute_single_call(write_call);
+            let r = execute_single_call_with_policy(write_call, is_daemon, daemon_policy, autonomy);
             // Step 11: 書き込み成功時に cycle 検出
             if !r.is_error {
                 record_edit_and_nudge(
@@ -429,89 +444,29 @@ mod tests {
     use crate::safety::secrets::SecretsFilter;
     use crate::tools::permission::Permission;
 
-    struct DummyTool;
-    impl crate::tools::Tool for DummyTool {
-        fn name(&self) -> &str {
-            "dummy"
-        }
-        fn description(&self) -> &str {
-            "test"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn permission(&self) -> Permission {
-            Permission::Auto
-        }
-        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
-            Ok(crate::tools::ToolResult {
-                output: "ok".into(),
-                success: true,
-            })
-        }
-        fn is_read_only(&self) -> bool {
-            true
-        }
-    }
-
-    struct ErrorTool;
-    impl crate::tools::Tool for ErrorTool {
-        fn name(&self) -> &str {
-            "error_tool"
-        }
-        fn description(&self) -> &str {
-            "fails"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn permission(&self) -> Permission {
-            Permission::Auto
-        }
-        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
-            anyhow::bail!("test error")
-        }
-        fn is_read_only(&self) -> bool {
-            true
-        }
-    }
-
-    #[test]
-    fn t_execute_single_call_success() {
-        let tool = DummyTool;
-        let call = ValidatedCall {
-            name: "dummy".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: true,
-        };
-        let result = execute_single_call(&call);
-        assert!(!result.is_error);
-        assert!(result.success);
-        assert_eq!(result.output, "ok");
-    }
-
-    #[test]
-    fn t_execute_single_call_error() {
-        let tool = ErrorTool;
-        let call = ValidatedCall {
-            name: "error_tool".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: true,
-        };
-        let result = execute_single_call(&call);
-        assert!(result.is_error);
-        assert!(!result.success);
-        assert!(result.output.contains("エラー"));
-    }
-
     struct MockPolicyTool {
         name: &'static str,
         perm: Permission,
         read_only: bool,
+        fail: bool,
+    }
+    impl MockPolicyTool {
+        fn ok(name: &'static str, perm: Permission, read_only: bool) -> Self {
+            Self {
+                name,
+                perm,
+                read_only,
+                fail: false,
+            }
+        }
+        fn fail(name: &'static str) -> Self {
+            Self {
+                name,
+                perm: Permission::Auto,
+                read_only: true,
+                fail: true,
+            }
+        }
     }
     impl crate::tools::Tool for MockPolicyTool {
         fn name(&self) -> &str {
@@ -530,53 +485,87 @@ mod tests {
             self.read_only
         }
         fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
-            panic!("MockPolicyTool call not expected");
+            if self.fail {
+                anyhow::bail!("test error");
+            }
+            Ok(crate::tools::ToolResult {
+                output: "ok".into(),
+                success: true,
+            })
+        }
+    }
+
+    fn mock_call<'a>(name: &'a str, tool: &'a MockPolicyTool) -> ValidatedCall<'a> {
+        ValidatedCall {
+            name: name.into(),
+            args_json: "{}".into(),
+            coerced_args: serde_json::json!({}),
+            tool,
+            is_read_only: tool.read_only,
         }
     }
 
     #[test]
-    fn t_execute_single_call_permission_denied() {
-        let tool = MockPolicyTool {
-            name: "deny_tool",
-            perm: Permission::Deny,
-            read_only: true,
-        };
-        let call = ValidatedCall {
-            name: "deny_tool".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: true,
-        };
+    fn t_execute_single_call_success() {
+        let tool = MockPolicyTool::ok("dummy", Permission::Auto, true);
+        let call = mock_call("dummy", &tool);
         let result = execute_single_call(&call);
-        assert!(result.is_error);
-        assert!(!result.success);
-        assert!(result.output.contains("権限エラー"));
+        assert!(!result.is_error && result.success && result.output == "ok");
+    }
+
+    #[test]
+    fn t_execute_single_call_error() {
+        let tool = MockPolicyTool::fail("error_tool");
+        let call = mock_call("error_tool", &tool);
+        let result = execute_single_call(&call);
+        assert!(result.is_error && !result.success && result.output.contains("エラー"));
+    }
+
+    #[test]
+    fn t_execute_single_call_permission_denied() {
+        let tool = MockPolicyTool::ok("deny_tool", Permission::Deny, true);
+        let call = mock_call("deny_tool", &tool);
+        let result = execute_single_call(&call);
+        assert!(result.is_error && !result.success && result.output.contains("権限エラー"));
     }
 
     #[test]
     fn t_execute_single_call_autonomy_readonly_blocks_write() {
-        let tool = MockPolicyTool {
-            name: "write_tool",
-            perm: Permission::Auto,
-            read_only: false,
-        };
-        let call = ValidatedCall {
-            name: "write_tool".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: false,
-        };
+        let tool = MockPolicyTool::ok("write_tool", Permission::Auto, false);
+        let call = mock_call("write_tool", &tool);
         let result = execute_single_call_with_policy(
             &call,
             false,
             crate::tools::permission::DaemonPolicy::AutoOnly,
             crate::safety::autonomy::AutonomyLevel::ReadOnly,
         );
-        assert!(result.is_error);
-        assert!(!result.success);
-        assert!(result.output.contains("自律レベル"));
+        assert!(result.is_error && !result.success && result.output.contains("自律レベル"));
+    }
+
+    #[test]
+    fn t_execute_single_call_confirm_supervised_blocks() {
+        let tool = MockPolicyTool::ok("confirm_tool", Permission::Confirm, false);
+        let call = mock_call("confirm_tool", &tool);
+        let result = execute_single_call_with_policy(
+            &call,
+            false,
+            crate::tools::permission::DaemonPolicy::AutoOnly,
+            crate::safety::autonomy::AutonomyLevel::Supervised,
+        );
+        assert!(result.is_error && !result.success && result.output.contains("確認エラー"));
+    }
+
+    #[test]
+    fn t_execute_single_call_confirm_full_allows() {
+        let tool = MockPolicyTool::ok("confirm_tool", Permission::Confirm, false);
+        let call = mock_call("confirm_tool", &tool);
+        let result = execute_single_call_with_policy(
+            &call,
+            false,
+            crate::tools::permission::DaemonPolicy::AutoOnly,
+            crate::safety::autonomy::AutonomyLevel::Full,
+        );
+        assert!(!result.is_error && result.success && result.output == "ok");
     }
 
     #[test]
@@ -641,7 +630,7 @@ mod tests {
 
     #[test]
     fn t_validated_call_fields() {
-        let tool = DummyTool;
+        let tool = MockPolicyTool::ok("test", Permission::Auto, true);
         let call = ValidatedCall {
             name: "test".into(),
             args_json: r#"{"key":"val"}"#.into(),

@@ -20,6 +20,21 @@ impl NetworkFilter {
             block_by_default: true,
         }
     }
+    /// 環境変数 `BONSAI_ALLOWED_DOMAINS`（カンマ区切り）からフィルタを生成。
+    /// 設定されていれば strict、未設定なら default（全許可、SSRF防護は常時有効）
+    pub fn from_env() -> Self {
+        if let Ok(domains_str) = std::env::var("BONSAI_ALLOWED_DOMAINS") {
+            let domains: Vec<&str> = domains_str
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !domains.is_empty() {
+                return Self::strict(&domains);
+            }
+        }
+        Self::default()
+    }
     pub fn is_allowed(&self, url: &str) -> bool {
         if !self.block_by_default {
             return true;
@@ -34,40 +49,42 @@ impl NetworkFilter {
 }
 
 /// URL がプライベート IP やループバック等の SSRF 攻撃対象でないか検証
+///
+/// 名前解決には OS の `ToSocketAddrs` を使用し、DNS 失敗時は fail-closed (Err) となる。
 pub fn validate_fetch_url(url_str: &str, filter: &NetworkFilter) -> Result<(), String> {
-    // 1. スキーム検査 (http / https のみ許可)
-    let (scheme, rest) = if let Some(idx) = url_str.find("://") {
-        (&url_str[..idx], &url_str[idx + 3..])
-    } else {
-        return Err("URLスキームが指定されていません (http:// または https:// が必要)".to_string());
-    };
+    validate_fetch_url_with_resolver(url_str, filter, |host, port| {
+        (host, port)
+            .to_socket_addrs()
+            .map(|iter| iter.map(|s| s.ip()).collect())
+    })
+}
 
-    let scheme_lower = scheme.to_lowercase();
-    if scheme_lower != "http" && scheme_lower != "https" {
+/// リゾルバ関数を注入可能な URL 検証関数（テストおよびカスタム DNS 検査用）
+pub fn validate_fetch_url_with_resolver<F>(
+    url_str: &str,
+    filter: &NetworkFilter,
+    resolve: F,
+) -> Result<(), String>
+where
+    F: Fn(&str, u16) -> std::io::Result<Vec<IpAddr>>,
+{
+    // 1. WHATWG 準拠の URL パース (user:pass@host 等の userinfo を正しく分離)
+    let parsed = reqwest::Url::parse(url_str).map_err(|e| format!("無効なURL形式です: {e}"))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
         return Err(format!("未許可のスキーム: '{scheme}' (http/httpsのみ許可)"));
     }
 
-    // 2. ホスト名抽出
-    let host_part = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host_and_port = host_part.trim();
-    if host_and_port.is_empty() {
-        return Err("ホスト名が空です".to_string());
-    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "ホスト名が空です".to_string())?;
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
-    let host = if host_and_port.starts_with('[') {
-        // IPv6 リテラル [::1]:8080
-        host_and_port
-            .split(']')
-            .next()
-            .map(|s| s.trim_start_matches('['))
-            .unwrap_or("")
-    } else {
-        host_and_port.split(':').next().unwrap_or("")
-    };
-
+    // 2. ループバック・ローカルホスト名の即時拒否
     let host_lower = host.to_lowercase();
-
-    // 3. ループバック・ローカルホスト名の即時拒否
     if host_lower == "localhost"
         || host_lower.ends_with(".localhost")
         || host_lower.ends_with(".local")
@@ -78,15 +95,16 @@ pub fn validate_fetch_url(url_str: &str, filter: &NetworkFilter) -> Result<(), S
         ));
     }
 
-    // 4. NetworkFilter のチェック
+    // 3. NetworkFilter のチェック
     if !filter.is_allowed(url_str) {
         return Err(format!(
             "ドメインフィルタによりアクセスがブロックされました: '{host}'"
         ));
     }
 
-    // 5. IP アドレス直接指定の場合の検証
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // 4. IP アドレス直接指定の場合の検証 (IPv6 の角括弧を除去してパース)
+    let clean_ip_str = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = clean_ip_str.parse::<IpAddr>() {
         if is_private_or_restricted_ip(&ip) {
             return Err(format!(
                 "プライベート/制限されたIPへのアクセスは拒否されました: {ip}"
@@ -95,26 +113,22 @@ pub fn validate_fetch_url(url_str: &str, filter: &NetworkFilter) -> Result<(), S
         return Ok(());
     }
 
-    // 6. DNS 解決による全 IP のプライベートチェック (DNS リバインディング/イントラネット遮断)
-    let port = if let Some(p_str) = host_part.split(':').nth(1) {
-        p_str
-            .parse::<u16>()
-            .unwrap_or(if scheme_lower == "https" { 443 } else { 80 })
-    } else if scheme_lower == "https" {
-        443
-    } else {
-        80
-    };
+    // 5. DNS 解決による全 IP のプライベートチェック (DNS リバインディング/イントラネット遮断)
+    // DNS 解決失敗時は fail-closed (SSRF 穴防止)
+    let ips = resolve(host, port)
+        .map_err(|e| format!("ホスト '{host}' の名前解決に失敗しました (fail-closed): {e}"))?;
 
-    // DNS 解決を試行（解決不能な場合は offline/モック環境等も考慮し、既知パブリック以外は拒否）
-    if let Ok(addrs) = (host, port).to_socket_addrs() {
-        for socket_addr in addrs {
-            let ip = socket_addr.ip();
-            if is_private_or_restricted_ip(&ip) {
-                return Err(format!(
-                    "名前解決されたIPがプライベート/制限対象です: {ip} (ホスト: {host})"
-                ));
-            }
+    if ips.is_empty() {
+        return Err(format!(
+            "ホスト '{host}' の名前解決結果が空です (fail-closed)"
+        ));
+    }
+
+    for ip in ips {
+        if is_private_or_restricted_ip(&ip) {
+            return Err(format!(
+                "名前解決されたIPがプライベート/制限対象です: {ip} (ホスト: {host})"
+            ));
         }
     }
 
@@ -249,14 +263,92 @@ mod tests {
         assert!(validate_fetch_url("ftp://example.com", &filter).is_err());
         assert!(validate_fetch_url("javascript:alert(1)", &filter).is_err());
 
-        // 正常なパブリック URL
-        assert!(validate_fetch_url("https://example.com/data", &filter).is_ok());
+        // 正常なパブリック IP URL (DNS 不要)
+        assert!(validate_fetch_url("https://93.184.216.34/data", &filter).is_ok());
+        assert!(validate_fetch_url("https://1.1.1.1/dns-query", &filter).is_ok());
+
+        // userinfo (user:pass@host) 形式でのパストラバーサル・SSRF 試行
+        assert!(validate_fetch_url("http://user:pass@127.0.0.1:8080/admin", &filter).is_err());
+        assert!(validate_fetch_url("http://admin:secret@192.168.1.1/cfg", &filter).is_err());
+        assert!(validate_fetch_url("http://user:pass@localhost:3000/", &filter).is_err());
+        assert!(validate_fetch_url("http://user:pass@93.184.216.34/data", &filter).is_ok());
+
+        // DNS 解決失敗時は fail-closed (Err)
+        assert!(
+            validate_fetch_url("https://nonexistent-nxdomain-test-domain.invalid/", &filter)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn t_validate_fetch_url_resolver_mock() {
+        let filter = NetworkFilter::allow_all();
+
+        // 1. パブリック IP に解決される正常ケース
+        let res = validate_fetch_url_with_resolver("https://example.com/api", &filter, |h, _| {
+            assert_eq!(h, "example.com");
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        });
+        assert!(res.is_ok());
+
+        // 2. プライベート IP に解決されるケース (DNS リバインディング等) -> 遮断
+        let res =
+            validate_fetch_url_with_resolver("https://rebinding.evil.com/leak", &filter, |_, _| {
+                Ok(vec!["127.0.0.1".parse().unwrap()])
+            });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("プライベート/制限対象"));
+
+        // 3. 複数 A/AAAA レコードのうち 1 つでもプライベート IP が混入している場合 -> 遮断
+        let res =
+            validate_fetch_url_with_resolver("https://dual-ip.evil.com/leak", &filter, |_, _| {
+                Ok(vec![
+                    "93.184.216.34".parse().unwrap(),
+                    "10.0.0.1".parse().unwrap(),
+                ])
+            });
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("プライベート/制限対象"));
+
+        // 4. 名前解決エラー時の fail-closed 検証
+        let res =
+            validate_fetch_url_with_resolver("https://failed-dns.example.com/", &filter, |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "NXDOMAIN",
+                ))
+            });
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .contains("名前解決に失敗しました (fail-closed)")
+        );
+
+        // 5. userinfo 付きでもホストが正しくリゾルバに渡されること
+        let res = validate_fetch_url_with_resolver(
+            "https://user:password@target.example.org:8443/resource",
+            &filter,
+            |h, port| {
+                assert_eq!(h, "target.example.org");
+                assert_eq!(port, 8443);
+                Ok(vec!["93.184.216.34".parse().unwrap()])
+            },
+        );
+        assert!(res.is_ok());
     }
 
     #[test]
     fn t_validate_fetch_url_respects_strict_filter() {
         let filter = NetworkFilter::strict(&["huggingface.co"]);
-        assert!(validate_fetch_url("https://huggingface.co/model", &filter).is_ok());
-        assert!(validate_fetch_url("https://evil.com/leak", &filter).is_err());
+        let res_ok =
+            validate_fetch_url_with_resolver("https://huggingface.co/model", &filter, |_, _| {
+                Ok(vec!["93.184.216.34".parse().unwrap()])
+            });
+        assert!(res_ok.is_ok());
+
+        let res_err = validate_fetch_url_with_resolver("https://evil.com/leak", &filter, |_, _| {
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        });
+        assert!(res_err.is_err());
     }
 }

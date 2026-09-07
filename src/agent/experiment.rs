@@ -407,22 +407,7 @@ fn default_prompt_rules() -> Vec<PromptRuleCandidate> {
 
 /// 変異をAgentConfigに適用
 pub fn apply_mutation(base_config: &AgentConfig, mutation: &Mutation) -> AgentConfig {
-    let mut config = AgentConfig {
-        max_iterations: base_config.max_iterations,
-        max_retries: base_config.max_retries,
-        max_tools_selected: base_config.max_tools_selected,
-        system_prompt: base_config.system_prompt.clone(),
-        advisor: base_config.advisor.clone(),
-        auto_checkpoint: base_config.auto_checkpoint,
-        max_tool_output_chars: base_config.max_tool_output_chars,
-        max_tools_in_context: base_config.max_tools_in_context,
-        max_mcp_tools_in_context: base_config.max_mcp_tools_in_context,
-        base_inference: base_config.base_inference.clone(),
-        task_timeout: base_config.task_timeout,
-        soul_path: base_config.soul_path.clone(),
-        n_ctx_budget: base_config.n_ctx_budget,
-        memory_blocks: base_config.memory_blocks.clone(),
-    };
+    let mut config = base_config.clone();
 
     match &mutation.apply {
         MutationAction::AddPromptRule(rule) => {
@@ -2006,6 +1991,7 @@ mod tests {
             soul_path: None,
             n_ctx_budget: None,
             memory_blocks: Vec::new(),
+            ..Default::default()
         }
     }
 
