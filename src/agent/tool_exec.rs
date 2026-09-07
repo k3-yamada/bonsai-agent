@@ -190,6 +190,9 @@ pub(crate) fn execute_single_call_with_policy(
 }
 
 /// 読取専用ツールをstd::thread::scopeで並列実行
+///
+/// ただし、Confirm 権限を要するツールが含まれ対話コールバックが存在する場合は、
+/// stdin / ターミナル入力の競合（プロンプト交錯）を防ぐため逐次（直列）実行する。
 pub(crate) fn execute_read_batch_parallel(
     batch: &[ValidatedCall<'_>],
     is_daemon: bool,
@@ -197,6 +200,32 @@ pub(crate) fn execute_read_batch_parallel(
     autonomy: crate::safety::autonomy::AutonomyLevel,
     confirm_callback: Option<ConfirmCheckRef<'_>>,
 ) -> Vec<ToolExecResult> {
+    let has_confirm = batch
+        .iter()
+        .any(|call| call.tool.permission() == crate::tools::permission::Permission::Confirm);
+    if has_confirm && confirm_callback.is_some() {
+        log_event(
+            LogLevel::Debug,
+            "sequential",
+            &format!(
+                "Confirm要件を含む読取ツール{}件を直列実行（stdin競合回避）",
+                batch.len()
+            ),
+        );
+        return batch
+            .iter()
+            .map(|call| {
+                execute_single_call_with_policy(
+                    call,
+                    is_daemon,
+                    daemon_policy,
+                    autonomy,
+                    confirm_callback,
+                )
+            })
+            .collect();
+    }
+
     log_event(
         LogLevel::Debug,
         "parallel",
@@ -295,15 +324,16 @@ pub(crate) fn apply_tool_result(
     }
 }
 
-/// 編集ツール呼出から file_path を抽出
+/// 編集ツール呼出から path を抽出
 ///
-/// `file_write`/`multi_edit` のみ対象。`args["file_path"]` を返す。
-/// MultiEdit のように複数 path を扱うツールは args["file_path"] 単一値前提。
+/// `file_write`/`multi_edit` のみ対象。`args["path"]` または後方互換用 `args["file_path"]` を返す。
+/// MultiEdit のように複数 path を扱うツールは args 単一値前提。
 fn extract_edit_path(name: &str, args: &serde_json::Value) -> Option<String> {
     if name != "file_write" && name != "multi_edit" {
         return None;
     }
-    args.get("file_path")
+    args.get("path")
+        .or_else(|| args.get("file_path"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }

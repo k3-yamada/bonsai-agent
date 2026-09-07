@@ -353,3 +353,65 @@ fn t_record_edit_and_nudge_no_audit_without_store_and_non_edit() {
     }
     assert_eq!(det2.nudge_fire_count(), 0);
 }
+
+#[test]
+fn t_execute_read_batch_parallel_confirm_serialized() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let tool1 = MockPolicyTool::ok("web_fetch_1", Permission::Confirm, true);
+    let tool2 = MockPolicyTool::ok("web_fetch_2", Permission::Confirm, true);
+    let call1 = mock_call("web_fetch_1", &tool1);
+    let call2 = mock_call("web_fetch_2", &tool2);
+
+    let batch = vec![call1, call2];
+
+    let concurrent_count = AtomicUsize::new(0);
+    let max_concurrent = AtomicUsize::new(0);
+    let total_calls = AtomicUsize::new(0);
+
+    let callback = |_name: &str, _args: &str| -> bool {
+        let current = concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
+        max_concurrent.fetch_max(current, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        concurrent_count.fetch_sub(1, Ordering::SeqCst);
+        total_calls.fetch_add(1, Ordering::SeqCst);
+        true
+    };
+
+    let cb_ref: ConfirmCheckRef<'_> = &callback;
+    let results = execute_read_batch_parallel(
+        &batch,
+        false,
+        DaemonPolicy::AutoOnly,
+        AutonomyLevel::Supervised,
+        Some(cb_ref),
+    );
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| !r.is_error && r.success));
+    assert_eq!(total_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(max_concurrent.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn t_extract_edit_path_schema_keys() {
+    assert_eq!(
+        extract_edit_path("file_write", &serde_json::json!({"path": "src/main.rs"})),
+        Some("src/main.rs".to_string())
+    );
+    assert_eq!(
+        extract_edit_path("multi_edit", &serde_json::json!({"path": "src/lib.rs"})),
+        Some("src/lib.rs".to_string())
+    );
+    assert_eq!(
+        extract_edit_path(
+            "file_write",
+            &serde_json::json!({"file_path": "src/main.rs"})
+        ),
+        Some("src/main.rs".to_string())
+    );
+    assert_eq!(
+        extract_edit_path("file_read", &serde_json::json!({"path": "src/main.rs"})),
+        None
+    );
+}
