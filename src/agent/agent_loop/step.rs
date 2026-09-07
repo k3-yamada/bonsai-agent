@@ -6,8 +6,8 @@
 use anyhow::Result;
 
 use crate::agent::error_recovery::{
-    CircuitBreaker, FailureMode, LoopDetector, MultiFileEditCycleDetector, ParseErrorDetail,
-    RecoveryAction, decide_recovery,
+    CircuitBreaker, FailureMode, FileStuckGuard, LoopDetector, MultiFileEditCycleDetector,
+    ParseErrorDetail, RecoveryAction, TrialSummary, decide_recovery,
 };
 use crate::agent::parse::{coerce_tool_arguments, parse_assistant_output};
 use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
@@ -32,6 +32,8 @@ pub fn execute_step(
     attempt: usize,
     tool_cache: &mut ToolResultCache,
     cycle_detector: &mut MultiFileEditCycleDetector,
+    trial_summary: &mut TrialSummary,
+    file_stuck_guard: &mut FileStuckGuard,
 ) -> Result<StepOutcome> {
     if ctx.cancel.is_cancelled() {
         return Ok(StepOutcome::Aborted("キャンセルされました".to_string()));
@@ -119,12 +121,23 @@ pub fn execute_step(
             let action = decide_recovery(&mode, attempt, ctx.config.max_retries);
             return match action {
                 RecoveryAction::ExplainAndStop(msg) => Ok(StepOutcome::Aborted(msg)),
-                _ => {
-                    // エラー情報をコンテキストに追加してリトライを促す
-                    session.add_message(Message::assistant(format!(
-                        "パースエラー: {e}。修正します。"
+                RecoveryAction::RetryWithFix(fix) => {
+                    session.add_message(Message::user(format!(
+                        "【形式修正指示】前回の出力でパースエラー（{e}）が発生しました。\n{fix}"
                     )));
-                    Ok(StepOutcome::Continue(Vec::new()))
+                    Ok(StepOutcome::Continue {
+                        tools: Vec::new(),
+                        tools_succeeded: false,
+                    })
+                }
+                _ => {
+                    session.add_message(Message::user(format!(
+                        "【形式修正指示】パースエラー（{e}）が発生しました。正しい形式で再度出力してください。"
+                    )));
+                    Ok(StepOutcome::Continue {
+                        tools: Vec::new(),
+                        tools_succeeded: false,
+                    })
                 }
             };
         }
@@ -144,66 +157,71 @@ pub fn execute_step(
 
         // MAGI合議制による最終回答の安全性・VALUES.md評価（特にV6不確実性への誠実さ・V5自立的判断・四層記憶整合性）
         let magi = crate::agent::magi::MagiPanel::default_panel();
-        let (_outcome, verdicts) =
+        let (outcome, verdicts) =
             magi.evaluate_final_answer_full(&answer, last_user_msg, &trajectory, ctx.store);
 
-        let block_reasons: Vec<String> = verdicts
-            .iter()
-            .filter_map(|v| match v {
-                crate::agent::magi::JudgeVerdict::Block(msg) => Some(msg.clone()),
-                _ => None,
-            })
-            .collect();
+        match outcome {
+            crate::agent::magi::DecisionOutcome::Halt(_) => {
+                let block_reasons: Vec<String> = verdicts
+                    .iter()
+                    .filter_map(|v| match v {
+                        crate::agent::magi::JudgeVerdict::Block(msg) => Some(msg.clone()),
+                        _ => None,
+                    })
+                    .collect();
 
-        if !block_reasons.is_empty() {
-            emit_event(
-                ctx.store,
-                &session.id,
-                &EventType::MagiHalt,
-                &serde_json::json!({
-                    "target": "final_answer",
-                    "reasons": &block_reasons,
-                })
-                .to_string(),
-                Some(attempt),
-            );
+                emit_event(
+                    ctx.store,
+                    &session.id,
+                    &EventType::MagiHalt,
+                    &serde_json::json!({
+                        "target": "final_answer",
+                        "reasons": &block_reasons,
+                    })
+                    .to_string(),
+                    Some(attempt),
+                );
 
-            // リトライ余地がある場合は自己修正（Reflexion）プロンプトを注入して継続
-            if attempt < ctx.config.max_retries {
-                session.add_message(Message::assistant(&answer));
-                session.add_message(Message::user(format!(
-                    "【MAGI合議制による安全指導】提示された回答に重大な安全違反（{}）が検出されました。破壊的・危険な指示を撤回し、安全で責任ある代替手順を提示してください。",
+                // リトライ余地がある場合は自己修正（Reflexion）プロンプトを注入して継続
+                if attempt < ctx.config.max_retries {
+                    session.add_message(Message::assistant(&answer));
+                    session.add_message(Message::user(format!(
+                        "【MAGI合議制による安全指導】提示された回答に重大な安全違反（{}）が検出されました。破壊的・危険な指示を撤回し、安全で責任ある代替手順を提示してください。",
+                        block_reasons.join("; ")
+                    )));
+                    return Ok(StepOutcome::Continue {
+                        tools: Vec::new(),
+                        tools_succeeded: false,
+                    });
+                }
+
+                return Ok(StepOutcome::Aborted(format!(
+                    "MAGI合議制により最終回答が停止（Halt）されました: {}",
                     block_reasons.join("; ")
                 )));
-                return Ok(StepOutcome::Continue(Vec::new()));
             }
+            crate::agent::magi::DecisionOutcome::Warn(_) => {
+                let concern_reasons: Vec<String> = verdicts
+                    .iter()
+                    .filter_map(|v| match v {
+                        crate::agent::magi::JudgeVerdict::Concern(msg) => Some(msg.clone()),
+                        _ => None,
+                    })
+                    .collect();
 
-            return Ok(StepOutcome::Aborted(format!(
-                "MAGI合議制により最終回答が停止（Halt）されました: {}",
-                block_reasons.join("; ")
-            )));
-        }
-
-        let concern_reasons: Vec<String> = verdicts
-            .iter()
-            .filter_map(|v| match v {
-                crate::agent::magi::JudgeVerdict::Concern(msg) => Some(msg.clone()),
-                _ => None,
-            })
-            .collect();
-
-        if !concern_reasons.is_empty() {
-            emit_event(
-                ctx.store,
-                &session.id,
-                &EventType::MagiWarn,
-                &serde_json::json!({
-                    "target": "final_answer",
-                    "reasons": &concern_reasons,
-                })
-                .to_string(),
-                Some(attempt),
-            );
+                emit_event(
+                    ctx.store,
+                    &session.id,
+                    &EventType::MagiWarn,
+                    &serde_json::json!({
+                        "target": "final_answer",
+                        "reasons": &concern_reasons,
+                    })
+                    .to_string(),
+                    Some(attempt),
+                );
+            }
+            crate::agent::magi::DecisionOutcome::Proceed => {}
         }
 
         session.add_message(Message::assistant(&answer));
@@ -241,9 +259,14 @@ pub fn execute_step(
         if loop_detector.record_and_check(&action_key) {
             let mode = FailureMode::LoopDetected;
             let action = decide_recovery(&mode, attempt, ctx.config.max_retries);
-            if let RecoveryAction::Abort(msg) = action {
-                return Ok(StepOutcome::Aborted(msg));
-            }
+            let abort_msg = match action {
+                RecoveryAction::Abort(msg) | RecoveryAction::ExplainAndStop(msg) => msg,
+                _ => format!(
+                    "同じ操作 '{}' を繰り返しています。ループを止めるため中断します。",
+                    tool_call.name
+                ),
+            };
+            return Ok(StepOutcome::Aborted(abort_msg));
         }
         if !circuit_breaker.is_available(&tool_call.name) {
             session.add_message(Message::tool(
@@ -284,19 +307,15 @@ pub fn execute_step(
             let magi = crate::agent::magi::MagiPanel::default_panel();
             let args_str = serde_json::to_string(&tool_call.arguments).unwrap_or_default();
             let outcome = magi.evaluate_tool_safety(&tool_call.name, &args_str);
-            let block_reasons: Vec<String> = match &outcome {
-                crate::agent::magi::DecisionOutcome::Halt(verdicts)
-                | crate::agent::magi::DecisionOutcome::Warn(verdicts) => verdicts
+            if let crate::agent::magi::DecisionOutcome::Halt(verdicts) = outcome {
+                let block_reasons: Vec<String> = verdicts
                     .iter()
                     .filter_map(|v| match v {
                         crate::agent::magi::JudgeVerdict::Block(msg) => Some(msg.clone()),
                         _ => None,
                     })
-                    .collect(),
-                crate::agent::magi::DecisionOutcome::Proceed => Vec::new(),
-            };
+                    .collect();
 
-            if !block_reasons.is_empty() {
                 emit_event(
                     ctx.store,
                     &session.id,
@@ -331,17 +350,23 @@ pub fn execute_step(
         });
     }
 
-    let step_tools = execute_validated_calls(
+    let (step_tools, all_succeeded) = execute_validated_calls(
         &validated,
         session,
         circuit_breaker,
+        trial_summary,
+        file_stuck_guard,
+        attempt,
         ctx.secrets_filter,
         ctx.store,
         tool_cache,
         cycle_detector,
         ctx.config,
     );
-    Ok(StepOutcome::Continue(step_tools))
+    Ok(StepOutcome::Continue {
+        tools: step_tools,
+        tools_succeeded: all_succeeded,
+    })
 }
 
 #[cfg(test)]
@@ -384,6 +409,8 @@ mod tests {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -393,6 +420,8 @@ mod tests {
             0,
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .unwrap();
 
@@ -435,6 +464,8 @@ mod tests {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -444,6 +475,8 @@ mod tests {
             0,
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .unwrap();
 
@@ -487,6 +520,8 @@ mod tests {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -496,11 +531,13 @@ mod tests {
             0,
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .unwrap();
 
         // attempt=0 (< max_retries=2) なので即座にAbortせず、自己修正のためContinueを返す
-        assert!(matches!(outcome, StepOutcome::Continue(_)));
+        assert!(matches!(outcome, StepOutcome::Continue { .. }));
 
         // セッション末尾に安全指導メッセージが注入されていることを検証
         let last_msg = session.messages.last().unwrap();
@@ -545,6 +582,8 @@ mod tests {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -554,6 +593,8 @@ mod tests {
             2, // attempt == max_retries
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .unwrap();
 
@@ -594,6 +635,8 @@ mod tests {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -603,6 +646,8 @@ mod tests {
             0,
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .unwrap();
 

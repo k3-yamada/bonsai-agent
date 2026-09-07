@@ -264,6 +264,8 @@ pub fn run_agent_loop_with_session(
             iteration,
             &mut state.tool_cache,
             &mut state.cycle_detector,
+            &mut state.trial_summary,
+            &mut state.file_stuck_guard,
         )?;
 
         let duration_ms = step_start.elapsed().as_millis() as u64;

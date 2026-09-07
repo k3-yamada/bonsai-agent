@@ -7,7 +7,8 @@
 //! `MiddlewareChain<'a>` 経由で借用元のミドルウェアにライフタイムを束縛する。
 
 use crate::agent::error_recovery::{
-    CircuitBreaker, LoopDetector, MultiFileEditCycleDetector, TrialSummary,
+    CircuitBreaker, ContinueSite, FileStuckGuard, LoopDetector, MultiFileEditCycleDetector,
+    TrialSummary,
 };
 use crate::agent::middleware::MiddlewareChain;
 use crate::agent::validate::PathGuard;
@@ -33,8 +34,11 @@ pub struct AgentLoopResult {
 pub enum StepOutcome {
     /// 最終回答（ループ終了）
     FinalAnswer(String),
-    /// ツール実行後、ループ継続（使用ツール名を保持）
-    Continue(Vec<String>),
+    /// ツール実行後、ループ継続（使用ツール名と全ツール成功フラグを保持）
+    Continue {
+        tools: Vec<String>,
+        tools_succeeded: bool,
+    },
     /// エラーで中断
     Aborted(String),
 }
@@ -62,6 +66,10 @@ pub struct LoopState<'a> {
     pub trial_summary: TrialSummary,
     /// 複数ファイル交互編集検出（Step 11、macOS26/Agent知見）
     pub cycle_detector: MultiFileEditCycleDetector,
+    /// 連続失敗追跡と段階的回復エスカレーション（H7）
+    pub continue_site: ContinueSite,
+    /// 同一ファイル編集停滞ガード（H7）
+    pub file_stuck_guard: FileStuckGuard,
     /// task 開始時に inject_heuristics で注入された heuristic IDs (項目 213)。
     /// task 完了時 (handle_outcome の FinalAnswer / Aborted) に
     /// `record_heuristic_outcomes` で utility update する。
@@ -84,6 +92,8 @@ impl<'a> LoopState<'a> {
             tool_cache: ToolResultCache::new(),
             trial_summary: TrialSummary::default(),
             cycle_detector: MultiFileEditCycleDetector::default(),
+            continue_site: ContinueSite::default(),
+            file_stuck_guard: FileStuckGuard::default(),
             injected_heuristic_ids: Vec::new(),
         }
     }
@@ -162,6 +172,7 @@ impl Default for TokenBudgetTracker {
 }
 
 /// Outcome ハンドラの結果
+#[derive(Debug)]
 pub enum OutcomeAction {
     /// ループ終了（最終結果）
     Return(AgentLoopResult),

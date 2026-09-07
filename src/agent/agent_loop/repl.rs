@@ -289,14 +289,14 @@ fn handle_slash_command<W: Write>(cmd: &str, writer: &mut W, io: &ReplIo) -> Res
                     .unwrap_or(0);
                 let blocked_count: i64 = conn
                     .query_row(
-                        "SELECT COUNT(*) FROM audit_log WHERE outcome LIKE '%block%' OR outcome LIKE '%Block%'",
+                        "SELECT COUNT(*) FROM events WHERE event_type = 'magi_halt'",
                         [],
                         |r| r.get(0),
                     )
                     .unwrap_or(0);
                 let warned_count: i64 = conn
                     .query_row(
-                        "SELECT COUNT(*) FROM audit_log WHERE outcome LIKE '%warn%' OR outcome LIKE '%Warn%'",
+                        "SELECT COUNT(*) FROM events WHERE event_type = 'magi_warn'",
                         [],
                         |r| r.get(0),
                     )
@@ -307,7 +307,7 @@ fn handle_slash_command<W: Write>(cmd: &str, writer: &mut W, io: &ReplIo) -> Res
                 writeln!(writer, "  警告・指導 (Warn): {} 件", warned_count)?;
                 writeln!(
                     writer,
-                    "  MELCHIOR (安全) / BALTHASAR (整合性) / CASPAR (VALUES.md・Goodhart) 稼働中"
+                    "  ValuesJudge (思想・安全) / ConsistencyJudge (整合性) / GoodhartJudge (指標健全性) 稼働中"
                 )?;
             } else {
                 writeln!(writer, "  （監査ログストアが未初期化です）")?;
@@ -562,7 +562,7 @@ mod tests {
 
         let output = String::from_utf8(writer).unwrap();
         assert!(output.contains("[MAGI 三重監視ステータス]"));
-        assert!(output.contains("MELCHIOR"));
+        assert!(output.contains("ValuesJudge"));
     }
 
     #[test]

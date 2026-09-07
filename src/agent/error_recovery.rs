@@ -198,6 +198,13 @@ impl Default for ContinueSite {
 
 /// 失敗モードに応じたリカバリ戦略を決定
 pub fn decide_recovery(mode: &FailureMode, attempt: usize, max_retries: usize) -> RecoveryAction {
+    // LoopDetected は試行回数（attempt）に関わらず即座に Abort（H6: リトライ・フォールスルー禁止）
+    if matches!(mode, FailureMode::LoopDetected) {
+        return RecoveryAction::Abort(
+            "同じ操作を繰り返しています。ループを止めるため中断します。".to_string(),
+        );
+    }
+
     if attempt >= max_retries {
         return RecoveryAction::ExplainAndStop(format!(
             "{}回のリトライを行いましたが解決できませんでした。原因: {:?}",

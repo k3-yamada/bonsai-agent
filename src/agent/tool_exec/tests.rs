@@ -1,6 +1,6 @@
 use super::*;
 use crate::agent::agent_loop::AgentConfig;
-use crate::agent::error_recovery::CircuitBreaker;
+use crate::agent::error_recovery::{CircuitBreaker, FileStuckGuard, TrialSummary};
 use crate::safety::autonomy::AutonomyLevel;
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::permission::{DaemonPolicy, Permission};
@@ -167,6 +167,8 @@ fn t_apply_tool_result_redacts_error_and_args() {
     let mut session = Session::new();
     let mut cb = CircuitBreaker::default();
     let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
     let r = ToolExecResult {
         name: "dummy".into(),
         args_json: r#"{"token": "ghp_123456789012345678901234567890123456"}"#.into(),
@@ -174,10 +176,21 @@ fn t_apply_tool_result_redacts_error_and_args() {
         success: false,
         is_error: true,
     };
-    apply_tool_result(&r, &mut session, &mut cb, &sf, None, 4000);
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        None,
+        4000,
+    );
     let msg = &session.messages.last().unwrap().content;
     assert!(!msg.contains("ghp_123456789012345678901234567890123456"));
     assert!(msg.contains("***REDACTED***"));
+    assert_eq!(ts.len(), 1);
 }
 
 #[test]
@@ -185,6 +198,8 @@ fn t_apply_tool_result_success_and_error() {
     let mut session = Session::new();
     let mut cb = CircuitBreaker::default();
     let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
     let r_ok = ToolExecResult {
         name: "dummy".into(),
         args_json: "{}".into(),
@@ -192,7 +207,17 @@ fn t_apply_tool_result_success_and_error() {
         success: true,
         is_error: false,
     };
-    apply_tool_result(&r_ok, &mut session, &mut cb, &sf, None, 4000);
+    apply_tool_result(
+        &r_ok,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        None,
+        4000,
+    );
     assert!(
         session
             .messages
@@ -207,13 +232,24 @@ fn t_apply_tool_result_success_and_error() {
         success: false,
         is_error: true,
     };
-    apply_tool_result(&r_err, &mut session, &mut cb, &sf, None, 4000);
+    apply_tool_result(
+        &r_err,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        None,
+        4000,
+    );
     assert!(
         session
             .messages
             .iter()
             .any(|m| m.content.contains("error occurred"))
     );
+    assert_eq!(ts.len(), 1);
 }
 
 #[test]
@@ -222,7 +258,7 @@ fn t_validated_call_fields() {
     let call = ValidatedCall {
         name: "test".into(),
         args_json: r#"{"key":"val"}"#.into(),
-        coerced_args: serde_json::json!({"key": "val"}),
+        coerced_args: serde_json::json!({"key":"val"}),
         tool: &tool,
         is_read_only: true,
     };
@@ -239,6 +275,8 @@ fn t_execute_validated_calls_redacts_cache() {
     let sf = SecretsFilter::default();
     let mut cache = ToolResultCache::new();
     let mut cycle = MultiFileEditCycleDetector::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
     let config = AgentConfig::default();
 
     let raw_secret = "Bearer eyJhbGciOiJIUzI1NiJ9.test";
@@ -251,10 +289,13 @@ fn t_execute_validated_calls_redacts_cache() {
         },
     );
 
-    let result = execute_validated_calls(
+    let (result, all_succeeded) = execute_validated_calls(
         &[call],
         &mut session,
         &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
         &sf,
         None,
         &mut cache,
@@ -262,6 +303,7 @@ fn t_execute_validated_calls_redacts_cache() {
         &config,
     );
     assert_eq!(result, vec!["read_tool"]);
+    assert!(all_succeeded);
     let msg = &session.messages.last().unwrap().content;
     assert!(!msg.contains(raw_secret));
     assert!(msg.contains("***REDACTED***"));

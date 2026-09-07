@@ -3,6 +3,7 @@
 //! `StepOutcome` を `OutcomeAction` に解釈する `handle_outcome` と、
 //! 計画プレステップ要否を判定する `detect_task_complexity` を集約。
 
+use crate::agent::error_recovery::{FailureMode, RecoveryAction, ToolErrorDetail};
 use crate::agent::middleware::StepResult as MwStepResult;
 use crate::cancel::CancellationToken;
 use crate::config::InferenceParams;
@@ -13,7 +14,7 @@ use crate::observability::logger::{LogLevel, log_event};
 use crate::runtime::model_router::{CriticDisagreementAction, CriticOutcome};
 
 use super::advisor_inject::{
-    inject_critic_review, inject_replan_on_stall, inject_verification_step,
+    StallAction, inject_critic_review, inject_replan_on_stall, inject_verification_step,
 };
 use super::state::{AgentLoopResult, LoopState, OutcomeAction, StepOutcome};
 use super::support::{
@@ -29,7 +30,7 @@ use super::support::{
 pub(super) fn handle_outcome(
     outcome: StepOutcome,
     session: &mut Session,
-    state: &mut LoopState,
+    state: &mut LoopState<'_>,
     task_context: &str,
     store: Option<&MemoryStore>,
     max_iterations: usize,
@@ -42,28 +43,7 @@ pub(super) fn handle_outcome(
 ) -> OutcomeAction {
     match outcome {
         StepOutcome::FinalAnswer(answer) => {
-            let mw_result = MwStepResult {
-                outcome_type: "final_answer",
-                iteration,
-                duration_ms,
-                tools_used: vec![],
-                tools_succeeded: true,
-                output_hash: 0,
-                consecutive_failures: 0,
-            };
-            state.middleware_chain.run_after_step(session, &mw_result);
-            if inject_verification_step(
-                session,
-                &mut state.advisor,
-                task_context,
-                &answer,
-                iteration,
-                max_iterations,
-                store,
-                &state.trial_summary,
-            ) {
-                return OutcomeAction::Continue;
-            }
+            state.continue_site.record_success();
             // G1 Critic 別 LLM 分離 (項目 226 候補、plan: critic-separate-llm-impl.md)
             // Reflexion が発火しなかった final answer を第三者 role で review する。
             if state.critic.enabled {
@@ -86,13 +66,37 @@ pub(super) fn handle_outcome(
                     }
                 }
             }
+            // 複雑タスクかつ初回回答時は自己検証ステップを注入
+            if inject_verification_step(
+                session,
+                &mut state.advisor,
+                task_context,
+                &answer,
+                iteration,
+                max_iterations,
+                store,
+                &state.trial_summary,
+            ) {
+                return OutcomeAction::Continue;
+            }
+            let mw_result = MwStepResult {
+                outcome_type: "final_answer",
+                iteration,
+                duration_ms,
+                tools_used: vec![],
+                tools_succeeded: true,
+                output_hash: 0,
+                consecutive_failures: 0,
+            };
+            state.middleware_chain.run_after_step(session, &mw_result);
+            state.consecutive_failures = 0;
             // 不変条件チェック（非ブロッキング警告）
             let violations = check_invariants(session, task_context);
             for v in &violations {
                 log_event(LogLevel::Warn, "invariant", v);
             }
             record_success(store, session, task_context, &answer);
-            // 項目 213: ERL — 注入 heuristic に成功 outcome を記録 (utility update)
+            // 項目 213: ERL — 注入 heuristic に成功 outcome を記録 (utility 引き上げ)
             record_heuristic_outcomes(store, &state.injected_heuristic_ids, true);
             OutcomeAction::Return(AgentLoopResult {
                 answer,
@@ -102,6 +106,9 @@ pub(super) fn handle_outcome(
         }
         StepOutcome::Aborted(reason) => {
             state.consecutive_failures += 1;
+            state
+                .continue_site
+                .record_failure(FailureMode::ReasoningError);
             let mw_result = MwStepResult {
                 outcome_type: "aborted",
                 iteration,
@@ -121,12 +128,35 @@ pub(super) fn handle_outcome(
                 tools_called: std::mem::take(&mut state.all_tools),
             })
         }
-        StepOutcome::Continue(step_tools) => {
-            let tools_succeeded = !step_tools.is_empty();
+        StepOutcome::Continue {
+            tools: step_tools,
+            tools_succeeded,
+        } => {
             if !tools_succeeded {
                 state.consecutive_failures += 1;
+                state
+                    .continue_site
+                    .record_failure(FailureMode::ToolExecError(ToolErrorDetail::Unknown(
+                        "tool_failure".to_string(),
+                    )));
+                match state.continue_site.decide_escalated_recovery(3) {
+                    RecoveryAction::ExplainAndStop(reason) => {
+                        record_abort(store, session, task_context, &reason);
+                        record_heuristic_outcomes(store, &state.injected_heuristic_ids, false);
+                        return OutcomeAction::Return(AgentLoopResult {
+                            answer: format!("[中断] {reason}"),
+                            iterations_used: final_iteration,
+                            tools_called: std::mem::take(&mut state.all_tools),
+                        });
+                    }
+                    RecoveryAction::Replan(prompt) => {
+                        session.add_message(Message::system(prompt));
+                    }
+                    _ => {}
+                }
             } else {
                 state.consecutive_failures = 0;
+                state.continue_site.record_success();
             }
             // ミドルウェアチェーンでafter_step処理（Audit/ToolTrack/Stall/Compact/TokenBudget）
             let output_hash = compute_output_hash(session);
@@ -143,7 +173,7 @@ pub(super) fn handle_outcome(
             // ツール追跡はミドルウェア外で保持（ReturnでのAgentLoopResult構築に必要）
             state.all_tools.extend(step_tools);
             // Advisor連携の停滞検出（ミドルウェアのStallとは別に、Advisor呼び出しが必要）
-            inject_replan_on_stall(
+            let stall_action = inject_replan_on_stall(
                 session,
                 &mut state.stall_detector,
                 &mut state.advisor,
@@ -153,6 +183,15 @@ pub(super) fn handle_outcome(
                 store,
                 &state.trial_summary,
             );
+            if let StallAction::ExhaustedAndAborted(reason) = stall_action {
+                record_abort(store, session, task_context, &reason);
+                record_heuristic_outcomes(store, &state.injected_heuristic_ids, false);
+                return OutcomeAction::Return(AgentLoopResult {
+                    answer: format!("[中断] {reason}"),
+                    iterations_used: final_iteration,
+                    tools_called: std::mem::take(&mut state.all_tools),
+                });
+            }
             OutcomeAction::Continue
         }
     }

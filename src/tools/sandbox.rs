@@ -65,12 +65,19 @@ impl Sandbox for DirectSandbox {
         let limited_command =
             format!("ulimit -f {max_blocks} -t {timeout_secs} 2>/dev/null; {full_command}");
 
-        let child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&limited_command)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
+            .stderr(std::process::Stdio::piped());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
+        let child = cmd.spawn();
 
         let mut child = match child {
             Ok(c) => c,
@@ -107,7 +114,14 @@ impl Sandbox for DirectSandbox {
                 })
             }
             Ok(None) => {
-                // タイムアウト — プロセスをkill (reader thread は EOF で終了 → join)
+                // タイムアウト — プロセスグループ全体を kill (SIGKILL) して子プロセスの孤児化を防ぐ
+                #[cfg(unix)]
+                {
+                    let pid = child.id() as i32;
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = out_handle.join();
@@ -120,6 +134,13 @@ impl Sandbox for DirectSandbox {
                 })
             }
             Err(e) => {
+                #[cfg(unix)]
+                {
+                    let pid = child.id() as i32;
+                    unsafe {
+                        libc::kill(-pid, libc::SIGKILL);
+                    }
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = out_handle.join();
@@ -291,5 +312,20 @@ mod tests {
     fn test_shell_escape() {
         assert_eq!(shell_escape("hello"), "'hello'");
         assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_exec_process_group_timeout_kills_children() {
+        let sandbox = DirectSandbox;
+        let limits = ResourceLimits {
+            timeout: Duration::from_millis(200),
+            ..Default::default()
+        };
+        // 子シェルやバックグラウンドプロセスを巻き込んでタイムアウトさせた場合に孤児化せず停止すること
+        let result = sandbox
+            .execute("sh", &["-c", "sleep 10 & wait"], &limits)
+            .unwrap();
+        assert!(result.timed_out);
+        assert!(!result.success());
     }
 }
