@@ -70,9 +70,9 @@ pub enum JudgeVerdict {
 pub enum DecisionOutcome {
     /// 進行許可
     Proceed,
-    /// 警告（2体以上がConcernまたはBlock）
+    /// 警告（1体以上のJudgeがConcern）
     Warn(Vec<JudgeVerdict>),
-    /// 停止（全Judge一致でBlock）
+    /// 停止（1体以上のJudgeがBlock: C5合議契約統一）
     Halt(Vec<JudgeVerdict>),
 }
 
