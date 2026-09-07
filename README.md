@@ -116,9 +116,41 @@ cargo run -- --visualize               # 記憶・ナレッジグラフ力学可
 cargo run -- --visualize --visualize-open # 可視化HTML生成後にデフォルトブラウザで自動表示
 cargo run -- --diagnose                # サーバー接続診断
 cargo run -- --evolve                  # arxiv収集+自己改善
-cargo run -- --serve --api-port <PORT> # REST API サーバー
+cargo run -- --serve --api-port <PORT> --api-token <TOKEN> # REST API サーバー
 cargo run -- --mcp-server              # MCP サーバーとして起動
 cargo run -- --server-url <URL>        # カスタムサーバーURL
+cargo run -- --autonomy supervised     # 自律レベル指定 (supervised, full, readonly)
+```
+
+### 自律レベル（--autonomy）
+
+| レベル | 動作 |
+|---|---|
+| `supervised` (既定) | `Permission::Confirm` ツール実行時に対話プロンプト（`[y/N]>`）で確認。非対話実行（`--exec` 等）時は安全側に倒して拒否（fail-closed）。 |
+| `full` | 全ツールを無確認で自動承認して実行（CI やバックグラウンド自動実行用）。 |
+| `readonly` | ファイル書き込み・Git 変更など書き込み系ツールの実行を即時拒否。 |
+
+### REST API サーバー（--serve）
+
+REST API サーバー起動時、推論用 LLM キーとは独立した専用の Bearer トークン認証が適用されます:
+
+```bash
+# 明示的なトークン指定
+cargo run -- --serve --api-port 3000 --api-token "my-secret-token"
+
+# または環境変数経由
+export BONSAI_API_KEY="my-secret-token"
+cargo run -- --serve --api-port 3000
+
+# 未指定時は起動時にランダムな UUID トークンが自動生成され標準出力に表示されます
+```
+
+API リクエスト例:
+```bash
+curl -X POST http://localhost:3000/v1/chat \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "こんにちは"}'
 ```
 
 ### 対話モード (REPL) 内省・知能コマンド
@@ -197,7 +229,7 @@ cargo run --no-default-features --features cli,tree-sitter
 | `multi_edit` | Confirm | 単一ファイル複数箇所一括編集（アトミック操作） |
 | `git` | Confirm | Git操作（status/diff/log/commit/add/branch） |
 | `web_search` | Auto | Web検索（DuckDuckGo API） |
-| `web_fetch` | Auto | URLからテキスト取得 |
+| `web_fetch` | Confirm | URLからテキスト取得（SSRF防御） |
 | `repo_map` | Auto | コード構造マップ（Rust/Python/TS/JS/Go/Java/C/C++/Kotlin/Swift対応） |
 | `arxiv_search` | Auto | arxiv論文検索 |
 | `remember` | Auto | 事実・好みを memory に保存（知識デーモン） |

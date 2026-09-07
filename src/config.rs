@@ -578,6 +578,8 @@ pub struct AgentSettings {
 pub struct SafetyConfig {
     pub deny_paths: Vec<String>,
     pub dangerous_patterns: Vec<String>,
+    #[serde(default)]
+    pub autonomy: Option<crate::safety::autonomy::AutonomyLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -656,6 +658,7 @@ impl Default for SafetyConfig {
                 "sudo".to_string(),
                 "chmod 777".to_string(),
             ],
+            autonomy: None,
         }
     }
 }

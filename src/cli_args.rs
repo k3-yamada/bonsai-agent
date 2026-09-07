@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long)]
     pub exec: Option<String>,
 
+    /// 自律性レベル: readonly (書込禁止), supervised (デフォルト: 対話REPLで[y/N]確認、非対話時は安全側に拒否), full (無確認自動承認)
+    #[arg(long)]
+    pub autonomy: Option<String>,
+
     /// モックモード（LLMなしでテスト）
     #[arg(long)]
     pub mock: bool,
@@ -72,6 +76,10 @@ pub struct Cli {
     /// APIポート
     #[arg(long, default_value = "3030")]
     pub api_port: u16,
+
+    /// REST APIサーバー認証トークン（未指定時は環境変数 BONSAI_API_KEY、未設定時は自動生成）
+    #[arg(long)]
+    pub api_token: Option<String>,
 
     /// MCPサーバー
     #[arg(long)]

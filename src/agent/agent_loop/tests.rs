@@ -1070,6 +1070,7 @@ fn test_execute_validated_calls_empty() {
     let sf = SecretsFilter::default();
     let mut cache = ToolResultCache::new();
     let mut cycle = MultiFileEditCycleDetector::default();
+    let config = AgentConfig::default();
     let result = execute_validated_calls(
         &[],
         &mut session,
@@ -1078,6 +1079,7 @@ fn test_execute_validated_calls_empty() {
         None,
         &mut cache,
         &mut cycle,
+        &config,
     );
     assert!(result.is_empty());
 }
@@ -1787,7 +1789,7 @@ fn test_assistant_message_event_step_index_matches_iteration() {
 }
 
 #[test]
-fn test_magi_intercepts_destructive_tool_call() {
+fn test_validate_blocks_destructive_tool_call() {
     let mock = MockLlmBackend::new(vec![
         r#"<tool_call>{"name":"shell","arguments":{"command":"rm -rf /"}}</tool_call>"#.to_string(),
         "危険なコマンドを中止しました。".to_string(),
@@ -1800,6 +1802,45 @@ fn test_magi_intercepts_destructive_tool_call() {
 
     let mut session = Session::new();
     session.add_message(Message::user("ファイルをすべて消去して"));
+
+    let result = super::core::run_agent_loop_with_session(
+        &mut session,
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        None,
+    )
+    .expect("agent_loop");
+
+    // validate_tool_call により即座に拒否メッセージが追加されていることを検証 (C4)
+    let blocked_msg = session
+        .messages
+        .iter()
+        .find(|m| m.content.contains("拒否: 危険なコマンドパターン検出"));
+    assert!(
+        blocked_msg.is_some(),
+        "危険なコマンドパターンが validate_tool_call により即時ブロックされるべき: {:?}",
+        session.messages
+    );
+    assert_eq!(result.answer, "危険なコマンドを中止しました。");
+}
+
+#[test]
+fn test_magi_intercepts_destructive_tool_call() {
+    let mock = MockLlmBackend::new(vec![
+        r#"<tool_call>{"name":"shell","arguments":{"command":"DROP DATABASE production"}}</tool_call>"#.to_string(),
+        "危険なコマンドを中止しました。".to_string(),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(crate::tools::shell::ShellTool::new()));
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let mut session = Session::new();
+    session.add_message(Message::user("DBを全削除して"));
 
     let result = super::core::run_agent_loop_with_session(
         &mut session,
@@ -1828,7 +1869,7 @@ fn test_magi_intercepts_destructive_tool_call() {
 #[test]
 fn test_magi_intercepts_destructive_tool_call_emits_event() {
     let mock = MockLlmBackend::new(vec![
-        r#"<tool_call>{"name":"shell","arguments":{"command":"rm -rf /"}}</tool_call>"#.to_string(),
+        r#"<tool_call>{"name":"shell","arguments":{"command":"DROP DATABASE production"}}</tool_call>"#.to_string(),
         "危険なコマンドを中止しました。".to_string(),
     ]);
     let mut tools = ToolRegistry::new();
@@ -1862,5 +1903,5 @@ fn test_magi_intercepts_destructive_tool_call_emits_event() {
         events
     );
     let event_data = &magi_event.unwrap().event_data;
-    assert!(event_data.contains("rm -rf /"));
+    assert!(event_data.contains("DROP DATABASE"));
 }

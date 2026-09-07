@@ -13,6 +13,8 @@ use crate::observability::logger::{LogLevel, log_event};
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::{ToolResult, ToolResultCache};
 
+pub(crate) type ConfirmCheckRef<'a> = &'a (dyn Fn(&str, &str) -> bool + Send + Sync);
+
 /// バリデーション済みツール呼び出し（並列実行の単位）
 pub(crate) struct ValidatedCall<'a> {
     pub name: String,
@@ -62,8 +64,113 @@ pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     )
 }
 
-/// 単一ツール呼び出しを実行
+/// 単一ツール呼び出しを実行（デフォルトポリシー、テスト用）
+#[cfg(test)]
 pub(crate) fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
+    execute_single_call_with_policy(
+        call,
+        false,
+        crate::tools::permission::DaemonPolicy::AutoOnly,
+        crate::safety::autonomy::AutonomyLevel::Supervised,
+        None,
+    )
+}
+
+/// 単一ツール呼び出しを権限・自律ポリシーを適用して実行
+pub(crate) fn execute_single_call_with_policy(
+    call: &ValidatedCall<'_>,
+    is_daemon: bool,
+    daemon_policy: crate::tools::permission::DaemonPolicy,
+    autonomy: crate::safety::autonomy::AutonomyLevel,
+    confirm_callback: Option<ConfirmCheckRef<'_>>,
+) -> ToolExecResult {
+    // 1. 自律レベルによる書き込み制限 (ReadOnly モードでの write 禁止)
+    if !call.is_read_only && !autonomy.can_write() {
+        return ToolExecResult {
+            name: call.name.clone(),
+            args_json: call.args_json.clone(),
+            output: format!(
+                "権限エラー: 現在の自律レベル ({:?}) では書き込み系ツール '{}' の実行は拒否されています",
+                autonomy, call.name
+            ),
+            success: false,
+            is_error: true,
+        };
+    }
+
+    // 2. ツールの権限レベルチェック (check_permission)
+    let perm = call.tool.permission();
+    let decision = crate::tools::permission::check_permission(perm, is_daemon, daemon_policy);
+    match decision {
+        crate::tools::permission::PermissionDecision::Allow => {}
+        crate::tools::permission::PermissionDecision::Denied => {
+            return ToolExecResult {
+                name: call.name.clone(),
+                args_json: call.args_json.clone(),
+                output: format!(
+                    "権限エラー: ツール '{}' の実行権限が拒否されています (permission: {:?})",
+                    call.name, perm
+                ),
+                success: false,
+                is_error: true,
+            };
+        }
+        crate::tools::permission::PermissionDecision::QueueForLater => {
+            return ToolExecResult {
+                name: call.name.clone(),
+                args_json: call.args_json.clone(),
+                output: format!(
+                    "保留: ツール '{}' の実行には確認が必要です（キューに保留されました）",
+                    call.name
+                ),
+                success: false,
+                is_error: true,
+            };
+        }
+        crate::tools::permission::PermissionDecision::NeedConfirmation => match autonomy {
+            crate::safety::autonomy::AutonomyLevel::Full => {}
+            crate::safety::autonomy::AutonomyLevel::Supervised => {
+                if let Some(cb) = confirm_callback {
+                    if !cb(&call.name, &call.args_json) {
+                        return ToolExecResult {
+                            name: call.name.clone(),
+                            args_json: call.args_json.clone(),
+                            output: format!(
+                                "確認拒否: ツール '{}' の実行がユーザーにより拒否されました",
+                                call.name
+                            ),
+                            success: false,
+                            is_error: true,
+                        };
+                    }
+                } else {
+                    return ToolExecResult {
+                        name: call.name.clone(),
+                        args_json: call.args_json.clone(),
+                        output: format!(
+                            "確認エラー: ツール '{}' (権限: {:?}) の実行には確認が必要です。非対話または確認コールバック未設定のため実行は拒否されました (自律レベル: {:?})",
+                            call.name, perm, autonomy
+                        ),
+                        success: false,
+                        is_error: true,
+                    };
+                }
+            }
+            crate::safety::autonomy::AutonomyLevel::ReadOnly => {
+                return ToolExecResult {
+                    name: call.name.clone(),
+                    args_json: call.args_json.clone(),
+                    output: format!(
+                        "確認エラー: ツール '{}' (権限: {:?}) の実行には確認が必要です。現在の自律レベル ({:?}) では未確認実行は拒否されました",
+                        call.name, perm, autonomy
+                    ),
+                    success: false,
+                    is_error: true,
+                };
+            }
+        },
+    }
+
     match call.tool.call(call.coerced_args.clone()) {
         Ok(tool_result) => ToolExecResult {
             name: call.name.clone(),
@@ -83,7 +190,42 @@ pub(crate) fn execute_single_call(call: &ValidatedCall<'_>) -> ToolExecResult {
 }
 
 /// 読取専用ツールをstd::thread::scopeで並列実行
-pub(crate) fn execute_read_batch_parallel(batch: &[ValidatedCall<'_>]) -> Vec<ToolExecResult> {
+///
+/// ただし、Confirm 権限を要するツールが含まれ対話コールバックが存在する場合は、
+/// stdin / ターミナル入力の競合（プロンプト交錯）を防ぐため逐次（直列）実行する。
+pub(crate) fn execute_read_batch_parallel(
+    batch: &[ValidatedCall<'_>],
+    is_daemon: bool,
+    daemon_policy: crate::tools::permission::DaemonPolicy,
+    autonomy: crate::safety::autonomy::AutonomyLevel,
+    confirm_callback: Option<ConfirmCheckRef<'_>>,
+) -> Vec<ToolExecResult> {
+    let has_confirm = batch
+        .iter()
+        .any(|call| call.tool.permission() == crate::tools::permission::Permission::Confirm);
+    if has_confirm && confirm_callback.is_some() {
+        log_event(
+            LogLevel::Debug,
+            "sequential",
+            &format!(
+                "Confirm要件を含む読取ツール{}件を直列実行（stdin競合回避）",
+                batch.len()
+            ),
+        );
+        return batch
+            .iter()
+            .map(|call| {
+                execute_single_call_with_policy(
+                    call,
+                    is_daemon,
+                    daemon_policy,
+                    autonomy,
+                    confirm_callback,
+                )
+            })
+            .collect();
+    }
+
     log_event(
         LogLevel::Debug,
         "parallel",
@@ -92,7 +234,17 @@ pub(crate) fn execute_read_batch_parallel(batch: &[ValidatedCall<'_>]) -> Vec<To
     std::thread::scope(|s| {
         let handles: Vec<_> = batch
             .iter()
-            .map(|call| s.spawn(move || execute_single_call(call)))
+            .map(|call| {
+                s.spawn(move || {
+                    execute_single_call_with_policy(
+                        call,
+                        is_daemon,
+                        daemon_policy,
+                        autonomy,
+                        confirm_callback,
+                    )
+                })
+            })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     })
@@ -107,7 +259,11 @@ pub(crate) fn apply_tool_result(
     store: Option<&MemoryStore>,
     max_output_chars: usize,
 ) {
-    let file_path = serde_json::from_str::<serde_json::Value>(&r.args_json)
+    // 冒頭で output と args_json を両方 redact (H4 秘密漏洩防止: error/audit/session/cache 単一ゲート)
+    let redacted_output = secrets_filter.redact(&r.output);
+    let redacted_args = secrets_filter.redact(&r.args_json);
+
+    let file_path = serde_json::from_str::<serde_json::Value>(&redacted_args)
         .ok()
         .and_then(|v| v.get("path").and_then(|p| p.as_str().map(String::from)));
 
@@ -135,29 +291,28 @@ pub(crate) fn apply_tool_result(
                 Some(&session.id),
                 &AuditAction::ToolCall {
                     tool_name: r.name.clone(),
-                    args: r.args_json.clone(),
+                    args: redacted_args.clone(),
                     success: false,
-                    output_preview: r.output.clone(),
+                    output_preview: redacted_output.chars().take(200).collect(),
                 },
             );
             let graph = KnowledgeGraph::new(s.conn());
             let path = file_path.as_deref().unwrap_or("unknown");
             let _ = graph.record_error_pattern("tool_error", path, &r.name);
         }
-        session.add_message(Message::tool(&r.output, &r.name));
+        session.add_message(Message::tool(&redacted_output, &r.name));
     } else {
         circuit_breaker.record_success(&r.name);
-        let redacted = secrets_filter.redact(&r.output);
-        let redacted = truncate_tool_output(&redacted, max_output_chars);
+        let truncated = truncate_tool_output(&redacted_output, max_output_chars);
         if let Some(s) = store {
             let audit = AuditLog::new(s.conn());
             let _ = audit.log(
                 Some(&session.id),
                 &AuditAction::ToolCall {
                     tool_name: r.name.clone(),
-                    args: r.args_json.clone(),
+                    args: redacted_args.clone(),
                     success: r.success,
-                    output_preview: redacted.chars().take(200).collect(),
+                    output_preview: truncated.chars().take(200).collect(),
                 },
             );
             if let Some(ref fp) = file_path {
@@ -165,19 +320,20 @@ pub(crate) fn apply_tool_result(
                 let _ = graph.record_tool_usage(&r.name, fp);
             }
         }
-        session.add_message(Message::tool(&redacted, &r.name));
+        session.add_message(Message::tool(&truncated, &r.name));
     }
 }
 
-/// 編集ツール呼出から file_path を抽出
+/// 編集ツール呼出から path を抽出
 ///
-/// `file_write`/`multi_edit` のみ対象。`args["file_path"]` を返す。
-/// MultiEdit のように複数 path を扱うツールは args["file_path"] 単一値前提。
+/// `file_write`/`multi_edit` のみ対象。`args["path"]` または後方互換用 `args["file_path"]` を返す。
+/// MultiEdit のように複数 path を扱うツールは args 単一値前提。
 fn extract_edit_path(name: &str, args: &serde_json::Value) -> Option<String> {
     if name != "file_write" && name != "multi_edit" {
         return None;
     }
-    args.get("file_path")
+    args.get("path")
+        .or_else(|| args.get("file_path"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -236,6 +392,7 @@ fn parse_nudge_files(nudge: &str) -> Vec<String> {
 }
 
 /// バリデーション済みツール呼び出しを実行（読取専用は並列、書き込みは逐次）
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_validated_calls(
     calls: &[ValidatedCall<'_>],
     session: &mut Session,
@@ -244,7 +401,9 @@ pub(crate) fn execute_validated_calls(
     store: Option<&MemoryStore>,
     cache: &mut ToolResultCache,
     cycle_detector: &mut MultiFileEditCycleDetector,
+    config: &crate::agent::agent_loop::AgentConfig,
 ) -> Vec<String> {
+    let confirm_cb = config.confirm_callback.as_deref();
     let mut step_tools: Vec<String> = Vec::new();
     let mut i = 0;
     while i < calls.len() {
@@ -254,16 +413,23 @@ pub(crate) fn execute_validated_calls(
         }
         let read_batch = &calls[batch_start..i];
         if read_batch.len() >= 2 {
-            let results = execute_read_batch_parallel(read_batch);
+            let results = execute_read_batch_parallel(
+                read_batch,
+                config.is_daemon,
+                config.daemon_policy,
+                config.autonomy,
+                confirm_cb,
+            );
             for r in results {
                 if !r.is_error
                     && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
                 {
+                    // HIGH-3: キャッシュ格納前に平文シークレットをマスク
                     cache.put(
                         &r.name,
                         &args,
                         ToolResult {
-                            output: r.output.clone(),
+                            output: secrets_filter.redact(&r.output),
                             success: r.success,
                         },
                     );
@@ -276,7 +442,9 @@ pub(crate) fn execute_validated_calls(
         } else {
             for call in read_batch {
                 if let Some(cached) = cache.get(&call.name, &call.coerced_args) {
-                    session.add_message(Message::tool(&cached.output, &call.name));
+                    // HIGH-3: キャッシュ復元時にも二重防護でマスク適用
+                    let redacted = secrets_filter.redact(&cached.output);
+                    session.add_message(Message::tool(&redacted, &call.name));
                     step_tools.push(call.name.clone());
                     // EventStore: キャッシュヒット時もトラジェクトリに記録（項目162）
                     crate::agent::agent_loop::emit_event(
@@ -301,15 +469,22 @@ pub(crate) fn execute_validated_calls(
                     );
                     continue;
                 }
-                let r = execute_single_call(call);
+                let r = execute_single_call_with_policy(
+                    call,
+                    config.is_daemon,
+                    config.daemon_policy,
+                    config.autonomy,
+                    confirm_cb,
+                );
                 if !r.is_error
                     && let Ok(args) = serde_json::from_str::<serde_json::Value>(&r.args_json)
                 {
+                    // HIGH-3: キャッシュ格納前に平文シークレットをマスク
                     cache.put(
                         &r.name,
                         &args,
                         ToolResult {
-                            output: r.output.clone(),
+                            output: secrets_filter.redact(&r.output),
                             success: r.success,
                         },
                     );
@@ -322,7 +497,13 @@ pub(crate) fn execute_validated_calls(
         }
         if i < calls.len() && !calls[i].is_read_only {
             let write_call = &calls[i];
-            let r = execute_single_call(write_call);
+            let r = execute_single_call_with_policy(
+                write_call,
+                config.is_daemon,
+                config.daemon_policy,
+                config.autonomy,
+                confirm_cb,
+            );
             // Step 11: 書き込み成功時に cycle 検出
             if !r.is_error {
                 record_edit_and_nudge(
@@ -346,286 +527,4 @@ pub(crate) fn execute_validated_calls(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::error_recovery::CircuitBreaker;
-    use crate::safety::secrets::SecretsFilter;
-    use crate::tools::permission::Permission;
-
-    struct DummyTool;
-    impl crate::tools::Tool for DummyTool {
-        fn name(&self) -> &str {
-            "dummy"
-        }
-        fn description(&self) -> &str {
-            "test"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn permission(&self) -> Permission {
-            Permission::Auto
-        }
-        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
-            Ok(crate::tools::ToolResult {
-                output: "ok".into(),
-                success: true,
-            })
-        }
-        fn is_read_only(&self) -> bool {
-            true
-        }
-    }
-
-    struct ErrorTool;
-    impl crate::tools::Tool for ErrorTool {
-        fn name(&self) -> &str {
-            "error_tool"
-        }
-        fn description(&self) -> &str {
-            "fails"
-        }
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn permission(&self) -> Permission {
-            Permission::Auto
-        }
-        fn call(&self, _args: serde_json::Value) -> anyhow::Result<crate::tools::ToolResult> {
-            anyhow::bail!("test error")
-        }
-        fn is_read_only(&self) -> bool {
-            true
-        }
-    }
-
-    #[test]
-    fn t_execute_single_call_success() {
-        let tool = DummyTool;
-        let call = ValidatedCall {
-            name: "dummy".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: true,
-        };
-        let result = execute_single_call(&call);
-        assert!(!result.is_error);
-        assert!(result.success);
-        assert_eq!(result.output, "ok");
-    }
-
-    #[test]
-    fn t_execute_single_call_error() {
-        let tool = ErrorTool;
-        let call = ValidatedCall {
-            name: "error_tool".into(),
-            args_json: "{}".into(),
-            coerced_args: serde_json::json!({}),
-            tool: &tool,
-            is_read_only: true,
-        };
-        let result = execute_single_call(&call);
-        assert!(result.is_error);
-        assert!(!result.success);
-        assert!(result.output.contains("エラー"));
-    }
-
-    #[test]
-    fn t_apply_tool_result_success() {
-        let mut session = Session::new();
-        let mut cb = CircuitBreaker::default();
-        let sf = SecretsFilter::default();
-        let r = ToolExecResult {
-            name: "dummy".into(),
-            args_json: "{}".into(),
-            output: "success output".into(),
-            success: true,
-            is_error: false,
-        };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, None, 4000);
-        assert!(
-            session
-                .messages
-                .iter()
-                .any(|m| m.content.contains("success output"))
-        );
-    }
-
-    #[test]
-    fn t_apply_tool_result_error() {
-        let mut session = Session::new();
-        let mut cb = CircuitBreaker::default();
-        let sf = SecretsFilter::default();
-        let r = ToolExecResult {
-            name: "dummy".into(),
-            args_json: "{}".into(),
-            output: "error occurred".into(),
-            success: false,
-            is_error: true,
-        };
-        apply_tool_result(&r, &mut session, &mut cb, &sf, None, 4000);
-        assert!(
-            session
-                .messages
-                .iter()
-                .any(|m| m.content.contains("error occurred"))
-        );
-    }
-
-    #[test]
-    fn t_validated_call_fields() {
-        let tool = DummyTool;
-        let call = ValidatedCall {
-            name: "test".into(),
-            args_json: r#"{"key":"val"}"#.into(),
-            coerced_args: serde_json::json!({"key": "val"}),
-            tool: &tool,
-            is_read_only: true,
-        };
-        assert_eq!(call.name, "test");
-        assert!(call.is_read_only);
-    }
-}
-
-#[cfg(test)]
-mod truncation_tests {
-    use super::*;
-
-    #[test]
-    fn test_truncate_small_output() {
-        let output = "hello world";
-        let result = truncate_tool_output(output, 4000);
-        assert_eq!(result, "hello world");
-    }
-
-    #[test]
-    fn test_truncate_large_output() {
-        let output = "a".repeat(5000);
-        let result = truncate_tool_output(&output, 4000);
-        assert!(result.contains("..."));
-        assert!(result.contains("全文保存"));
-        assert!(result.contains("5000文字"));
-    }
-
-    #[test]
-    fn test_truncate_unicode_safe() {
-        let output = "日本語テスト".repeat(1000);
-        let result = truncate_tool_output(&output, 100);
-        // Unicode境界で安全に切断されていることを確認
-        assert!(result.contains("..."));
-        // パニックしないことが重要
-    }
-
-    #[test]
-    fn test_truncate_zero_max() {
-        let output = "hello";
-        let result = truncate_tool_output(output, 0);
-        assert_eq!(result, "hello");
-    }
-}
-
-#[cfg(test)]
-mod nudge_audit_tests {
-    use super::*;
-    use crate::agent::error_recovery::MultiFileEditCycleDetector;
-    use crate::memory::store::MemoryStore;
-
-    #[test]
-    fn t_parse_nudge_files_extracts_basenames() {
-        let nudge =
-            "[edit-cycle] ファイル a.rs, b.rs を交互に編集しています — 進捗が見られません。";
-        let files = parse_nudge_files(nudge);
-        assert_eq!(files, vec!["a.rs", "b.rs"]);
-    }
-
-    #[test]
-    fn t_parse_nudge_files_handles_three_files() {
-        let nudge = "[edit-cycle] ファイル a.rs, b.rs, c.rs を交互に編集しています — ...";
-        let files = parse_nudge_files(nudge);
-        assert_eq!(files, vec!["a.rs", "b.rs", "c.rs"]);
-    }
-
-    #[test]
-    fn t_parse_nudge_files_returns_empty_on_unmatched() {
-        let files = parse_nudge_files("不明な形式の文字列");
-        assert!(files.is_empty());
-    }
-
-    #[test]
-    fn t_record_edit_and_nudge_logs_audit_action_when_cycle_detected() {
-        let store = MemoryStore::in_memory().unwrap();
-        let mut session = Session::new();
-        session.id = "test-session".to_string();
-        let mut det = MultiFileEditCycleDetector::new(6);
-
-        // 4 ターン交互編集で cycle 発火
-        let calls = [
-            ("file_write", "/tmp/a.rs"),
-            ("file_write", "/tmp/b.rs"),
-            ("file_write", "/tmp/a.rs"),
-            ("file_write", "/tmp/b.rs"),
-        ];
-        for (name, path) in &calls {
-            let args = serde_json::json!({"file_path": path});
-            record_edit_and_nudge(name, &args, &mut det, &mut session, Some(&store));
-        }
-
-        // AuditLog に MultiFileNudge が 1 件記録されているはず
-        let audit = AuditLog::new(store.conn());
-        let entries = audit.recent(10).unwrap();
-        let nudge_entries: Vec<_> = entries
-            .iter()
-            .filter(|e| e.action_type == "multi_file_nudge")
-            .collect();
-        assert_eq!(nudge_entries.len(), 1, "1 件 nudge audit が記録されるべき");
-
-        let entry = &nudge_entries[0];
-        assert_eq!(entry.session_id.as_deref(), Some("test-session"));
-        let v: serde_json::Value = serde_json::from_str(&entry.action_data).unwrap();
-        assert_eq!(v["type"], "MultiFileNudge");
-        assert_eq!(v["fire_count"], 1);
-        assert!(v["nudge_len"].as_u64().unwrap() > 0);
-        let files = v["files"].as_array().unwrap();
-        assert_eq!(files.len(), 2);
-    }
-
-    #[test]
-    fn t_record_edit_and_nudge_no_audit_without_store() {
-        let mut session = Session::new();
-        let mut det = MultiFileEditCycleDetector::new(6);
-        // store=None でも panic せず動作する（既存動作の後方互換）
-        let calls = [
-            ("file_write", "/tmp/a.rs"),
-            ("file_write", "/tmp/b.rs"),
-            ("file_write", "/tmp/a.rs"),
-            ("file_write", "/tmp/b.rs"),
-        ];
-        for (name, path) in &calls {
-            let args = serde_json::json!({"file_path": path});
-            record_edit_and_nudge(name, &args, &mut det, &mut session, None);
-        }
-        // session には system message が追加されているが、audit log は触れていない
-        assert_eq!(det.nudge_fire_count(), 1);
-    }
-
-    #[test]
-    fn t_record_edit_and_nudge_skips_non_edit_tools() {
-        let store = MemoryStore::in_memory().unwrap();
-        let mut session = Session::new();
-        let mut det = MultiFileEditCycleDetector::new(6);
-        // file_read は編集ツールではないので何もしない
-        for _ in 0..6 {
-            let args = serde_json::json!({"file_path": "/tmp/a.rs"});
-            record_edit_and_nudge("file_read", &args, &mut det, &mut session, Some(&store));
-        }
-        let audit = AuditLog::new(store.conn());
-        let entries = audit.recent(10).unwrap();
-        let nudge_entries: Vec<_> = entries
-            .iter()
-            .filter(|e| e.action_type == "multi_file_nudge")
-            .collect();
-        assert!(nudge_entries.is_empty());
-        assert_eq!(det.nudge_fire_count(), 0);
-    }
-}
+mod tests;

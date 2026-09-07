@@ -36,7 +36,18 @@ pub struct AgentConfig {
     pub n_ctx_budget: Option<u32>,
     /// 項目 179: 追加メモリブロック（[[memory.blocks]] config 由来）
     pub memory_blocks: Vec<MemoryBlockConfig>,
+    /// 自律レベル（ReadOnly, Supervised, Full）
+    pub autonomy: crate::safety::autonomy::AutonomyLevel,
+    /// デーモンモード（バックグラウンド無人実行）フラグ
+    pub is_daemon: bool,
+    /// デーモン時のツール実行ポリシー
+    pub daemon_policy: crate::tools::permission::DaemonPolicy,
+    /// ツール実行前の確認コールバック（Supervised モードで使用）
+    pub confirm_callback: Option<ConfirmCallback>,
 }
+
+/// ツール実行前の確認コールバック型
+pub type ConfirmCallback = std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -55,6 +66,10 @@ impl Default for AgentConfig {
             soul_path: None,
             n_ctx_budget: None,
             memory_blocks: Vec::new(),
+            autonomy: crate::safety::autonomy::AutonomyLevel::Supervised,
+            is_daemon: false,
+            daemon_policy: crate::tools::permission::DaemonPolicy::AutoOnly,
+            confirm_callback: None,
         }
     }
 }

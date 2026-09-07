@@ -339,6 +339,7 @@ pub fn execute_step(
         ctx.store,
         tool_cache,
         cycle_detector,
+        ctx.config,
     );
     Ok(StepOutcome::Continue(step_tools))
 }

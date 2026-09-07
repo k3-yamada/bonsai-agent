@@ -157,6 +157,19 @@ fn main() -> Result<()> {
     let cancel = CancellationToken::new();
     ctrlc_handler(cancel.clone());
 
+    let autonomy_level = if let Some(ref a) = cli.autonomy {
+        a.parse::<bonsai_agent::safety::autonomy::AutonomyLevel>()
+            .unwrap_or_else(|e| {
+                eprintln!("警告: {e}。デフォルトの supervised を使用します。");
+                bonsai_agent::safety::autonomy::AutonomyLevel::Supervised
+            })
+    } else {
+        app_config
+            .safety
+            .autonomy
+            .unwrap_or(bonsai_agent::safety::autonomy::AutonomyLevel::Supervised)
+    };
+
     let ctx = AppContext {
         tools,
         path_guard: PathGuard::new(app_config.safety.deny_paths.clone()),
@@ -169,25 +182,13 @@ fn main() -> Result<()> {
             max_mcp_tools_in_context: app_config.agent.max_mcp_tools_in_context,
             base_inference: app_config.model.inference.clone(),
             advisor: app_config.advisor.to_runtime(),
-            task_timeout: {
-                let secs = app_config.experiment.task_timeout_secs;
-                if secs > 0 {
-                    Some(std::time::Duration::from_secs(secs))
-                } else {
-                    None
-                }
-            },
-            // 項目 179: SOUL.md ペルソナ + 追加メモリブロックを config から伝播
+            task_timeout: (app_config.experiment.task_timeout_secs > 0)
+                .then(|| std::time::Duration::from_secs(app_config.experiment.task_timeout_secs)),
             soul_path: app_config.agent.soul_path.clone(),
-            // F2 ContextOverflowGuard: ModelConfig.context_length を AgentConfig に伝播
-            // (`Some(n)` で `CompactionConfig::from_n_ctx_budget` 経由 n*0.7 派生 budget、
-            // `0` ならガード無効化として `None` 扱い)
-            n_ctx_budget: if app_config.model.context_length > 0 {
-                Some(app_config.model.context_length)
-            } else {
-                None
-            },
+            n_ctx_budget: (app_config.model.context_length > 0)
+                .then_some(app_config.model.context_length),
             memory_blocks: app_config.memory.blocks.clone(),
+            autonomy: autonomy_level,
             ..Default::default()
         },
         cancel,
@@ -234,6 +235,21 @@ fn main() -> Result<()> {
 
     // DB必要モード
     let store = MemoryStore::open(&get_db_path())?;
+
+    if cli.serve {
+        let env_token = std::env::var("BONSAI_API_KEY").ok();
+        let api_token = cli.api_token.as_deref().or(env_token.as_deref());
+        println!(
+            "REST API サーバーを起動します (ポート: {})...",
+            cli.api_port
+        );
+        bonsai_agent::server::start_api_server(&store, cli.api_port, api_token);
+        return Ok(());
+    }
+    if cli.mcp_server {
+        bonsai_agent::mcp_server::run_mcp_server_with_guard(&store, &ctx.path_guard);
+        return Ok(());
+    }
 
     if let Some(path) = &cli.ingest {
         let n = bonsai_agent::memory::ingest::ingest_path(&store, path)?;
@@ -591,7 +607,7 @@ fn run_repl_stdio(
     session: &mut bonsai_agent::domain::conversation::Session,
 ) -> Result<()> {
     let stdin = io::stdin();
-    let mut reader = stdin.lock();
+    let mut reader = io::BufReader::new(stdin);
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
@@ -685,11 +701,41 @@ fn run_repl_stdio(
         },
     );
 
+    let mut repl_config = ctx.config.clone();
+    if matches!(
+        repl_config.autonomy,
+        bonsai_agent::safety::autonomy::AutonomyLevel::Supervised
+    ) && repl_config.confirm_callback.is_none()
+    {
+        repl_config.confirm_callback =
+            Some(std::sync::Arc::new(|name: &str, args: &str| -> bool {
+                use std::io::Write;
+                let display_args = if args.len() > 200 {
+                    let end = args.floor_char_boundary(200);
+                    format!("{}...", &args[..end])
+                } else {
+                    args.to_string()
+                };
+                eprintln!("\n⚠️  [確認要求] ツール '{name}' を実行しますか？");
+                eprintln!("引数: {display_args}");
+                eprint!("実行を許可しますか？ [y/N]> ");
+                let _ = std::io::stderr().flush();
+
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_ok() {
+                    let trimmed = input.trim();
+                    trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes")
+                } else {
+                    false
+                }
+            }));
+    }
+
     let repl_io = ReplIo {
         backend: &*backend,
         tools: &ctx.tools,
         path_guard: &ctx.path_guard,
-        config: &ctx.config,
+        config: &repl_config,
         cancel: &ctx.cancel,
         store: Some(store),
         is_busy: Some(is_busy),
