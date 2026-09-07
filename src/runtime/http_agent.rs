@@ -138,6 +138,7 @@ mod tests {
 
     /// ローカル listen → 受信して何も返さない（hang）→ deadline で abort
     #[test]
+    #[ignore = "requires real local loopback socket binding (hangs in sandboxed environments)"]
     fn t_short_agent_aborts_on_hung_server() {
         use std::io::Read;
         use std::net::TcpListener;

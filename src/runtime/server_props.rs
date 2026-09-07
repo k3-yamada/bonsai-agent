@@ -117,11 +117,83 @@ fn hf_ctx_from_cache_root(cache_root: &std::path::Path, repo_id: &str) -> Option
 /// HF cache の 3 段 fallback。すべて失敗で `None` → clamp は no-op。
 ///
 /// **B-3 (LocalAI fit_params 思想)**:
+/// server の `/v1/models` エンドポイントから `context_length` を取得する (Unsloth / OpenAI 互換)。
+pub fn fetch_model_ctx_from_models_endpoint(
+    server_url: &str,
+    model_id: &str,
+    api_key: Option<&str>,
+) -> Option<u32> {
+    let agent = crate::runtime::http_agent::short_agent();
+    let url = format!("{}/v1/models", server_url.trim_end_matches('/'));
+    let mut req = agent.get(&url);
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let mut resp = req.call().ok()?;
+    let body = resp.body_mut().read_to_string().ok()?;
+    parse_model_ctx_from_models_json(&body, Some(model_id))
+}
+
+/// `/v1/models` の JSON レスポンスから `context_length` をパースする純粋関数。
+pub fn parse_model_ctx_from_models_json(json_str: &str, target_model: Option<&str>) -> Option<u32> {
+    let val: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let data = val.get("data")?.as_array()?;
+
+    // 1. target_model と完全一致または末尾一致するものを優先
+    if let Some(target) = target_model.filter(|t| !t.is_empty()) {
+        for m in data {
+            if let Some(id) = m.get("id").and_then(|v| v.as_str())
+                && (id == target || id.ends_with(target) || target.ends_with(id))
+                && let Some(ctx) = m
+                    .get("context_length")
+                    .or_else(|| m.get("max_context_length"))
+                    .and_then(|v| v.as_u64())
+            {
+                return Some(ctx as u32);
+            }
+        }
+    }
+
+    // 2. loaded: true なモデル
+    for m in data {
+        if m.get("loaded").and_then(|v| v.as_bool()).unwrap_or(false)
+            && let Some(ctx) = m
+                .get("context_length")
+                .or_else(|| m.get("max_context_length"))
+                .and_then(|v| v.as_u64())
+        {
+            return Some(ctx as u32);
+        }
+    }
+
+    // 3. 先頭の要素
+    data.first()
+        .and_then(|m| {
+            m.get("context_length")
+                .or_else(|| m.get("max_context_length"))
+        })
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+}
+
+/// server の context 上限を取得する (3段+models endpoint fallback)。
+///
 /// - llama.cpp backend: `/props` で取得
+/// - Unsloth / OpenAI backend: `/v1/models` で取得
 /// - MLX backend かつ `model_path` がローカル dir: [`fetch_model_ctx_from_card`]
 /// - MLX backend かつ `model_path` が HF repo id: [`fetch_model_ctx_from_hf_cache`]
 pub fn resolve_server_n_ctx(server_url: &str, model_path: &str) -> Option<u32> {
+    resolve_server_n_ctx_with_key(server_url, model_path, None)
+}
+
+/// API キー付きで server の context 上限を取得する。
+pub fn resolve_server_n_ctx_with_key(
+    server_url: &str,
+    model_path: &str,
+    api_key: Option<&str>,
+) -> Option<u32> {
     fetch_server_n_ctx(server_url)
+        .or_else(|| fetch_model_ctx_from_models_endpoint(server_url, model_path, api_key))
         .or_else(|| fetch_model_ctx_from_card(model_path))
         .or_else(|| fetch_model_ctx_from_hf_cache(model_path))
 }
@@ -260,5 +332,40 @@ mod tests {
         assert_eq!(fetch_model_ctx_from_hf_cache("/abs/local/dir"), None);
         assert_eq!(fetch_model_ctx_from_hf_cache("./rel"), None);
         assert_eq!(fetch_model_ctx_from_hf_cache("noslash"), None);
+    }
+
+    #[test]
+    fn t_parse_model_ctx_from_models_json_unsloth() {
+        let json = r#"{
+            "object": "list",
+            "data": [
+                {
+                    "id": "Aratako/Qwen3-8B-ERP-v0.1-GGUF",
+                    "object": "model",
+                    "context_length": 8192,
+                    "max_context_length": 8192,
+                    "loaded": true
+                },
+                {
+                    "id": "unsloth/Qwen3.5-4B-MTP-GGUF",
+                    "object": "model",
+                    "context_length": 4096,
+                    "loaded": false
+                }
+            ]
+        }"#;
+
+        // 対象モデル指定で取得
+        assert_eq!(
+            parse_model_ctx_from_models_json(json, Some("Aratako/Qwen3-8B-ERP-v0.1-GGUF")),
+            Some(8192)
+        );
+        // 部分一致 (短縮ID) で取得
+        assert_eq!(
+            parse_model_ctx_from_models_json(json, Some("Qwen3-8B-ERP-v0.1-GGUF")),
+            Some(8192)
+        );
+        // 無指定時 loaded: true から取得
+        assert_eq!(parse_model_ctx_from_models_json(json, None), Some(8192));
     }
 }

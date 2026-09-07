@@ -593,7 +593,13 @@ fn extract_syms_regex(content: &str, ext: &str) -> Vec<String> {
             for m in re.find_iter(content) {
                 let raw = m.as_str().trim();
                 let s = if raw.len() > 80 {
-                    format!("{}...", &raw[..80])
+                    let safe_end = raw
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|&i| i <= 80)
+                        .last()
+                        .unwrap_or(0);
+                    format!("{}...", &raw[..safe_end])
                 } else {
                     raw.to_string()
                 };
@@ -1068,5 +1074,17 @@ mod tests {
             core_pos.unwrap() < main_pos.unwrap(),
             "core.rs should rank above main.rs: {result}"
         );
+    }
+
+    #[test]
+    fn t_repomap_multibyte_slice_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let c_file = dir.path().join("util.h");
+        // "void func(" は 10B。"a".repeat(69) で 79B。直後に "あ" (3B: E3 81 82) が来ると
+        // 80B目 (index 80) は "あ" の2バイト目 (0x81) となり、byte boundary 違反で panic する。
+        let func = format!("void func({}あ);\n", "a".repeat(69));
+        std::fs::write(&c_file, func).unwrap();
+        let syms = extract_syms(&c_file);
+        assert!(!syms.is_empty());
     }
 }

@@ -11,7 +11,7 @@ use crate::config::InferenceParams;
 use crate::domain::conversation::Message;
 use crate::domain::llm::{GenerateResult, LlmBackend, TokenUsage};
 use crate::domain::tool_schema::ToolSchema;
-use crate::runtime::http_agent::{shared_agent, short_agent, streaming_agent};
+use crate::runtime::http_agent::{short_agent, streaming_agent};
 
 /// llama-serverプロセスを管理し、OpenAI互換APIで通信するバックエンド
 pub struct LlamaServerBackend {
@@ -24,6 +24,8 @@ pub struct LlamaServerBackend {
     seed: u64,
     /// SSEチャンク間タイムアウト秒数（0で無制限）
     sse_chunk_timeout_secs: u64,
+    /// API認証キー（Unsloth Desktop / 外部API用）
+    api_key: Option<String>,
 }
 
 impl LlamaServerBackend {
@@ -36,6 +38,7 @@ impl LlamaServerBackend {
             mlx_compatible: false,
             seed: 0,
             sse_chunk_timeout_secs: 60,
+            api_key: None,
         }
     }
 
@@ -48,7 +51,14 @@ impl LlamaServerBackend {
             mlx_compatible: false,
             seed: 0,
             sse_chunk_timeout_secs: 60,
+            api_key: None,
         }
+    }
+
+    /// API認証キー（Bearerトークン）を設定
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
     }
 
     /// SSEチャンクタイムアウトを設定
@@ -71,16 +81,24 @@ impl LlamaServerBackend {
 
     /// ヘルスチェック（/health → /v1/models フォールバック）
     ///
-    /// llama-serverは/health、mlx-lm serverは/v1/modelsで応答する。
+    /// llama-serverは/health、mlx-lm serverやUnsloth Desktopは/v1/modelsで応答する。
     pub fn is_healthy(&self) -> bool {
         let agent = short_agent();
         let health_url = format!("{}/health", self.base_url);
-        if agent.get(&health_url).call().is_ok() {
+        let mut req = agent.get(&health_url);
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        if req.call().is_ok() {
             return true;
         }
-        // mlx-lm server は /health 未対応 → /v1/models で代替
+        // mlx-lm server や Unsloth Desktop は /health 未対応 → /v1/models で代替
         let models_url = format!("{}/v1/models", self.base_url);
-        agent.get(&models_url).call().is_ok()
+        let mut req_models = agent.get(&models_url);
+        if let Some(key) = &self.api_key {
+            req_models = req_models.header("Authorization", format!("Bearer {key}"));
+        }
+        req_models.call().is_ok()
     }
 
     /// ヘルスチェック+待機リトライ（macOS26/Agent知見: 死活監視パターン）
@@ -283,12 +301,13 @@ impl LlamaServerBackend {
         // ストリーミングを無効化してフォールバック
         body["stream"] = serde_json::json!(false);
 
-        let response: serde_json::Value = shared_agent()
+        let mut req = streaming_agent(self.sse_chunk_timeout_secs)
             .post(&url)
-            .header("Content-Type", "application/json")
-            .send_json(&body)?
-            .body_mut()
-            .read_json()?;
+            .header("Content-Type", "application/json");
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        let response: serde_json::Value = req.send_json(&body)?.body_mut().read_json()?;
 
         let text = response["choices"][0]["message"]["content"]
             .as_str()
@@ -337,11 +356,11 @@ impl LlmBackend for LlamaServerBackend {
         // ストリーミングリクエスト送信
         // SSEチャンクタイムアウト（OpenCode知見: wrapSSE的保護）+ socket-level deadline (Step 13)
         let agent = streaming_agent(self.sse_chunk_timeout_secs);
-        let response = match agent
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .send_json(&body)
-        {
+        let mut req = agent.post(&url).header("Content-Type", "application/json");
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        let response = match req.send_json(&body) {
             Ok(resp) => resp,
             Err(e) => {
                 // ストリーミングリクエスト失敗時は非ストリーミングでフォールバック
@@ -415,6 +434,7 @@ impl LlmBackend for LlamaServerBackend {
             mlx_compatible: self.mlx_compatible,
             seed: self.seed,
             sse_chunk_timeout_secs: self.sse_chunk_timeout_secs,
+            api_key: self.api_key.clone(),
         };
         scoped.generate(messages, tools, on_token, cancel)
     }
@@ -869,5 +889,13 @@ sse_chunk_timeout_secs = 0
         // 日本語: "こんにちは" = 15 UTF-8 bytes → 15 * 0.4 = 6.0 → 6
         let estimate = estimate_tokens_from_text("こんにちは");
         assert_eq!(estimate, 6);
+    }
+
+    #[test]
+    fn test_with_api_key() {
+        let backend =
+            LlamaServerBackend::connect("http://localhost:8000", "Qwen3-8B-ERP-v0.1-GGUF")
+                .with_api_key("sk-unsloth-secret");
+        assert_eq!(backend.api_key.as_deref(), Some("sk-unsloth-secret"));
     }
 }
