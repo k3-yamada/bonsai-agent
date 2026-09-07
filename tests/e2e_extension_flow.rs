@@ -9,7 +9,7 @@
 use bonsai_agent::agent::agent_loop::{AgentConfig, StepContext, StepOutcome, execute_step};
 use bonsai_agent::agent::dmn::generator::DmnGenerator;
 use bonsai_agent::agent::error_recovery::{
-    CircuitBreaker, LoopDetector, MultiFileEditCycleDetector,
+    CircuitBreaker, FileStuckGuard, LoopDetector, MultiFileEditCycleDetector, TrialSummary,
 };
 use bonsai_agent::agent::event_store::EventStore;
 use bonsai_agent::agent::fast_path::FastPathDispatcher;
@@ -146,6 +146,8 @@ fn test_e2e_magi_supervision_in_execute_step() {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -155,11 +157,13 @@ fn test_e2e_magi_supervision_in_execute_step() {
             0, // attempt 0
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .expect("execute_step failed");
 
         // 破壊的回答はブロックされ、自己修正（Continue）を促す
-        assert!(matches!(outcome, StepOutcome::Continue(_)));
+        assert!(matches!(outcome, StepOutcome::Continue { .. }));
 
         // セッションに安全指導が注入されたことを検証
         let last_msg = session.messages.last().unwrap();
@@ -197,6 +201,8 @@ fn test_e2e_magi_supervision_in_execute_step() {
         let mut loop_detector = LoopDetector::default();
         let mut tool_cache = ToolResultCache::new();
         let mut cycle_detector = MultiFileEditCycleDetector::default();
+        let mut trial_summary = TrialSummary::default();
+        let mut file_stuck_guard = FileStuckGuard::default();
 
         let outcome = execute_step(
             &mut session,
@@ -206,6 +212,8 @@ fn test_e2e_magi_supervision_in_execute_step() {
             0,
             &mut tool_cache,
             &mut cycle_detector,
+            &mut trial_summary,
+            &mut file_stuck_guard,
         )
         .expect("execute_step failed");
 

@@ -59,7 +59,8 @@ impl Sandbox for DirectSandbox {
         };
 
         // ulimit をシェル経由で適用 (ResourceLimits に基づくファイルサイズ・CPU 時間上限)
-        // 注意: 本実装は Phase A の最小 ulimit 前置であり、プロセスグループ分離や本格隔離 (bwrap 等) は Phase B で対応
+        // Unix環境ではプロセスグループ分離 (process_group(0)) とタイムアウト時のグループシグナル送信 (SIGKILL) により孫プロセスの残留を防止。
+        // OSネイティブ隔離 (macOS AppSandbox / Linux bwrap) やシェル経由のPathGuard迂回防止は Phase B.2 で対応。
         let timeout_secs = limits.timeout.as_secs().max(1);
         let max_blocks = (limits.max_output_bytes / 512).max(1024);
         let limited_command =

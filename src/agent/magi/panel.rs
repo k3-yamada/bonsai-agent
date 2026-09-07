@@ -95,11 +95,11 @@ impl MagiPanel {
         Self { judges }
     }
 
-    /// 全Judgeの判定を集計し、多数決で最終決定と各Judgeの個別判定を返す。
+    /// 全Judgeの判定を集計し、最終決定と各Judgeの個別判定を返す。
     ///
     /// - 1体以上が Block ➔ Halt（安全停止: C5合議契約統一）
-    /// - 2体以上が Concern ➔ Warn（警告）
-    /// - それ以外 ➔ Proceed（承認）
+    /// - 1体以上が Concern ➔ Warn（警告: 懸念事項の検知）
+    /// - それ以外（全員一致で Clear） ➔ Proceed（承認）
     pub fn decide_with_verdicts(
         &self,
         ctx: &ResponseContext,
