@@ -1070,6 +1070,7 @@ fn test_execute_validated_calls_empty() {
     let sf = SecretsFilter::default();
     let mut cache = ToolResultCache::new();
     let mut cycle = MultiFileEditCycleDetector::default();
+    let config = AgentConfig::default();
     let result = execute_validated_calls(
         &[],
         &mut session,
@@ -1078,9 +1079,7 @@ fn test_execute_validated_calls_empty() {
         None,
         &mut cache,
         &mut cycle,
-        false,
-        crate::tools::permission::DaemonPolicy::AutoOnly,
-        crate::safety::autonomy::AutonomyLevel::Supervised,
+        &config,
     );
     assert!(result.is_empty());
 }

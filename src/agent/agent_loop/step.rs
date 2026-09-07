@@ -339,9 +339,7 @@ pub fn execute_step(
         ctx.store,
         tool_cache,
         cycle_detector,
-        ctx.config.is_daemon,
-        ctx.config.daemon_policy,
-        ctx.config.autonomy,
+        ctx.config,
     );
     Ok(StepOutcome::Continue(step_tools))
 }

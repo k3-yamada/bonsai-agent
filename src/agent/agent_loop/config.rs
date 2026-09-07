@@ -42,7 +42,12 @@ pub struct AgentConfig {
     pub is_daemon: bool,
     /// デーモン時のツール実行ポリシー
     pub daemon_policy: crate::tools::permission::DaemonPolicy,
+    /// ツール実行前の確認コールバック（Supervised モードで使用）
+    pub confirm_callback: Option<ConfirmCallback>,
 }
+
+/// ツール実行前の確認コールバック型
+pub type ConfirmCallback = std::sync::Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -64,6 +69,7 @@ impl Default for AgentConfig {
             autonomy: crate::safety::autonomy::AutonomyLevel::Supervised,
             is_daemon: false,
             daemon_policy: crate::tools::permission::DaemonPolicy::AutoOnly,
+            confirm_callback: None,
         }
     }
 }

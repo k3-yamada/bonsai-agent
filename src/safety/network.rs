@@ -168,16 +168,18 @@ pub fn is_private_or_restricted_ip(ip: &IpAddr) -> bool {
 }
 
 fn extract_domain(url: &str) -> String {
-    url.split("//")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_lowercase()
+    if let Ok(parsed) = reqwest::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        return host.to_lowercase();
+    }
+    // スキームなし (例: "example.com/path") へのフォールバック
+    if let Ok(parsed) = reqwest::Url::parse(&format!("http://{url}"))
+        && let Some(host) = parsed.host_str()
+    {
+        return host.to_lowercase();
+    }
+    String::new()
 }
 impl Default for NetworkFilter {
     fn default() -> Self {
@@ -230,6 +232,23 @@ mod tests {
         let f = NetworkFilter::strict(&["trusted.example"]);
         assert!(!f.is_allowed("https://evil.com/path"));
         assert!(!f.is_allowed("http://localhost:8080"));
+    }
+    #[test]
+    fn t_extract_domain_userinfo() {
+        assert_eq!(
+            extract_domain("https://user:pass@example.com:8080/path"),
+            "example.com"
+        );
+        assert_eq!(
+            extract_domain("http://admin:secret@huggingface.co/model"),
+            "huggingface.co"
+        );
+    }
+    #[test]
+    fn t_strict_userinfo_matching() {
+        let f = NetworkFilter::strict(&["huggingface.co"]);
+        assert!(f.is_allowed("https://user:pass@huggingface.co/model"));
+        assert!(!f.is_allowed("https://user:pass@evil.com/leak"));
     }
     #[test]
     fn t_extract_domain_no_scheme() {
