@@ -30,7 +30,15 @@ impl TypedTool for FileReadTool {
 
     fn execute(&self, args: FileReadArgs) -> Result<ToolResult> {
         let path = &args.path;
+        let guard = crate::safety::path_guard::PathGuard::default_deny_list();
+        if guard.is_denied(path) {
+            return Ok(ToolResult {
+                output: format!("セキュリティエラー: 禁止パスへのアクセスは拒否されました: {path}"),
+                success: false,
+            });
+        }
         let offset = args.offset.unwrap_or(0) as usize;
+
         let limit = args.limit.unwrap_or(100) as usize;
         match std::fs::read_to_string(path) {
             Ok(fc) => {
@@ -118,6 +126,13 @@ impl TypedTool for FileWriteTool {
 
     fn execute(&self, args: FileWriteArgs) -> Result<ToolResult> {
         let path = &args.path;
+        let guard = crate::safety::path_guard::PathGuard::default_deny_list();
+        if guard.is_denied(path) {
+            return Ok(ToolResult {
+                output: format!("セキュリティエラー: 禁止パスへのアクセスは拒否されました: {path}"),
+                success: false,
+            });
+        }
 
         // git-first: 書き込み前にスナップショット
         Self::git_snapshot(path);
@@ -214,6 +229,13 @@ impl TypedTool for MultiEditTool {
 
     fn execute(&self, args: MultiEditArgs) -> Result<ToolResult> {
         let path = &args.path;
+        let guard = crate::safety::path_guard::PathGuard::default_deny_list();
+        if guard.is_denied(path) {
+            return Ok(ToolResult {
+                output: format!("セキュリティエラー: 禁止パスへのアクセスは拒否されました: {path}"),
+                success: false,
+            });
+        }
         if args.edits.is_empty() {
             return Ok(ToolResult {
                 output: "editsが空です".to_string(),
@@ -1276,5 +1298,35 @@ mod tests {
         let old_text = "unique_start\n    body\nunique_end";
         let result = try_context_aware(content, old_text, "new");
         assert!(result.is_none(), "重複なしではContextAwareは適用されない");
+    }
+
+    #[test]
+    fn test_file_tools_path_guard_denied() {
+        use crate::tools::Tool;
+        // FileReadTool
+        let read_tool = FileReadTool;
+        let res = read_tool
+            .call(serde_json::json!({"path": "/etc/shadow"}))
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
+
+        let res = read_tool.call(serde_json::json!({"path": ".env"})).unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
+
+        // FileWriteTool
+        let write_tool = FileWriteTool;
+        let res = write_tool
+            .call(serde_json::json!({"path": "/etc/passwd", "content": "bad"}))
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
+
+        // MultiEditTool
+        let multi_tool = MultiEditTool;
+        let res = multi_tool.call(serde_json::json!({"path": "~/.ssh/id_rsa", "edits": [{"old_text": "a", "new_text": "b"}]})).unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
     }
 }

@@ -66,8 +66,41 @@ impl TypedTool for WebFetchTool {
     fn execute(&self, args: WebFetchArgs) -> Result<ToolResult> {
         let url = &args.url;
 
-        match reqwest::blocking::get(url) {
+        // SSRF 防御: スキーム、プライベートIP、ループバック、メタデータIPの検証
+        let filter = crate::safety::network::NetworkFilter::allow_all();
+        if let Err(e) = crate::safety::network::validate_fetch_url(url, &filter) {
+            return Ok(ToolResult {
+                output: format!("セキュリティエラー: {e}"),
+                success: false,
+            });
+        }
+
+        // タイムアウト10秒、リダイレクト追従禁止（リダイレクトによるSSRF迂回を遮断）
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolResult {
+                    output: format!("クライアント初期化エラー: {e}"),
+                    success: false,
+                });
+            }
+        };
+
+        match client.get(url).send() {
             Ok(response) => {
+                let status = response.status();
+                if status.is_redirection() {
+                    return Ok(ToolResult {
+                        output: format!(
+                            "リダイレクトが検出されたため取得を中止しました (status: {status})"
+                        ),
+                        success: false,
+                    });
+                }
                 let body = response.text()?;
                 // HTMLタグを簡易的に除去
                 let text = strip_html_tags(&body);
@@ -288,6 +321,31 @@ mod tests {
         let tool = WebFetchTool;
         assert_eq!(tool.name(), "web_fetch");
         assert_eq!(tool.permission(), Permission::Auto);
+    }
+
+    #[test]
+    fn test_web_fetch_ssrf_denied() {
+        let tool = WebFetchTool;
+        // localhost
+        let res = tool
+            .call(serde_json::json!({"url": "http://localhost:8080"}))
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
+
+        // private IP
+        let res = tool
+            .call(serde_json::json!({"url": "http://192.168.1.1/admin"}))
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
+
+        // cloud metadata
+        let res = tool
+            .call(serde_json::json!({"url": "http://169.254.169.254/meta"}))
+            .unwrap();
+        assert!(!res.success);
+        assert!(res.output.contains("セキュリティエラー"));
     }
 
     #[test]

@@ -1,7 +1,6 @@
 use crate::domain::conversation::ToolCall;
 use regex::Regex;
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::LazyLock;
 
 /// バリデーション結果
@@ -41,51 +40,7 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
-/// パスガード: アクセス禁止パスのリスト
-pub struct PathGuard {
-    deny_paths: Vec<String>,
-}
-
-impl PathGuard {
-    pub fn new(deny_paths: Vec<String>) -> Self {
-        Self { deny_paths }
-    }
-
-    pub fn default_deny_list() -> Self {
-        Self::new(vec![
-            "~/.ssh".to_string(),
-            "~/.gnupg".to_string(),
-            "~/.aws".to_string(),
-            "/etc/shadow".to_string(),
-            "/etc/passwd".to_string(),
-        ])
-    }
-
-    /// パスがdenyリストに含まれるかチェック
-    pub fn is_denied(&self, path: &str) -> bool {
-        let expanded = expand_tilde(path);
-        let check_path = Path::new(&expanded);
-
-        for deny in &self.deny_paths {
-            let expanded_deny = expand_tilde(deny);
-            let deny_path = Path::new(&expanded_deny);
-            if check_path.starts_with(deny_path) {
-                return true;
-            }
-        }
-        false
-    }
-}
-
-/// `~` をホームディレクトリに展開
-fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return format!("{}{}", home.to_string_lossy(), &path[1..]);
-    }
-    path.to_string()
-}
+pub use crate::safety::path_guard::PathGuard;
 
 /// 編集距離ベースの類似ツール名提案（OpenCode知見: Invalidツールハンドラ）
 fn suggest_similar_tool(name: &str, known: &HashSet<String>) -> Option<String> {
@@ -199,7 +154,7 @@ fn check_dangerous_patterns(
             for pattern in patterns {
                 if pattern.is_match(s) {
                     issues.push(ValidationIssue {
-                        severity: Severity::Warn,
+                        severity: Severity::Block,
                         message: format!("危険なコマンドパターン検出: '{s}'"),
                     });
                 }
@@ -280,9 +235,9 @@ mod tests {
             arguments: serde_json::json!({"command": "rm -rf /"}),
         };
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
-        // 危険パターンはWarn（ツール自体は有効なのでis_valid=true、ただし警告あり）
-        assert!(result.is_valid);
-        assert!(result.issues.iter().any(|i| i.severity == Severity::Warn));
+        // 危険パターンは即時 Block
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Block));
     }
 
     // テスト5: 危険コマンド（sudo）
@@ -293,12 +248,9 @@ mod tests {
             arguments: serde_json::json!({"command": "sudo apt install vim"}),
         };
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
-        assert!(
-            result
-                .issues
-                .iter()
-                .any(|i| i.message.contains("危険なコマンドパターン"))
-        );
+        // sudo は即時 Block
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Block));
     }
 
     // テスト6: 安全なパス
@@ -360,7 +312,8 @@ mod tests {
             arguments: serde_json::json!({"command": ":(){ :|:& };"}),
         };
         let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
-        assert!(result.issues.iter().any(|i| i.severity == Severity::Warn));
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Block));
     }
 
     #[test]
