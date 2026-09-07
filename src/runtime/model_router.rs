@@ -1,6 +1,7 @@
 use crate::observability::logger::{LogLevel, log_event};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -381,29 +382,9 @@ impl AdvisorConfig {
             role.user_prompt(task_context)
         );
 
-        let output = std::process::Command::new("claude")
-            .args(["-p", &prompt, "--output-format", "text"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let content = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if content.is_empty() {
-                    anyhow::bail!("Claude Code応答が空");
-                }
-                self.cache.insert(key, content.clone());
-                Ok(Some(content))
-            }
-            Ok(out) => {
-                anyhow::bail!("Claude Code終了コード: {:?}", out.status.code())
-            }
-            Err(e) => {
-                anyhow::bail!("Claude Code実行失敗: {e}")
-            }
-        }
+        let content = Self::exec_claude_cli(&prompt, Duration::from_secs(30))?;
+        self.cache.insert(key, content.clone());
+        Ok(Some(content))
     }
 
     /// system+user の生プロンプトを取って外部API呼出（OpenAI互換 /chat/completions）
@@ -484,29 +465,66 @@ impl AdvisorConfig {
         }
 
         let prompt = format!("{system}\n\n{user}");
-        let output = std::process::Command::new("claude")
-            .args(["-p", &prompt, "--output-format", "text"])
+        let content = Self::exec_claude_cli(&prompt, Duration::from_secs(30))?;
+        self.cache.insert(key, content.clone());
+        Ok(Some(content))
+    }
+
+    /// H20: Claude CLI サブプロセス呼び出し（タイムアウトとプロセスグループ監視）
+    fn exec_claude_cli(prompt: &str, timeout: Duration) -> anyhow::Result<String> {
+        let mut cmd = std::process::Command::new("claude");
+        cmd.args(["-p", prompt, "--output-format", "text"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output();
+            .stderr(std::process::Stdio::piped());
 
-        match output {
-            Ok(out) if out.status.success() => {
-                let content = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if content.is_empty() {
-                    anyhow::bail!("Claude Code応答が空");
-                }
-                self.cache.insert(key, content.clone());
-                Ok(Some(content))
-            }
-            Ok(out) => {
-                anyhow::bail!("Claude Code終了コード: {:?}", out.status.code())
-            }
-            Err(e) => {
-                anyhow::bail!("Claude Code実行失敗: {e}")
-            }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
         }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Claude Code起動失敗: {e}"))?;
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(50);
+
+        let status = loop {
+            match child.try_wait()? {
+                Some(status) => break status,
+                None => {
+                    if start.elapsed() >= timeout {
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::kill(-(child.id() as i32), libc::SIGKILL);
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        anyhow::bail!(
+                            "Claude Code実行がタイムアウトしました ({}s)",
+                            timeout.as_secs()
+                        );
+                    }
+                    std::thread::sleep(poll_interval);
+                }
+            }
+        };
+
+        if !status.success() {
+            anyhow::bail!("Claude Code終了コード: {:?}", status.code());
+        }
+
+        let mut stdout = Vec::new();
+        if let Some(mut out) = child.stdout.take() {
+            use std::io::Read;
+            out.read_to_end(&mut stdout)?;
+        }
+        let content = String::from_utf8_lossy(&stdout).trim().to_string();
+        if content.is_empty() {
+            anyhow::bail!("Claude Code応答が空");
+        }
+        Ok(content)
     }
 
     /// 生プロンプト用のキャッシュキー（system+user の内容ハッシュ）
@@ -1005,6 +1023,11 @@ impl FallbackChain {
     pub fn is_exhausted(&self) -> bool {
         let idx = self.current_idx.load(Ordering::SeqCst);
         idx >= self.entries.len().saturating_sub(1)
+    }
+
+    /// 現在の連続失敗回数を取得
+    pub fn current_failures(&self) -> usize {
+        self.consecutive_failures.load(Ordering::SeqCst)
     }
 }
 

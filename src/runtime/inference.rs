@@ -55,10 +55,16 @@ impl LlmBackend for FallbackBackend {
         on_token: &mut dyn FnMut(&str),
         cancel: &CancellationToken,
     ) -> Result<GenerateResult> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("推論がキャンセルされました");
+        }
         let mut last_err: Option<anyhow::Error> = None;
         // チェーン全長分まで試行（同一エントリでの retry も含む）
         let max_attempts = self.chain.entries().len().saturating_mul(2).max(1);
         for _ in 0..max_attempts {
+            if cancel.is_cancelled() {
+                anyhow::bail!("推論がキャンセルされました");
+            }
             let Some(entry) = self.chain.current() else {
                 break;
             };
@@ -72,6 +78,9 @@ impl LlmBackend for FallbackBackend {
                     return Ok(result);
                 }
                 Err(e) => {
+                    if cancel.is_cancelled() {
+                        return Err(e);
+                    }
                     log_event(
                         LogLevel::Warn,
                         "fallback",
@@ -97,9 +106,15 @@ impl LlmBackend for FallbackBackend {
         cancel: &CancellationToken,
         params: &crate::config::InferenceParams,
     ) -> Result<GenerateResult> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("推論がキャンセルされました");
+        }
         let mut last_err: Option<anyhow::Error> = None;
         let max_attempts = self.chain.entries().len().saturating_mul(2).max(1);
         for _ in 0..max_attempts {
+            if cancel.is_cancelled() {
+                anyhow::bail!("推論がキャンセルされました");
+            }
             let Some(entry) = self.chain.current() else {
                 break;
             };
@@ -113,6 +128,9 @@ impl LlmBackend for FallbackBackend {
                     return Ok(result);
                 }
                 Err(e) => {
+                    if cancel.is_cancelled() {
+                        return Err(e);
+                    }
                     log_event(
                         LogLevel::Warn,
                         "fallback",
@@ -350,5 +368,19 @@ mod tests {
     fn t_fallback_backend_synthetic_model_id() {
         let fb = build_fallback(0, 0);
         assert_eq!(fb.model_id(), "fallback-chain");
+    }
+
+    #[test]
+    fn t_fallback_backend_cancel_aborts_without_fallback_or_penalizing_primary() {
+        // primary は 0 回失敗（正常）、secondary も正常
+        let fb = build_fallback(0, 0);
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // 事前キャンセル
+        let result = fb.generate(&[], &[], &mut |_| {}, &cancel);
+        assert!(result.is_err(), "事前キャンセル時はエラー");
+
+        // キャンセルによって primary が penalize されたり切替が行われていないことを検証
+        assert_eq!(fb.chain().current().unwrap().model_id, "primary");
+        assert_eq!(fb.chain().current_failures(), 0);
     }
 }

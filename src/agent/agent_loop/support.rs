@@ -81,9 +81,6 @@ pub(super) fn record_success(
     });
     let skills = SkillStore::new(s.conn());
     let _ = skills.promote_from_experiences(s.conn(), 3);
-    let evo = crate::memory::evolution::EvolutionEngine::new(s);
-    let _ = evo.auto_collect();
-    let _ = evo.apply_improvements();
 }
 
 /// 注入された ERL heuristic IDs に対し task 完了結果を反映 (項目 213、plan §4.5/§4.6)。

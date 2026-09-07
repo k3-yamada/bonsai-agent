@@ -32,20 +32,31 @@ impl Vault {
     pub fn append(&self, entry: &StockEntry) -> Result<()> {
         let path = self.root.join(format!("{}.md", entry.category.as_str()));
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
-        let line = format!(
-            "\n- [{timestamp}] {}\n",
-            entry
-                .content
-                .replace('\n', " ")
-                .chars()
-                .take(200)
-                .collect::<String>()
-        );
-        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-        // 重複チェック（同じ内容が既にあればスキップ）
-        if content.contains(&entry.content.chars().take(50).collect::<String>()) {
+        let entry_clean = entry.content.replace('\n', " ").trim().to_string();
+        if entry_clean.is_empty() {
             return Ok(());
         }
+        let entry_truncated: String = entry_clean.chars().take(200).collect();
+
+        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+        // 重複チェック（同じ内容が既にあればスキップ）: 各行の本文と完全一致するか検証
+        for existing_line in content.lines() {
+            let trimmed = existing_line.trim();
+            let existing_body = if let Some(rest) = trimmed.strip_prefix("- ") {
+                if let Some(idx) = rest.find("] ") {
+                    &rest[idx + 2..]
+                } else {
+                    rest
+                }
+            } else {
+                trimmed
+            };
+            if existing_body == entry_truncated || existing_body == entry_clean {
+                return Ok(());
+            }
+        }
+
+        let line = format!("\n- [{timestamp}] {entry_truncated}\n");
         content.push_str(&line);
         std::fs::write(&path, content)?;
         Ok(())
@@ -237,6 +248,34 @@ mod tests {
         v.append(&e).unwrap();
         let c = v.read_category(&StockCategory::Fact).unwrap();
         assert_eq!(c.matches("1.28GB").count(), 1); // 重複なし
+        std::fs::remove_dir_all(v.root()).ok();
+    }
+    #[test]
+    fn t_dedup_preserves_entries_with_common_prefix() {
+        let v = tmp_vault();
+        // 50文字以上の共通プレフィックスを持つ2つの異なるエントリ
+        let prefix =
+            "Rust言語における並行処理とメモリ安全性の保証メカニズムについての詳細な分析結果：";
+        assert!(prefix.chars().count() >= 40);
+        let e1 = StockEntry {
+            category: StockCategory::Insight,
+            content: format!("{prefix} SendとSyncトレイトがデータ競合を防止する"),
+            source: "s1".into(),
+        };
+        let e2 = StockEntry {
+            category: StockCategory::Insight,
+            content: format!("{prefix} MutexとArcによってスレッド間共有を実現する"),
+            source: "s2".into(),
+        };
+        v.append(&e1).unwrap();
+        v.append(&e2).unwrap();
+        let c = v.read_category(&StockCategory::Insight).unwrap();
+        assert!(c.contains("SendとSyncトレイト"));
+        assert!(c.contains("MutexとArc"));
+        // 同一エントリを再度追加した場合は重複排除される
+        v.append(&e1).unwrap();
+        let c_after = v.read_category(&StockCategory::Insight).unwrap();
+        assert_eq!(c_after.matches("SendとSyncトレイト").count(), 1);
         std::fs::remove_dir_all(v.root()).ok();
     }
     #[test]

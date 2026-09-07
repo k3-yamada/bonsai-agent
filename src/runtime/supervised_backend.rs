@@ -39,11 +39,8 @@ impl LlmBackend for SupervisedBackend {
     ) -> Result<GenerateResult> {
         // lazy respawn: server が落ちていれば起動を試みる (disabled では no-op)。
         let _ = self.supervisor.ensure_running();
-        self.supervisor.record_request();
-        let r = self.inner.generate(messages, tools, on_token, cancel);
-        // 推論完了時刻でも idle timer をリセット (長時間 generate 中の誤 kill 回避)。
-        self.supervisor.record_request();
-        r
+        let _guard = self.supervisor.enter_in_flight();
+        self.inner.generate(messages, tools, on_token, cancel)
     }
 
     fn generate_with_params(
@@ -55,12 +52,9 @@ impl LlmBackend for SupervisedBackend {
         params: &crate::config::InferenceParams,
     ) -> Result<GenerateResult> {
         let _ = self.supervisor.ensure_running();
-        self.supervisor.record_request();
-        let r = self
-            .inner
-            .generate_with_params(messages, tools, on_token, cancel, params);
-        self.supervisor.record_request();
-        r
+        let _guard = self.supervisor.enter_in_flight();
+        self.inner
+            .generate_with_params(messages, tools, on_token, cancel, params)
     }
 }
 

@@ -193,6 +193,7 @@ impl LlamaServerBackend {
         // MLX互換: top_k/min_p/repeat_penaltyはMLXサーバーでサイレント無視されるため除外
         if self.mlx_compatible {
             let mut body = serde_json::json!({
+                "model": &self.model_id,
                 "messages": msgs,
                 "temperature": self.inference.temperature,
                 "top_p": self.inference.top_p,
@@ -206,6 +207,7 @@ impl LlamaServerBackend {
             body
         } else {
             let mut body = serde_json::json!({
+                "model": &self.model_id,
                 "messages": msgs,
                 "temperature": self.inference.temperature,
                 "top_k": self.inference.top_k,
@@ -646,6 +648,7 @@ sse_chunk_timeout_secs = 0
             Message::user("こんにちは"),
         ];
         let body = backend.build_request_body(&messages, &[]);
+        assert_eq!(body["model"], "test");
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0]["role"], "system");

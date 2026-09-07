@@ -415,13 +415,16 @@ fn create_backend(ctx: &AppContext) -> Box<dyn LlmBackend> {
         let mut at_least_one_healthy = false;
         for entry in chain.entries() {
             let mlx_compat = entry.backend == ServerBackend::MlxLm;
-            let b = LlamaServerBackend::connect_with_params(
+            let mut b = LlamaServerBackend::connect_with_params(
                 &entry.server_url,
                 &entry.model_id,
                 inference.clone(),
             )
             .with_mlx_compatible(mlx_compat)
             .with_sse_timeout(sse_timeout);
+            if let Some(key) = &ctx.app_config.model.api_key {
+                b = b.with_api_key(key.clone());
+            }
             if b.is_healthy() {
                 at_least_one_healthy = true;
             } else {
@@ -677,9 +680,13 @@ fn run_repl_stdio(
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(300.0);
+    let auto_persist = std::env::var("BONSAI_DMN_AUTO_PERSIST")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let worker = bonsai_agent::agent::dmn::worker::DmnWorker::new(120.0, 30.0, 0.75)
         .with_vault(vault_path)
-        .with_dream_threshold(dream_threshold);
+        .with_dream_threshold(dream_threshold)
+        .with_auto_persist(auto_persist);
     let dmn_backend = backend.clone();
     let dmn_inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let dmn_inbox_clone = dmn_inbox.clone();

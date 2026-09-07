@@ -44,7 +44,7 @@ schemars = "0.8"
 sqlite-vec = { version = "0.1.9", optional = true }
 
 [features]
-default = ["cli", "tree-sitter", "embeddings"]
+default = ["cli", "tree-sitter"]
 cli = []
 full = ["cli", "embeddings", "tree-sitter"]
 embeddings = ["dep:fastembed", "dep:sqlite-vec"]
