@@ -12,6 +12,7 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
 ### 品質
 - [docs/quality/lab-history.md](quality/lab-history.md) — Lab 実機テスト結果 (v1-v22 履歴、Z-1 Phase 3 で CLAUDE.md から分離)
 - [docs/quality/scores.md](quality/scores.md) — 定量 quality scores (coverage / clippy / Lab、Z-3 drift monitor Phase 4 で自動更新候補)
+- [docs/quality/critical-code-review-20260907.md](quality/critical-code-review-20260907.md) — 8 パーティション批判的コードレビュー統合報告（Block 判定 + 対応策）
 
 ### 実行
 - [docs/execution/runbook.md](execution/runbook.md) — ビルド・テストコマンド + Lab 起動手順 (Z-1 Phase 4 で CLAUDE.md から分離)
