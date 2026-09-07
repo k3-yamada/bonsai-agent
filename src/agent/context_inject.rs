@@ -37,42 +37,31 @@ pub(crate) fn inject_experience_context(
         return;
     }
 
-    let successes: Vec<String> = past
-        .iter()
-        .filter(|e| e.exp_type == ExperienceType::Success)
-        .map(|e| {
-            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
-            format!("- タスク: \"{}\" → {}", e.task_context, lesson)
-        })
-        .collect();
-
-    let failures: Vec<String> = past
-        .iter()
-        .filter(|e| e.exp_type == ExperienceType::Failure)
-        .map(|e| {
-            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
-            format!("- タスク: \"{}\" → {}", e.task_context, lesson)
-        })
-        .collect();
-
-    let insights: Vec<String> = past
-        .iter()
-        .filter(|e| e.exp_type == ExperienceType::Insight)
-        .map(|e| {
-            let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
-            format!("- {}", lesson)
-        })
-        .collect();
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+    let mut insights = Vec::new();
+    for e in &past {
+        let lesson = e.lesson.as_deref().unwrap_or(&e.outcome);
+        match e.exp_type {
+            ExperienceType::Success => {
+                successes.push(format!("- タスク: \"{}\" → {lesson}", e.task_context))
+            }
+            ExperienceType::Failure => {
+                failures.push(format!("- タスク: \"{}\" → {lesson}", e.task_context))
+            }
+            ExperienceType::Insight => insights.push(format!("- {lesson}")),
+        }
+    }
 
     let mut parts = Vec::new();
-    if !successes.is_empty() {
-        parts.push(format!("[成功パターン]\n{}", successes.join("\n")));
-    }
-    if !failures.is_empty() {
-        parts.push(format!("[失敗パターン]\n{}", failures.join("\n")));
-    }
-    if !insights.is_empty() {
-        parts.push(format!("[学び]\n{}", insights.join("\n")));
+    for (label, list) in [
+        ("[成功パターン]", &successes),
+        ("[失敗パターン]", &failures),
+        ("[学び]", &insights),
+    ] {
+        if !list.is_empty() {
+            parts.push(format!("{label}\n{}", list.join("\n")));
+        }
     }
 
     session.add_message(Message::system(format!(
@@ -328,6 +317,14 @@ pub(crate) fn inject_contextual_memories(
     }
 }
 
+/// セッションから過去に注入された `<context...` システムメッセージを除去する（reassemble用）。
+pub fn strip_injected_context(session: &mut Session) {
+    session.messages.retain(|m| {
+        !matches!(m.role, crate::domain::conversation::Role::System)
+            || !m.content.trim_start().starts_with("<context")
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +345,57 @@ mod tests {
         let result = load_soul(&Some(path));
         assert!(result.is_some());
         assert!(result.unwrap().contains("Test Persona"));
+    }
+
+    // C (測定→回帰防止): 注入された <context> ブロックを除去し会話を保持する。
+    // REPL で毎ターン注入が蓄積し、ペルソナ等が直近位置に再スタンプされて
+    // 1bit モデルを誤誘導する問題への「reassemble」修正の土台。
+    #[test]
+    fn t_strip_injected_context_removes_blocks_keeps_conversation() {
+        let mut s = Session::new();
+        s.add_message(Message::system("SYSTEM"));
+        s.add_message(Message::user("私の名前はkeizoです"));
+        s.add_message(Message::system(
+            "<context type=\"block:persona\">\n私はBonsai Agent\n</context>",
+        ));
+        s.add_message(Message::system(
+            "<context type=\"heuristics\">\n- foo\n</context>",
+        ));
+        s.add_message(Message::assistant("こんにちはkeizoさん"));
+
+        strip_injected_context(&mut s);
+
+        let contents: Vec<&str> = s.messages.iter().map(|m| m.content.as_str()).collect();
+        // <context ...> ブロックのみ除去、system/user/assistant の会話は保持
+        assert_eq!(
+            contents,
+            vec!["SYSTEM", "私の名前はkeizoです", "こんにちはkeizoさん"]
+        );
+    }
+
+    // 蓄積の実測 + 非蓄積保証: strip→再注入で persona ブロックは常に 1 個。
+    #[test]
+    fn t_reinject_after_strip_does_not_accumulate() {
+        let dir = tempfile::tempdir().unwrap();
+        let soul = dir.path().join("SOUL.md");
+        std::fs::write(&soul, "私はBonsai Agent").unwrap();
+        let soul_path = Some(soul);
+
+        let mut s = Session::new();
+        s.add_message(Message::system("SYSTEM"));
+
+        // 3 ターン分: 毎回 strip してから注入 (reassemble)
+        for _ in 0..3 {
+            strip_injected_context(&mut s);
+            inject_memory_blocks(&mut s, &soul_path, &[]);
+        }
+
+        let persona_count = s
+            .messages
+            .iter()
+            .filter(|m| m.content.contains("block:persona"))
+            .count();
+        assert_eq!(persona_count, 1, "persona は蓄積せず常に 1 個");
     }
 
     #[test]

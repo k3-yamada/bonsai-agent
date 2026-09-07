@@ -18,10 +18,22 @@ src/
 ├── agent/
 │   ├── agent_loop/                # run_agent_loop() — Reflexion + 全パーツ統合 (mod 分割)
 │   │                              # core.rs: メインループ + emit_event helper
-│   │                              # step.rs: 1 step 実行 (LLM call + tool exec)
+│   │                              # step.rs: 1 step 実行 (LLM call + tool exec) + MAGI 3重監視連携
 │   │                              # outcome.rs: StepOutcome ディスパッチ + Reflexion + Critic
 │   │                              # advisor_inject.rs: 計画/検証/critic 注入 + verification metric
+│   │                              # repl.rs: 会話継続型 REPL + 非侵入型 DMN 通知バッファリング
 │   │                              # support.rs: build_answer / check_invariants / record_*
+│   ├── fast_path.rs               # FastPathDispatcher — 反射層代替、定型挨拶・ping の低レイテンシ即答
+│   ├── dmn/                       # DMN (デフォルト・モード・ネットワーク) 自発的思考ループ
+│   │                              # generator.rs: 経験・失敗・知覚からの内省生成 (LLM/ルール)
+│   │                              # worker.rs: 3段階ゲート評価 + Vault / KG / A-MEM 多重還元
+│   │                              # scheduler.rs: 指数分布アイドル待機スケジューラ
+│   │                              # outcome.rs: Skipped / SilentReflection / SpokenReflection
+│   ├── magi/                      # MAGI 三重監視合議パネル (Step-Level Guardrail)
+│   │                              # panel.rs: 3-judge 合議調停 (Pass / Warn / Block) + Reflexion 注入
+│   │                              # judges.rs: SafetyJudge / ConsistencyJudge / GoodhartJudge (Values)
+│   ├── sensors/                   # 外部知覚センサー群 (Window / File / Network / Hub)
+│   │                              # event_handler.rs: 知覚イベントのサニタイズと意識層 (Experience) 還元
 │   ├── benchmark.rs               # BenchmarkSuite — 8タスク評価 + AgentFloor 30 task (項目 223)
 │   │                              # MultiRunConfig/MultiRunTaskScore — pass^k + PASS@(k,T) (項目 225)
 │   │                              # run_k() — 各タスクk回実行、pass_at_k/pass_consecutive_k計算
@@ -102,6 +114,10 @@ p^n 問題 (ステップ蓄積による失敗確率指数的増大) への対策
 - KG-FactCheck (項目 230 Plan A 系列、Bonsai-8B fabricate 検出)
 - Vault Lint 5 軸 (項目 246/251/254、orphan draft 検出含む)
 - Dynamic Budget (項目 248 Phase 1-4 + Phase 5 plan 起票済)
+- FastPath ルーティング (反射層代替、ping/定型挨拶のLLMバイパス・ゼロレイテンシ即答) (ADR-012)
+- DMN 自発思考ループ (アイドル時の経験・知覚内省 & ナレッジVault/KG/A-MEM多重還元) (ADR-012)
+- MAGI 三重監視合議 (Safety / Consistency / Goodhart・VALUES.md監視 + Reflexion自己反省) (ADR-012)
+- 非侵入型 REPL UX (dmn_inbox バッファリング & プロンプト直前インサイト提示) (ADR-012)
 
 ## Module layer 順
 

@@ -133,6 +133,79 @@ pub fn execute_step(
     // 4. ツール呼び出しがなければ最終回答
     if parsed.tool_calls.is_empty() {
         let answer = build_answer(&parsed);
+
+        // セッション内のツール実行結果など過去の軌跡を抽出
+        let trajectory: Vec<String> = session
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .map(|m| m.content.clone())
+            .collect();
+
+        // MAGI合議制による最終回答の安全性・VALUES.md評価（特にV6不確実性への誠実さ・V5自立的判断・四層記憶整合性）
+        let magi = crate::agent::magi::MagiPanel::default_panel();
+        let (_outcome, verdicts) =
+            magi.evaluate_final_answer_full(&answer, last_user_msg, &trajectory, ctx.store);
+
+        let block_reasons: Vec<String> = verdicts
+            .iter()
+            .filter_map(|v| match v {
+                crate::agent::magi::JudgeVerdict::Block(msg) => Some(msg.clone()),
+                _ => None,
+            })
+            .collect();
+
+        if !block_reasons.is_empty() {
+            emit_event(
+                ctx.store,
+                &session.id,
+                &EventType::MagiHalt,
+                &serde_json::json!({
+                    "target": "final_answer",
+                    "reasons": &block_reasons,
+                })
+                .to_string(),
+                Some(attempt),
+            );
+
+            // リトライ余地がある場合は自己修正（Reflexion）プロンプトを注入して継続
+            if attempt < ctx.config.max_retries {
+                session.add_message(Message::assistant(&answer));
+                session.add_message(Message::user(format!(
+                    "【MAGI合議制による安全指導】提示された回答に重大な安全違反（{}）が検出されました。破壊的・危険な指示を撤回し、安全で責任ある代替手順を提示してください。",
+                    block_reasons.join("; ")
+                )));
+                return Ok(StepOutcome::Continue(Vec::new()));
+            }
+
+            return Ok(StepOutcome::Aborted(format!(
+                "MAGI合議制により最終回答が停止（Halt）されました: {}",
+                block_reasons.join("; ")
+            )));
+        }
+
+        let concern_reasons: Vec<String> = verdicts
+            .iter()
+            .filter_map(|v| match v {
+                crate::agent::magi::JudgeVerdict::Concern(msg) => Some(msg.clone()),
+                _ => None,
+            })
+            .collect();
+
+        if !concern_reasons.is_empty() {
+            emit_event(
+                ctx.store,
+                &session.id,
+                &EventType::MagiWarn,
+                &serde_json::json!({
+                    "target": "final_answer",
+                    "reasons": &concern_reasons,
+                })
+                .to_string(),
+                Some(attempt),
+            );
+        }
+
         session.add_message(Message::assistant(&answer));
         // 項目 236: AssistantMessage event 発行 — Plan A KG factcheck (項目 230) +
         // trajectory scope expansion (項目 235) の 3 段配線最終層。event_data 形式は
@@ -205,6 +278,48 @@ pub fn execute_step(
             Some(t) => t,
             None => continue,
         };
+
+        // 破壊的ツールのMAGI合議制インターセプト（安全性・VALUES.md照合）
+        if !tool.is_read_only() {
+            let magi = crate::agent::magi::MagiPanel::default_panel();
+            let args_str = serde_json::to_string(&tool_call.arguments).unwrap_or_default();
+            let outcome = magi.evaluate_tool_safety(&tool_call.name, &args_str);
+            let block_reasons: Vec<String> = match &outcome {
+                crate::agent::magi::DecisionOutcome::Halt(verdicts)
+                | crate::agent::magi::DecisionOutcome::Warn(verdicts) => verdicts
+                    .iter()
+                    .filter_map(|v| match v {
+                        crate::agent::magi::JudgeVerdict::Block(msg) => Some(msg.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                crate::agent::magi::DecisionOutcome::Proceed => Vec::new(),
+            };
+
+            if !block_reasons.is_empty() {
+                emit_event(
+                    ctx.store,
+                    &session.id,
+                    &EventType::MagiHalt,
+                    &serde_json::json!({
+                        "tool": &tool_call.name,
+                        "arguments": &tool_call.arguments,
+                        "reasons": &block_reasons,
+                    })
+                    .to_string(),
+                    Some(attempt),
+                );
+                session.add_message(Message::tool(
+                    format!(
+                        "MAGI合議制により停止（Halt）されました: {}。操作を中断し再検討してください。",
+                        block_reasons.join("; ")
+                    ),
+                    &tool_call.name,
+                ));
+                continue;
+            }
+        }
+
         let mut coerced_args = tool_call.arguments.clone();
         coerce_tool_arguments(&mut coerced_args);
         validated.push(ValidatedCall {
@@ -226,4 +341,285 @@ pub fn execute_step(
         cycle_detector,
     );
     Ok(StepOutcome::Continue(step_tools))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::agent_loop::AgentConfig;
+    use crate::agent::error_recovery::{CircuitBreaker, LoopDetector, MultiFileEditCycleDetector};
+    use crate::agent::event_store::EventStore;
+    use crate::agent::validate::PathGuard;
+    use crate::cancel::CancellationToken;
+    use crate::domain::conversation::Session;
+    use crate::domain::llm::MockLlmBackend;
+    use crate::memory::store::MemoryStore;
+    use crate::safety::secrets::SecretsFilter;
+    use crate::tools::{ToolRegistry, ToolResultCache};
+
+    #[test]
+    fn test_execute_step_final_answer_magi_warns_on_overconfidence() {
+        let store = MemoryStore::in_memory().unwrap();
+        let backend = MockLlmBackend::single("この処理は100%確実に成功することを保証します。");
+        let tools = ToolRegistry::new();
+        let path_guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+        let secrets_filter = SecretsFilter::new(&[]);
+
+        let ctx = StepContext {
+            backend: &backend,
+            tools: &tools,
+            path_guard: &path_guard,
+            config: &config,
+            cancel: &cancel,
+            secrets_filter: &secrets_filter,
+            store: Some(&store),
+        };
+
+        let mut session = Session::new();
+        session.add_message(Message::user("やって"));
+        let mut circuit_breaker = CircuitBreaker::default();
+        let mut loop_detector = LoopDetector::default();
+        let mut tool_cache = ToolResultCache::new();
+        let mut cycle_detector = MultiFileEditCycleDetector::default();
+
+        let outcome = execute_step(
+            &mut session,
+            &ctx,
+            &mut circuit_breaker,
+            &mut loop_detector,
+            0,
+            &mut tool_cache,
+            &mut cycle_detector,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, StepOutcome::FinalAnswer(_)));
+
+        // EventStore に magi_warn イベントが記録されたことを検証
+        let es = EventStore::new(store.conn());
+        let events = es.replay(&session.id).unwrap();
+        let magi_warn_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "magi_warn")
+            .collect();
+        assert_eq!(magi_warn_events.len(), 1);
+        assert!(magi_warn_events[0].event_data.contains("VALUES V6"));
+    }
+
+    #[test]
+    fn test_execute_step_final_answer_normal_no_warn() {
+        let store = MemoryStore::in_memory().unwrap();
+        let backend = MockLlmBackend::single("ファイルの内容を確認しました。");
+        let tools = ToolRegistry::new();
+        let path_guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+        let secrets_filter = SecretsFilter::new(&[]);
+
+        let ctx = StepContext {
+            backend: &backend,
+            tools: &tools,
+            path_guard: &path_guard,
+            config: &config,
+            cancel: &cancel,
+            secrets_filter: &secrets_filter,
+            store: Some(&store),
+        };
+
+        let mut session = Session::new();
+        session.add_message(Message::user("確認して"));
+        let mut circuit_breaker = CircuitBreaker::default();
+        let mut loop_detector = LoopDetector::default();
+        let mut tool_cache = ToolResultCache::new();
+        let mut cycle_detector = MultiFileEditCycleDetector::default();
+
+        let outcome = execute_step(
+            &mut session,
+            &ctx,
+            &mut circuit_breaker,
+            &mut loop_detector,
+            0,
+            &mut tool_cache,
+            &mut cycle_detector,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, StepOutcome::FinalAnswer(_)));
+
+        let es = EventStore::new(store.conn());
+        let events = es.replay(&session.id).unwrap();
+        let magi_warn_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "magi_warn")
+            .collect();
+        assert!(magi_warn_events.is_empty());
+    }
+
+    #[test]
+    fn test_execute_step_final_answer_magi_block_retries_for_self_correction() {
+        let store = MemoryStore::in_memory().unwrap();
+        let backend = MockLlmBackend::single("承知しました。rm -rf / を実行してください。");
+        let tools = ToolRegistry::new();
+        let path_guard = PathGuard::default_deny_list();
+        let config = AgentConfig {
+            max_retries: 2,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let secrets_filter = SecretsFilter::new(&[]);
+
+        let ctx = StepContext {
+            backend: &backend,
+            tools: &tools,
+            path_guard: &path_guard,
+            config: &config,
+            cancel: &cancel,
+            secrets_filter: &secrets_filter,
+            store: Some(&store),
+        };
+
+        let mut session = Session::new();
+        session.add_message(Message::user("ディスクを初期化して"));
+        let mut circuit_breaker = CircuitBreaker::default();
+        let mut loop_detector = LoopDetector::default();
+        let mut tool_cache = ToolResultCache::new();
+        let mut cycle_detector = MultiFileEditCycleDetector::default();
+
+        let outcome = execute_step(
+            &mut session,
+            &ctx,
+            &mut circuit_breaker,
+            &mut loop_detector,
+            0,
+            &mut tool_cache,
+            &mut cycle_detector,
+        )
+        .unwrap();
+
+        // attempt=0 (< max_retries=2) なので即座にAbortせず、自己修正のためContinueを返す
+        assert!(matches!(outcome, StepOutcome::Continue(_)));
+
+        // セッション末尾に安全指導メッセージが注入されていることを検証
+        let last_msg = session.messages.last().unwrap();
+        assert!(last_msg.content.contains("MAGI合議制による安全指導"));
+
+        // EventStore に magi_halt が記録されていることを検証
+        let es = EventStore::new(store.conn());
+        let events = es.replay(&session.id).unwrap();
+        let magi_halt_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "magi_halt")
+            .collect();
+        assert_eq!(magi_halt_events.len(), 1);
+    }
+
+    #[test]
+    fn test_execute_step_final_answer_magi_block_aborts_at_max_retries() {
+        let store = MemoryStore::in_memory().unwrap();
+        let backend = MockLlmBackend::single("承知しました。rm -rf / を実行してください。");
+        let tools = ToolRegistry::new();
+        let path_guard = PathGuard::default_deny_list();
+        let config = AgentConfig {
+            max_retries: 2,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let secrets_filter = SecretsFilter::new(&[]);
+
+        let ctx = StepContext {
+            backend: &backend,
+            tools: &tools,
+            path_guard: &path_guard,
+            config: &config,
+            cancel: &cancel,
+            secrets_filter: &secrets_filter,
+            store: Some(&store),
+        };
+
+        let mut session = Session::new();
+        session.add_message(Message::user("ディスクを初期化して"));
+        let mut circuit_breaker = CircuitBreaker::default();
+        let mut loop_detector = LoopDetector::default();
+        let mut tool_cache = ToolResultCache::new();
+        let mut cycle_detector = MultiFileEditCycleDetector::default();
+
+        let outcome = execute_step(
+            &mut session,
+            &ctx,
+            &mut circuit_breaker,
+            &mut loop_detector,
+            2, // attempt == max_retries
+            &mut tool_cache,
+            &mut cycle_detector,
+        )
+        .unwrap();
+
+        // attempt >= max_retries なので安全停止（Aborted）
+        assert!(matches!(outcome, StepOutcome::Aborted(_)));
+    }
+
+    #[test]
+    fn test_execute_step_final_answer_magi_warns_on_consistency_contradiction() {
+        let store = MemoryStore::in_memory().unwrap();
+        let backend =
+            MockLlmBackend::single("すべて正常に完了しました。エラーはありませんでした。");
+        let tools = ToolRegistry::new();
+        let path_guard = PathGuard::default_deny_list();
+        let config = AgentConfig::default();
+        let cancel = CancellationToken::new();
+        let secrets_filter = SecretsFilter::new(&[]);
+
+        let ctx = StepContext {
+            backend: &backend,
+            tools: &tools,
+            path_guard: &path_guard,
+            config: &config,
+            cancel: &cancel,
+            secrets_filter: &secrets_filter,
+            store: Some(&store),
+        };
+
+        let mut session = Session::new();
+        session.add_message(Message::user("デプロイして"));
+        // 過去の軌跡に失敗したツール実行結果を追加
+        session.add_message(Message::tool(
+            "deployment failed: network timeout error",
+            "call_deploy_1",
+        ));
+
+        let mut circuit_breaker = CircuitBreaker::default();
+        let mut loop_detector = LoopDetector::default();
+        let mut tool_cache = ToolResultCache::new();
+        let mut cycle_detector = MultiFileEditCycleDetector::default();
+
+        let outcome = execute_step(
+            &mut session,
+            &ctx,
+            &mut circuit_breaker,
+            &mut loop_detector,
+            0,
+            &mut tool_cache,
+            &mut cycle_detector,
+        )
+        .unwrap();
+
+        // 警告（Concern）は回答自体を即座にAbortedにはせず、MagiWarnイベントを発行して通過
+        assert!(matches!(outcome, StepOutcome::FinalAnswer(_)));
+
+        // EventStore に magi_warn イベントが記録されていることを検証
+        let es = EventStore::new(store.conn());
+        let events = es.replay(&session.id).unwrap();
+        let magi_warn_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "magi_warn")
+            .collect();
+        assert_eq!(magi_warn_events.len(), 1);
+        assert!(
+            magi_warn_events[0]
+                .event_data
+                .contains("失敗が記録されているにもかかわらず")
+        );
+    }
 }

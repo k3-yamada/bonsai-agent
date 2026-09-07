@@ -3,3 +3,4 @@ pub mod boot_guard;
 pub mod manifest;
 pub mod network;
 pub mod secrets;
+pub mod sensor_filter;

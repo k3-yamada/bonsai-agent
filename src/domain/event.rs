@@ -16,6 +16,8 @@ pub enum EventType {
     PlanGenerated,
     StepCompleted,
     SessionEnd,
+    MagiHalt,
+    MagiWarn,
 }
 
 impl EventType {
@@ -29,6 +31,8 @@ impl EventType {
             Self::PlanGenerated => "plan_generated",
             Self::StepCompleted => "step_completed",
             Self::SessionEnd => "session_end",
+            Self::MagiHalt => "magi_halt",
+            Self::MagiWarn => "magi_warn",
         }
     }
 }

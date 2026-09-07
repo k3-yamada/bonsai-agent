@@ -23,6 +23,61 @@ pub struct AppConfig {
     pub experiment: ExperimentConfig,
     #[serde(default)]
     pub fallback_chain: FallbackChainSettings,
+    #[serde(default)]
+    pub sensors: SensorsConfig,
+}
+
+/// 外部知覚センサー群の設定 (フェーズ1 & フェーズ2)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensorsConfig {
+    /// センサーシステム全体の有効/無効（キルスイッチ）
+    pub enabled: bool,
+    /// ファイル監視（FileWatchSensor）の有効/無効
+    pub file_watch: bool,
+    /// アイドル検知（IdleSensor）の有効/無効
+    pub idle_detection: bool,
+    /// ウィンドウ/フォーカス監視（WindowChangedSensor）の有効/無効（フェーズ2、デフォルトOFF）
+    pub window_focus: bool,
+    /// アイドル判定までの秒数
+    pub idle_threshold_secs: u64,
+    /// ウィンドウ通知の最小クールダウン秒数
+    pub window_cooldown_secs: u64,
+    /// ウィンドウ監視の拒否アプリ/バンドル名リスト
+    pub window_denylist: Vec<String>,
+}
+
+impl Default for SensorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            file_watch: true,
+            idle_detection: true,
+            window_focus: false, // 安全のためデフォルトOFF
+            idle_threshold_secs: 300,
+            window_cooldown_secs: 30,
+            window_denylist: vec![
+                "1password".to_string(),
+                "bitwarden".to_string(),
+                "keychain".to_string(),
+                "keepass".to_string(),
+                "bank".to_string(),
+                "login".to_string(),
+                "signin".to_string(),
+            ],
+        }
+    }
+}
+
+/// 環境変数 `BONSAI_SENSOR_WINDOW` によるウィンドウ監視の強制有効化/無効化
+pub fn is_window_sensor_enabled_env() -> Option<bool> {
+    std::env::var("BONSAI_SENSOR_WINDOW")
+        .ok()
+        .and_then(|v| match v.trim() {
+            "1" | "true" | "TRUE" => Some(true),
+            "0" | "false" | "FALSE" => Some(false),
+            _ => None,
+        })
 }
 
 /// メイン推論フォールバックチェーンの設定（Step 12、opt-in）
@@ -474,12 +529,15 @@ pub enum ServerBackend {
     /// bitnet.cpp (1ビット最適化カーネル、llama-server互換API)
     #[serde(rename = "bitnet")]
     BitNet,
+    /// Unsloth Desktop (OpenAI互換API、認証付き)
+    #[serde(rename = "unsloth")]
+    Unsloth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// 推論バックエンド（llama-server / mlx-lm / bitnet）
+    /// 推論バックエンド（llama-server / mlx-lm / bitnet / unsloth）
     pub backend: ServerBackend,
     pub server_url: String,
     /// モデルID（例: "bonsai-8b", "ternary-bonsai-8b", "ternary-bonsai-4b"）
@@ -494,6 +552,9 @@ pub struct ModelConfig {
     /// 推論パラメータ（temperature等）
     #[serde(default)]
     pub inference: InferenceParams,
+    /// API認証キー（Unsloth Desktop / 外部API用。None時は環境変数から自動検出）
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +610,9 @@ fn default_sse_timeout() -> u64 {
 
 impl Default for ModelConfig {
     fn default() -> Self {
+        let api_key = std::env::var("UNSLOTH_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("BONSAI_API_KEY").ok());
         Self {
             backend: ServerBackend::default(),
             server_url: "http://localhost:8080".to_string(),
@@ -558,6 +622,7 @@ impl Default for ModelConfig {
             gguf_path: None,
             sse_chunk_timeout_secs: 60,
             inference: InferenceParams::default(),
+            api_key,
         }
     }
 }
@@ -610,13 +675,18 @@ impl AppConfig {
     /// 設定ファイルを読み込む。存在しなければデフォルト値を使用。
     pub fn load() -> Result<Self> {
         let path = Self::config_path();
-        if path.exists() {
+        let mut config: AppConfig = if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            let config: AppConfig = toml::from_str(&content)?;
-            Ok(config)
+            toml::from_str(&content)?
         } else {
-            Ok(Self::default())
+            Self::default()
+        };
+        if config.model.api_key.is_none() {
+            config.model.api_key = std::env::var("UNSLOTH_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("BONSAI_API_KEY").ok());
         }
+        Ok(config)
     }
 
     /// デフォルト設定をファイルに書き出す（初回セットアップ用）
@@ -903,6 +973,34 @@ backend = "mlx-lm"
         let re_toml = toml::to_string_pretty(&config).unwrap();
         let re_config: AppConfig = toml::from_str(&re_toml).unwrap();
         assert_eq!(re_config.model.backend, ServerBackend::MlxLm);
+    }
+
+    #[test]
+    fn test_server_backend_deserialize_unsloth() {
+        let backend: ServerBackend = serde_json::from_str(r#""unsloth""#).unwrap();
+        assert_eq!(backend, ServerBackend::Unsloth);
+    }
+
+    #[test]
+    fn test_server_backend_toml_roundtrip_unsloth() {
+        let toml_str = r#"
+[model]
+backend = "unsloth"
+server_url = "http://localhost:8000"
+model_id = "Qwen3-8B-ERP-v0.1-GGUF"
+api_key = "sk-unsloth-testkey"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.backend, ServerBackend::Unsloth);
+        assert_eq!(config.model.model_id, "Qwen3-8B-ERP-v0.1-GGUF");
+        assert_eq!(config.model.api_key.as_deref(), Some("sk-unsloth-testkey"));
+        let re_toml = toml::to_string_pretty(&config).unwrap();
+        let re_config: AppConfig = toml::from_str(&re_toml).unwrap();
+        assert_eq!(re_config.model.backend, ServerBackend::Unsloth);
+        assert_eq!(
+            re_config.model.api_key.as_deref(),
+            Some("sk-unsloth-testkey")
+        );
     }
 
     #[test]
@@ -1531,5 +1629,33 @@ max_iterations = 20
         // 空 path で開くのを防ぐ robustness)。
         let got = resolve_db_path(Some("   "), Some(PathBuf::from("/data")));
         assert_eq!(got, PathBuf::from("/data/bonsai-agent/bonsai.db"));
+    }
+
+    #[test]
+    fn t_sensors_config_defaults() {
+        let cfg = SensorsConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.file_watch);
+        assert!(cfg.idle_detection);
+        assert!(!cfg.window_focus, "window_focusは安全のためデフォルトfalse");
+        assert_eq!(cfg.idle_threshold_secs, 300);
+        assert_eq!(cfg.window_cooldown_secs, 30);
+        assert!(cfg.window_denylist.contains(&"1password".to_string()));
+    }
+
+    #[test]
+    fn t_sensors_config_env_override() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        unsafe { std::env::set_var("BONSAI_SENSOR_WINDOW", "1") };
+        assert_eq!(is_window_sensor_enabled_env(), Some(true));
+
+        unsafe { std::env::set_var("BONSAI_SENSOR_WINDOW", "0") };
+        assert_eq!(is_window_sensor_enabled_env(), Some(false));
+
+        unsafe { std::env::remove_var("BONSAI_SENSOR_WINDOW") };
+        assert_eq!(is_window_sensor_enabled_env(), None);
     }
 }

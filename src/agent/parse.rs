@@ -1,5 +1,87 @@
-use crate::domain::conversation::{ParsedOutput, ToolCall};
+use std::borrow::Cow;
+use std::sync::LazyLock;
+
 use anyhow::Result;
+use regex::Regex;
+
+use crate::domain::conversation::{ParsedOutput, ToolCall};
+
+static RE_TAG_NORMALIZE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<\s*(/)?\s*(think|tool_call)\s*>").expect("invalid tag normalize regex")
+});
+
+/// `< think >`, `< /tool_call >` などの空白揺らぎのあるタグを正規化する。
+pub fn normalize_special_tags(raw: &str) -> Cow<'_, str> {
+    if !raw.contains('<') {
+        return Cow::Borrowed(raw);
+    }
+    RE_TAG_NORMALIZE.replace_all(raw, |caps: &regex::Captures| {
+        let is_closing = caps.get(1).is_some();
+        let tag_name = &caps[2];
+        if is_closing {
+            format!("</{tag_name}>")
+        } else {
+            format!("<{tag_name}>")
+        }
+    })
+}
+
+/// tool_call の JSON 文字列をサニタイズ（Markdown コードフェンス剥離、末尾カンマ除去）
+pub fn sanitize_tool_call_json(raw: &str) -> String {
+    let mut s = raw.trim();
+
+    // 1. コードフェンスの剥離 (```json ... ``` または ``` ... ```)
+    if let Some(rest) = s.strip_prefix("```json") {
+        s = rest.trim_start();
+    } else if let Some(rest) = s.strip_prefix("```") {
+        s = rest.trim_start();
+    }
+
+    if let Some(rest) = s.strip_suffix("```") {
+        s = rest.trim_end();
+    }
+
+    // 2. 末尾カンマの除去 (文字列リテラル外の `,\s*}` または `,\s*]`)
+    let mut cleaned = String::with_capacity(s.len());
+    let mut in_string = false;
+    let mut escape = false;
+
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            cleaned.push(c);
+        } else {
+            if c == '"' {
+                in_string = true;
+                cleaned.push(c);
+            } else if c == ',' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                    // 末尾カンマなのでスキップ
+                } else {
+                    cleaned.push(c);
+                }
+            } else {
+                cleaned.push(c);
+            }
+        }
+        i += 1;
+    }
+
+    cleaned
+}
 
 /// LLMの生出力をパースする。
 /// `<think>` ブロックから思考テキスト、`<tool_call>` ブロックからツール呼び出し、
@@ -9,7 +91,8 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
     let mut tool_calls = Vec::new();
     let mut text_parts = Vec::new();
 
-    let mut remaining = raw;
+    let normalized = normalize_special_tags(raw);
+    let mut remaining = normalized.as_ref();
 
     while !remaining.is_empty() {
         if let Some(think_start) = remaining.find("<think>") {
@@ -38,7 +121,8 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
 
             if let Some(tc_end) = remaining[tc_start..].find("</tool_call>") {
                 let tc_content = &remaining[tc_start + 11..tc_start + tc_end];
-                match serde_json::from_str::<ToolCall>(tc_content.trim()) {
+                let sanitized = sanitize_tool_call_json(tc_content);
+                match serde_json::from_str::<ToolCall>(&sanitized) {
                     Ok(call) => tool_calls.push(call),
                     Err(e) => {
                         anyhow::bail!(
@@ -321,6 +405,22 @@ mod tests {
         assert!(result.text.is_none());
     }
 
+    #[test]
+    fn test_tool_call_with_spaced_tags() {
+        let input = r#"< think >ユーザーの要求を処理する< /think >
+< tool_call >
+{"name":"file_read","arguments":{"path":"README.md"}}
+< /tool_call >"#;
+        let result = parse_assistant_output(input).unwrap();
+        assert_eq!(
+            result.thinking,
+            Some("ユーザーの要求を処理する".to_string())
+        );
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "file_read");
+        assert_eq!(result.tool_calls[0].arguments["path"], "README.md");
+    }
+
     // テスト4: 複数<tool_call>
     #[test]
     fn test_multiple_tool_calls() {
@@ -398,6 +498,24 @@ mod tests {
             "think内の素JSONはtool_callとして誤検出されない"
         );
         assert!(result.text.is_none());
+    }
+
+    #[test]
+    fn test_tool_call_with_markdown_fence() {
+        let input = "<tool_call>```json\n{\"name\":\"file_read\",\"arguments\":{\"path\":\"README.md\"}}\n```</tool_call>";
+        let result =
+            parse_assistant_output(input).expect("markdown fence should be handled gracefully");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "file_read");
+    }
+
+    #[test]
+    fn test_tool_call_with_trailing_comma() {
+        let input =
+            "<tool_call>{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\",}}</tool_call>";
+        let result = parse_assistant_output(input).expect("trailing comma should be sanitized");
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "shell");
     }
 
     // テスト10: プレーンテキスト内のJSON literalもtool_callとして誤検出されない

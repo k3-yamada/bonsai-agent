@@ -26,6 +26,10 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
   - [ADR-006](decisions/ADR-006-backend-fallback-chain.md) — 推論バックエンド戦略 (Accepted 2026-05-31)
   - [ADR-007](decisions/ADR-007-kg-factcheck-anti-hallucination.md) — KG Fact-Check Anti-Hallucination (Accepted 2026-05-31)
   - [ADR-008](decisions/ADR-008-compaction-strategy.md) — Context Compaction 戦略 (Accepted 2026-05-31)
+  - [ADR-009](decisions/ADR-009-knowledge-daemon-recall-ingest.md) — Knowledge Daemon Recall & Ingest (Accepted 2026-06-02)
+  - [ADR-010](decisions/ADR-010-clean-architecture-domain-layer.md) — domain 層新設と DEP-001 違反ゼロ化 (Accepted 2026-06-04)
+  - [ADR-011](decisions/ADR-011-chat-template-backend-source-of-truth.md) — Chat Template Backend SSOT (Accepted 2026-06-15)
+  - [ADR-012](decisions/ADR-012-dmn-magi-fastpath-extension.md) — 自律知能拡張: FastPath / DMN思考ループ / MAGI三重監視 (Accepted 2026-09-07)
 
 ### 運用 / メンテナンス
 - [docs/maintenance/claudemd-curation.md](maintenance/claudemd-curation.md) — CLAUDE.md 運用ルール (FIFO 直近 N 項目 / 1 行サマリー template / Section header 同期 / Z-3 enforcement、Item 255 規模再現 plan 由来)

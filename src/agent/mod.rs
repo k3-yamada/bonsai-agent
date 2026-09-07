@@ -15,7 +15,11 @@ pub mod event_store;
 pub mod middleware;
 
 pub mod context_inject;
+pub mod dmn;
+pub mod fast_path;
 pub mod frontier;
+pub mod magi;
+pub mod sensors;
 pub mod subagent;
 pub mod t6_prompt_augment;
 pub mod tool_exec;

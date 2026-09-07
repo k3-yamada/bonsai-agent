@@ -25,6 +25,8 @@ Z-1 Phase 6 (CLAUDE.md 項目 1-254 から 30-40 件を ADR 化、~6-8h) で起�
 - [ADR-008](ADR-008-compaction-strategy.md) — Context Compaction 戦略 (multi-level + dynamic budget OFF) (Accepted 2026-05-31)
 - [ADR-009](ADR-009-knowledge-daemon-recall-ingest.md) — 知識デーモン recall/ingest 層の設計判断 (採用機構 / 本規模不採用 / deferred rationale) (Accepted 2026-06-02)
 - [ADR-010](ADR-010-clean-architecture-domain-layer.md) — クリーンアーキテクチャ準拠: domain 層新設と DEP-001 違反ゼロ化 (Accepted 2026-06-04)
+- [ADR-011](ADR-011-chat-template-backend-source-of-truth.md) — Chat Template Backend SSOT (Accepted 2026-06-15)
+- [ADR-012](ADR-012-dmn-magi-fastpath-extension.md) — 自律知能拡張: FastPath / DMN思考ループ / MAGI三重監視 / 外部知覚センサー / 記憶力学グラフ可視化 (Accepted 2026-09-07)
 
 ## 関連
 - .claude/plan/agents-md-docs-knowledge-base.md (Z-1 plan §6)

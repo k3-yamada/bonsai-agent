@@ -158,6 +158,9 @@ fn test_repl_threads_session_across_turns() {
         config: &config,
         cancel: &cancel,
         store: None,
+        is_busy: None,
+        dmn_inbox: None,
+        dmn_notify: None,
     };
     run_repl(&mut reader, &mut writer, &mut session, &io).unwrap();
 
@@ -203,10 +206,48 @@ fn test_repl_exit_immediately() {
         config: &config,
         cancel: &cancel,
         store: None,
+        is_busy: None,
+        dmn_inbox: None,
+        dmn_notify: None,
     };
     run_repl(&mut reader, &mut writer, &mut session, &io).unwrap();
 
     assert_eq!(session.messages.len(), before);
+}
+
+#[test]
+fn test_repl_manages_is_busy_flag() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mock = MockLlmBackend::single("応答");
+    let tools = test_registry();
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let mut session = Session::new();
+    let is_busy = Arc::new(AtomicBool::new(true));
+
+    let input = b"hello\nexit\n";
+    let mut reader = std::io::Cursor::new(&input[..]);
+    let mut writer: Vec<u8> = Vec::new();
+
+    let io = ReplIo {
+        backend: &mock,
+        tools: &tools,
+        path_guard: &guard,
+        config: &config,
+        cancel: &cancel,
+        store: None,
+        is_busy: Some(is_busy.clone()),
+        dmn_inbox: None,
+        dmn_notify: None,
+    };
+
+    run_repl(&mut reader, &mut writer, &mut session, &io).unwrap();
+    // 終了時は is_busy が false に戻る
+    assert!(!is_busy.load(Ordering::Relaxed));
 }
 
 // テスト3: 最大イテレーション到達
@@ -1743,4 +1784,83 @@ fn test_assistant_message_event_step_index_matches_iteration() {
         "2nd turn step_index=1、実際={:?}",
         asst_events[1].step_index
     );
+}
+
+#[test]
+fn test_magi_intercepts_destructive_tool_call() {
+    let mock = MockLlmBackend::new(vec![
+        r#"<tool_call>{"name":"shell","arguments":{"command":"rm -rf /"}}</tool_call>"#.to_string(),
+        "危険なコマンドを中止しました。".to_string(),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(crate::tools::shell::ShellTool::new()));
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let mut session = Session::new();
+    session.add_message(Message::user("ファイルをすべて消去して"));
+
+    let result = super::core::run_agent_loop_with_session(
+        &mut session,
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        None,
+    )
+    .expect("agent_loop");
+
+    // MAGI によりブロックメッセージが追加されていることを検証
+    let blocked_msg = session
+        .messages
+        .iter()
+        .find(|m| m.content.contains("MAGI合議制により停止"));
+    assert!(
+        blocked_msg.is_some(),
+        "破壊的コマンドがMAGIによりブロックされるべき: {:?}",
+        session.messages
+    );
+    assert_eq!(result.answer, "危険なコマンドを中止しました。");
+}
+
+#[test]
+fn test_magi_intercepts_destructive_tool_call_emits_event() {
+    let mock = MockLlmBackend::new(vec![
+        r#"<tool_call>{"name":"shell","arguments":{"command":"rm -rf /"}}</tool_call>"#.to_string(),
+        "危険なコマンドを中止しました。".to_string(),
+    ]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(crate::tools::shell::ShellTool::new()));
+    let guard = PathGuard::default_deny_list();
+    let config = AgentConfig::default();
+    let cancel = CancellationToken::new();
+
+    let store = crate::memory::store::MemoryStore::in_memory().unwrap();
+    let mut session = Session::new();
+    session.add_message(Message::user("すべて削除して"));
+
+    let _result = super::core::run_agent_loop_with_session(
+        &mut session,
+        &mock,
+        &tools,
+        &guard,
+        &config,
+        &cancel,
+        Some(&store),
+    )
+    .expect("agent_loop");
+
+    // EventStore に magi_halt イベントが記録されたことを検証
+    let event_store = crate::agent::event_store::EventStore::new(store.conn());
+    let events = event_store.replay(&session.id).expect("replay");
+    let magi_event = events.iter().find(|e| e.event_type == "magi_halt");
+    assert!(
+        magi_event.is_some(),
+        "magi_halt イベントが EventStore に記録されるべき: {:?}",
+        events
+    );
+    let event_data = &magi_event.unwrap().event_data;
+    assert!(event_data.contains("rm -rf /"));
 }
