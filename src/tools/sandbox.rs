@@ -35,40 +35,25 @@ impl ExecResult {
     }
 }
 
-/// サンドボックスの抽象化。初期はDirectSandbox、将来ContainerSandbox等に差替可能。
+/// サンドボックスの抽象化。DirectSandbox, SeatbeltSandbox, BubblewrapSandbox 等に差替可能。
 pub trait Sandbox: Send + Sync {
+    /// 実行ファイルと引数を直接実行する
     fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult>;
+
+    /// シェルスクリプト文字列を単一レベルの sh -c で実行する (H1: 二重 sh 解消)
+    fn execute_script(&self, script: &str, limits: &ResourceLimits) -> Result<ExecResult> {
+        self.execute("sh", &["-c", script], limits)
+    }
 }
 
-/// 直接実行サンドボックス（macOS向け、ulimit付き）
+/// 直接実行サンドボックス（プロセスグループ分離 + POSIX rlimit による OS レベル保護）
+#[derive(Debug, Default, Clone)]
 pub struct DirectSandbox;
 
 impl Sandbox for DirectSandbox {
     fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult> {
-        let full_command = if args.is_empty() {
-            command.to_string()
-        } else {
-            format!(
-                "{} {}",
-                command,
-                args.iter()
-                    .map(|a| shell_escape(a))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )
-        };
-
-        // ulimit をシェル経由で適用 (ResourceLimits に基づくファイルサイズ・CPU 時間上限)
-        // Unix環境ではプロセスグループ分離 (process_group(0)) とタイムアウト時のグループシグナル送信 (SIGKILL) により孫プロセスの残留を防止。
-        // OSネイティブ隔離 (macOS AppSandbox / Linux bwrap) やシェル経由のPathGuard迂回防止は Phase B.2 で対応。
-        let timeout_secs = limits.timeout.as_secs().max(1);
-        let max_blocks = (limits.max_output_bytes / 512).max(1024);
-        let limited_command =
-            format!("ulimit -f {max_blocks} -t {timeout_secs} 2>/dev/null; {full_command}");
-
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&limited_command)
+        let mut cmd = Command::new(command);
+        cmd.args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
@@ -76,6 +61,29 @@ impl Sandbox for DirectSandbox {
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
+
+            let timeout_secs = limits.timeout.as_secs().max(1);
+            let max_bytes = limits.max_output_bytes as u64;
+
+            unsafe {
+                cmd.pre_exec(move || {
+                    // RLIMIT_CPU: CPU 時間上限 (タイムアウト + マージン)
+                    let cpu_limit = libc::rlimit {
+                        rlim_cur: timeout_secs + 2,
+                        rlim_max: timeout_secs + 5,
+                    };
+                    libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit);
+
+                    // RLIMIT_FSIZE: 生成ファイルサイズ上限
+                    let fsize_limit = libc::rlimit {
+                        rlim_cur: max_bytes,
+                        rlim_max: max_bytes * 2,
+                    };
+                    libc::setrlimit(libc::RLIMIT_FSIZE, &fsize_limit);
+
+                    Ok(())
+                });
+            }
         }
 
         let child = cmd.spawn();
@@ -209,6 +217,276 @@ fn read_output(pipe: Option<impl std::io::Read>, max_bytes: usize) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
+/// macOS Seatbelt (`sandbox-exec`) を用いた OS レベルサンドボックス
+#[derive(Debug, Clone)]
+pub struct SeatbeltSandbox {
+    available: bool,
+    profile: String,
+    fallback: DirectSandbox,
+}
+
+impl SeatbeltSandbox {
+    pub fn new(denied_paths: &[String]) -> Self {
+        let available = Self::check_available();
+        let profile = Self::build_profile(denied_paths);
+        Self {
+            available,
+            profile,
+            fallback: DirectSandbox,
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    fn check_available() -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            // sandbox-exec が実行可能かつプロファイル適用可能かテスト
+            // (ネストされた sandbox や権限不足では exit code 71 / sandbox_apply: Operation not permitted となる)
+            std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    pub fn build_profile(denied_paths: &[String]) -> String {
+        let mut deny_rules = Vec::new();
+        // デフォルトで拒否する危険パス
+        let default_denies = ["/etc/shadow", "/etc/master.passwd", "/etc/sudoers"];
+        for d in default_denies {
+            deny_rules.push(format!("  (subpath \"{}\")", d));
+            deny_rules.push(format!("  (literal \"{}\")", d));
+        }
+        for p in denied_paths {
+            let p_clean = p.trim();
+            if !p_clean.is_empty() {
+                deny_rules.push(format!("  (subpath \"{}\")", p_clean));
+                deny_rules.push(format!("  (literal \"{}\")", p_clean));
+                if p_clean.starts_with('.') || !p_clean.contains('/') {
+                    deny_rules.push(format!("  (regex #\"{}.*\")", regex_escape(p_clean)));
+                }
+            }
+        }
+        deny_rules.sort();
+        deny_rules.dedup();
+
+        format!(
+            "(version 1)\n(allow default)\n(deny file-read* file-write*\n{}\n)\n",
+            deny_rules.join("\n")
+        )
+    }
+}
+
+impl Default for SeatbeltSandbox {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl Sandbox for SeatbeltSandbox {
+    fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult> {
+        if !self.available {
+            return self.fallback.execute(command, args, limits);
+        }
+
+        let mut exec_args = vec!["-p", &self.profile, command];
+        exec_args.extend_from_slice(args);
+        self.fallback
+            .execute("/usr/bin/sandbox-exec", &exec_args, limits)
+    }
+
+    fn execute_script(&self, script: &str, limits: &ResourceLimits) -> Result<ExecResult> {
+        if !self.available {
+            return self.fallback.execute_script(script, limits);
+        }
+
+        self.fallback.execute(
+            "/usr/bin/sandbox-exec",
+            &["-p", &self.profile, "sh", "-c", script],
+            limits,
+        )
+    }
+}
+
+/// Linux Bubblewrap (`bwrap`) を用いた OS レベルサンドボックス
+#[derive(Debug, Clone)]
+pub struct BubblewrapSandbox {
+    available: bool,
+    denied_paths: Vec<String>,
+    fallback: DirectSandbox,
+}
+
+impl BubblewrapSandbox {
+    pub fn new(denied_paths: &[String]) -> Self {
+        let available = Self::check_available();
+        Self {
+            available,
+            denied_paths: denied_paths.to_vec(),
+            fallback: DirectSandbox,
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.available
+    }
+
+    fn check_available() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("bwrap")
+                .arg("--version")
+                .output()
+                .map(|out| out.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+}
+
+impl Default for BubblewrapSandbox {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl Sandbox for BubblewrapSandbox {
+    fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult> {
+        if !self.available {
+            return self.fallback.execute(command, args, limits);
+        }
+
+        let mut bwrap_args = vec![
+            "--ro-bind".to_string(),
+            "/".to_string(),
+            "/".to_string(),
+            "--dev".to_string(),
+            "/dev".to_string(),
+            "--proc".to_string(),
+            "/proc".to_string(),
+            "--tmpfs".to_string(),
+            "/tmp".to_string(),
+        ];
+
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_str = cwd.to_string_lossy().to_string();
+            bwrap_args.extend(["--bind".to_string(), cwd_str.clone(), cwd_str]);
+        }
+
+        for p in &self.denied_paths {
+            bwrap_args.extend(["--tmpfs".to_string(), p.clone()]);
+        }
+
+        bwrap_args.push("--".to_string());
+        bwrap_args.push(command.to_string());
+        for a in args {
+            bwrap_args.push(a.to_string());
+        }
+
+        let arg_refs: Vec<&str> = bwrap_args.iter().map(|s| s.as_str()).collect();
+        self.fallback.execute("bwrap", &arg_refs, limits)
+    }
+
+    fn execute_script(&self, script: &str, limits: &ResourceLimits) -> Result<ExecResult> {
+        if !self.available {
+            return self.fallback.execute_script(script, limits);
+        }
+
+        self.execute("sh", &["-c", script], limits)
+    }
+}
+
+/// プラットフォームに応じた最適な OS レベルサンドボックスの自動選択
+#[derive(Debug, Clone)]
+pub enum NativeSandbox {
+    Seatbelt(SeatbeltSandbox),
+    Bubblewrap(BubblewrapSandbox),
+    Direct(DirectSandbox),
+}
+
+impl NativeSandbox {
+    pub fn new(denied_paths: &[String]) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            let seatbelt = SeatbeltSandbox::new(denied_paths);
+            if seatbelt.is_available() {
+                return Self::Seatbelt(seatbelt);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let bwrap = BubblewrapSandbox::new(denied_paths);
+            if bwrap.is_available() {
+                return Self::Bubblewrap(bwrap);
+            }
+        }
+
+        let _ = denied_paths;
+        Self::Direct(DirectSandbox)
+    }
+
+    pub fn is_isolated(&self) -> bool {
+        match self {
+            Self::Seatbelt(s) => s.is_available(),
+            Self::Bubblewrap(b) => b.is_available(),
+            Self::Direct(_) => false,
+        }
+    }
+}
+
+impl Default for NativeSandbox {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl Sandbox for NativeSandbox {
+    fn execute(&self, command: &str, args: &[&str], limits: &ResourceLimits) -> Result<ExecResult> {
+        match self {
+            Self::Seatbelt(s) => s.execute(command, args, limits),
+            Self::Bubblewrap(b) => b.execute(command, args, limits),
+            Self::Direct(d) => d.execute(command, args, limits),
+        }
+    }
+
+    fn execute_script(&self, script: &str, limits: &ResourceLimits) -> Result<ExecResult> {
+        match self {
+            Self::Seatbelt(s) => s.execute_script(script, limits),
+            Self::Bubblewrap(b) => b.execute_script(script, limits),
+            Self::Direct(d) => d.execute_script(script, limits),
+        }
+    }
+}
+
+fn regex_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if matches!(
+            c,
+            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// シェルエスケープ（シングルクォートで囲む）
 pub(crate) fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -328,5 +606,46 @@ mod tests {
             .unwrap();
         assert!(result.timed_out);
         assert!(!result.success());
+    }
+
+    #[test]
+    fn test_direct_sandbox_execute_script() {
+        let sandbox = DirectSandbox;
+        let result = sandbox
+            .execute_script("echo script_hello", &ResourceLimits::default())
+            .unwrap();
+        assert!(result.success());
+        assert_eq!(result.stdout.trim(), "script_hello");
+    }
+
+    #[test]
+    fn test_native_sandbox_fallback_execution() {
+        let sandbox = NativeSandbox::new(&[".env".to_string()]);
+        let result = sandbox
+            .execute("echo", &["native_test"], &ResourceLimits::default())
+            .unwrap();
+        assert!(result.success());
+        assert_eq!(result.stdout.trim(), "native_test");
+
+        let script_res = sandbox
+            .execute_script("echo native_script", &ResourceLimits::default())
+            .unwrap();
+        assert!(script_res.success());
+        assert_eq!(script_res.stdout.trim(), "native_script");
+    }
+
+    #[test]
+    fn test_seatbelt_profile_generation() {
+        let profile =
+            SeatbeltSandbox::build_profile(&[".env".to_string(), "/secret/token".to_string()]);
+        assert!(profile.contains("(subpath \"/etc/shadow\")"));
+        assert!(profile.contains("(subpath \"/secret/token\")"));
+        assert!(profile.contains("(regex #\"\\.env.*\")"));
+    }
+
+    #[test]
+    fn test_regex_escape() {
+        assert_eq!(regex_escape(".env*"), "\\.env\\*");
+        assert_eq!(regex_escape("abc/def"), "abc/def");
     }
 }

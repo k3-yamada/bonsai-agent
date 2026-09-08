@@ -85,6 +85,23 @@ impl PathGuard {
         false
     }
 
+    /// シェルコマンド内のトークン（引数、リダイレクト先、パス表記）を走査し、
+    /// アクセス禁止パスに抵触するものを検出してリストとして返却する
+    pub fn find_denied_paths_in_command(&self, command: &str) -> Vec<String> {
+        let tokens = extract_shell_tokens(command);
+        let mut denied = Vec::new();
+
+        for token in tokens {
+            let candidates = extract_candidates_from_token(&token);
+            for cand in candidates {
+                if self.is_denied(&cand) && !denied.contains(&cand) {
+                    denied.push(cand);
+                }
+            }
+        }
+        denied
+    }
+
     fn matches_denied_resolved(&self, check_path: &Path) -> bool {
         for deny in &self.deny_paths {
             let expanded_deny = expand_tilde(deny);
@@ -151,6 +168,95 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// シェルコマンドから主要なトークン（コマンド名、引数、リダイレクト先など）を抽出
+fn extract_shell_tokens(command: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut chars = command.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            _ if in_single_quote || in_double_quote => {
+                current.push(c);
+            }
+            ' ' | '\t' | '\r' | '\n' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            '|' | ';' | '&' | '(' | ')' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            '>' | '<' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                }
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// 単一トークンからパス照合候補を抽出（クォート除去、フラグ右辺、空白サブトークン）
+fn extract_candidates_from_token(token: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let cleaned = token.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+    if !cleaned.is_empty() {
+        candidates.push(cleaned.to_string());
+    }
+
+    // --key=value や VAR=value の右辺
+    if let Some((_, val)) = cleaned.split_once('=') {
+        let val_cleaned = val.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+        if !val_cleaned.is_empty() && !candidates.contains(&val_cleaned.to_string()) {
+            candidates.push(val_cleaned.to_string());
+        }
+    }
+
+    // 引用符内の空白区切りサブトークン (e.g. "cat /etc/shadow" -> "/etc/shadow")
+    if token.contains(' ') || token.contains('\t') {
+        for word in token.split_whitespace() {
+            let word_cleaned =
+                word.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+            if !word_cleaned.is_empty() && !candidates.contains(&word_cleaned.to_string()) {
+                candidates.push(word_cleaned.to_string());
+            }
+        }
+    }
+
+    // 引用符で囲まれた部分文字列 (e.g. open('/etc/shadow') -> /etc/shadow)
+    if token.contains('\'') || token.contains('"') {
+        for part in token.split(['\'', '"']) {
+            let part_cleaned =
+                part.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+            if !part_cleaned.is_empty() && !candidates.contains(&part_cleaned.to_string()) {
+                candidates.push(part_cleaned.to_string());
+            }
+        }
+    }
+
+    candidates
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +301,50 @@ mod tests {
         let guard = PathGuard::default_deny_list();
         assert!(!guard.is_denied("src/main.rs"));
         assert!(!guard.is_denied("/tmp/safe.txt"));
+    }
+
+    #[test]
+    fn test_find_denied_paths_in_command() {
+        let guard = PathGuard::default_deny_list();
+
+        // 直接のコマンド引数
+        let denied = guard.find_denied_paths_in_command("cat /etc/shadow");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+
+        // 複数コマンド・パイプ
+        let denied = guard.find_denied_paths_in_command("echo hello | grep foo ~/.ssh/id_rsa");
+        assert_eq!(denied, vec!["~/.ssh/id_rsa"]);
+
+        // リダイレクト先
+        let denied = guard.find_denied_paths_in_command("echo 'secret' > .env.local");
+        assert_eq!(denied, vec![".env.local"]);
+
+        // クォート付きパス
+        let denied = guard.find_denied_paths_in_command("tail -n 5 \"/etc/passwd\"");
+        assert_eq!(denied, vec!["/etc/passwd"]);
+
+        // フラグ指定 (--config=.env)
+        let denied = guard.find_denied_paths_in_command("app --config=.env");
+        assert_eq!(denied, vec![".env"]);
+
+        // リダイレクト追記 (>>)
+        let denied = guard.find_denied_paths_in_command("echo 'new_key=val' >> .env");
+        assert_eq!(denied, vec![".env"]);
+
+        // パストラバーサル
+        let denied = guard.find_denied_paths_in_command("cat ../../../../../../../etc/passwd");
+        assert_eq!(denied, vec!["../../../../../../../etc/passwd"]);
+
+        // 環境変数代入プレフィックス
+        let denied = guard.find_denied_paths_in_command("CONF=/etc/shadow run_service");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+
+        // コマンド置換 $(...)
+        let denied = guard.find_denied_paths_in_command("echo $(cat /etc/shadow)");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+
+        // 安全なコマンド
+        let safe = guard.find_denied_paths_in_command("ls -la src/ && cargo check");
+        assert!(safe.is_empty());
     }
 }

@@ -106,6 +106,19 @@ pub fn validate_tool_call(
     // 2. 引数内のパスをチェック
     check_paths_in_value(&call.arguments, path_guard, &mut issues);
 
+    // 2.5 シェルコマンド内の禁止パスチェック (Phase B.2: PathGuard 迂回防止)
+    if call.name == "shell"
+        && let Some(cmd) = call.arguments.get("command").and_then(|c| c.as_str())
+    {
+        let denied = path_guard.find_denied_paths_in_command(cmd);
+        for p in denied {
+            issues.push(ValidationIssue {
+                severity: Severity::Block,
+                message: format!("シェルコマンド内の禁止パスへのアクセス: '{p}'"),
+            });
+        }
+    }
+
     // 3. 危険パターンの検出
     check_dangerous_patterns(&call.arguments, patterns, &mut issues);
 
@@ -344,5 +357,44 @@ mod tests {
         assert_eq!(edit_distance("kitten", "sitting"), 3);
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("same", "same"), 0);
+    }
+
+    #[test]
+    fn test_shell_command_path_guard_blocked() {
+        // cat /etc/shadow
+        let call = ToolCall {
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "cat /etc/shadow"}),
+        };
+        let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
+        assert!(!result.is_valid, "cat /etc/shadow はブロックされること");
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.severity == Severity::Block && i.message.contains("/etc/shadow"))
+        );
+
+        // grep secret .env
+        let call = ToolCall {
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "grep secret .env"}),
+        };
+        let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
+        assert!(!result.is_valid, "grep secret .env はブロックされること");
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.severity == Severity::Block && i.message.contains(".env"))
+        );
+
+        // 安全なコマンド
+        let call = ToolCall {
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "cargo check"}),
+        };
+        let result = validate_tool_call(&call, &test_tools(), &test_guard(), None);
+        assert!(result.is_valid, "cargo check は許可されること");
     }
 }
