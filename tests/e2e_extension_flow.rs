@@ -83,7 +83,8 @@ fn test_e2e_sensor_to_dmn_loop_context_propagation() {
     // 4. DmnWorker を通じて自発思考を実行し、Vault・KnowledgeGraph・A-MEMへの多重還元を検証
     let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
     let mut worker = bonsai_agent::agent::dmn::DmnWorker::new(0.01, 0.001, 0.7)
-        .with_vault(temp_dir.path().to_path_buf());
+        .with_vault(temp_dir.path().to_path_buf())
+        .with_auto_persist(true);
     worker.last_tick = std::time::Instant::now() - std::time::Duration::from_secs(1);
 
     let outcome = worker.tick(false, Some(&store), || (content, importance));

@@ -8,7 +8,17 @@
 
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+/// 推論実行中のプロセス kill を防止する RAII ガード
+pub struct InFlightGuard<'a>(&'a ProcessSupervisor);
+
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        self.0.end_in_flight();
+    }
+}
 
 /// MLX server プロセスの lifecycle を握る supervisor。
 pub struct ProcessSupervisor {
@@ -18,6 +28,7 @@ pub struct ProcessSupervisor {
     spawn_program: String,
     spawn_args: Vec<String>,
     child: Mutex<Option<Child>>,
+    in_flight: AtomicUsize,
 }
 
 impl ProcessSupervisor {
@@ -48,6 +59,7 @@ impl ProcessSupervisor {
             spawn_program,
             spawn_args,
             child: Mutex::new(None),
+            in_flight: AtomicUsize::new(0),
         }
     }
 
@@ -68,14 +80,21 @@ impl ProcessSupervisor {
     }
 
     /// MLX server を起動し child を保持。spawn_program が空なら何もしない (Ok)。
-    /// bonsai が起動した child のみ保持し、既に保持中なら再起動しない。
+    /// 既に保持中かつプロセスが生存していれば再起動しない。
+    /// H21: プロセスが既に終了（クラッシュ/ゾンビ化）している場合は安全に再起動する。
     pub fn spawn(&self) -> anyhow::Result<()> {
         if self.spawn_program.is_empty() {
             return Ok(());
         }
         let mut guard = self.child.lock().unwrap();
-        if guard.is_some() {
-            return Ok(()); // already spawned by us
+        if let Some(ref mut child) = *guard {
+            match child.try_wait() {
+                Ok(None) => return Ok(()), // 正常実行中
+                Ok(Some(_)) | Err(_) => {
+                    // 終了済みプロセスの回収
+                    *guard = None;
+                }
+            }
         }
         let child = Command::new(&self.spawn_program)
             .args(&self.spawn_args)
@@ -95,6 +114,23 @@ impl ProcessSupervisor {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    /// 推論要求の開始を宣言し、推論中の idle kill を防止する RAII ガードを取得
+    pub fn enter_in_flight(&self) -> InFlightGuard<'_> {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        self.record_request();
+        InFlightGuard(self)
+    }
+
+    /// 実行中の推論リクエスト数を取得
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    fn end_in_flight(&self) {
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.record_request();
     }
 
     /// server が応答していなければ spawn し health OK まで待つ (best-effort、最大 ~30s)。
@@ -134,9 +170,9 @@ impl ProcessSupervisor {
         *self.last_used.lock().unwrap() = Instant::now();
     }
 
-    /// idle timeout を超過したか。timeout=0 (disabled) では常に false。
+    /// idle timeout を超過したか。timeout=0 (disabled) または推論実行中は常に false。
     pub fn is_idle(&self) -> bool {
-        if self.idle_timeout.is_zero() {
+        if self.idle_timeout.is_zero() || self.in_flight.load(Ordering::SeqCst) > 0 {
             return false;
         }
         self.last_used.lock().unwrap().elapsed() >= self.idle_timeout
@@ -380,6 +416,49 @@ mod tests {
         assert!(s.is_healthy(), "respawn 後に再び 200");
 
         // cleanup。
+        s.kill();
+    }
+
+    #[test]
+    fn t_in_flight_guard_prevents_idle_kill() {
+        let s = ProcessSupervisor::new("http://127.0.0.1:1/health".to_string(), 1);
+        // 時間を経過させて idle 状態を作る
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(s.is_idle());
+
+        // in-flight guard を取得
+        {
+            let guard = s.enter_in_flight();
+            assert_eq!(s.in_flight_count(), 1);
+            assert!(
+                !s.is_idle(),
+                "推論中は idle_timeout を経過していても idle 判定されない"
+            );
+            assert!(!s.kill_if_idle(), "推論中は kill_if_idle が false を返す");
+            drop(guard);
+        }
+
+        // guard drop 後は再計測可能
+        assert_eq!(s.in_flight_count(), 0);
+    }
+
+    #[test]
+    fn t_spawn_respawns_dead_child() {
+        // すぐに終了するコマンド ("true") を指定
+        let s = ProcessSupervisor::with_spawn(
+            "http://127.0.0.1:1/health".to_string(),
+            0,
+            "true".to_string(),
+            "dummy".to_string(),
+            0,
+        );
+
+        s.spawn().expect("初回の spawn は成功する");
+        // 子プロセスが終了するのを少し待つ
+        std::thread::sleep(Duration::from_millis(100));
+
+        // H21: 終了した子プロセスがあっても、次の spawn で再起動できること
+        s.spawn().expect("終了後の再 spawn も成功する");
         s.kill();
     }
 }

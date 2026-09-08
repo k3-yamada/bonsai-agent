@@ -201,6 +201,7 @@ impl AdvisorSettings {
             // 項目 210 Self-Verify default OFF (TOML 経由設定は別 PR で追加予定)
             dynamic_skip_threshold: 0.0,
             min_samples_for_skip: 5,
+            cancel: None,
         }
     }
 
@@ -860,6 +861,16 @@ max_uses = 5
         };
         let runtime = settings.to_runtime();
         assert_eq!(runtime.api_key.as_deref(), Some("sk-explicit-key"));
+    }
+
+    #[test]
+    fn test_advisor_to_runtime_with_cancel() {
+        let settings = AdvisorSettings::default();
+        let cancel = crate::cancel::CancellationToken::new();
+        let runtime = settings.to_runtime().with_cancel(cancel.clone());
+        assert!(runtime.cancel.is_some());
+        cancel.cancel();
+        assert!(runtime.cancel.as_ref().unwrap().is_cancelled());
     }
 
     #[test]

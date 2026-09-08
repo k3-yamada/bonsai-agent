@@ -193,6 +193,7 @@ impl LlamaServerBackend {
         // MLX互換: top_k/min_p/repeat_penaltyはMLXサーバーでサイレント無視されるため除外
         if self.mlx_compatible {
             let mut body = serde_json::json!({
+                "model": &self.model_id,
                 "messages": msgs,
                 "temperature": self.inference.temperature,
                 "top_p": self.inference.top_p,
@@ -206,6 +207,7 @@ impl LlamaServerBackend {
             body
         } else {
             let mut body = serde_json::json!({
+                "model": &self.model_id,
                 "messages": msgs,
                 "temperature": self.inference.temperature,
                 "top_k": self.inference.top_k,
@@ -295,7 +297,12 @@ impl LlamaServerBackend {
         tools: &[ToolSchema],
         on_token: &mut dyn FnMut(&str),
         start: Instant,
+        cancel: &CancellationToken,
     ) -> Result<GenerateResult> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("キャンセルされました");
+        }
+
         let url = format!("{}/v1/chat/completions", self.base_url);
         let mut body = self.build_request_body(messages, tools);
         // ストリーミングを無効化してフォールバック
@@ -308,6 +315,9 @@ impl LlamaServerBackend {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
         let response: serde_json::Value = req.send_json(&body)?.body_mut().read_json()?;
+        if cancel.is_cancelled() {
+            anyhow::bail!("キャンセルされました");
+        }
 
         let text = response["choices"][0]["message"]["content"]
             .as_str()
@@ -363,6 +373,10 @@ impl LlmBackend for LlamaServerBackend {
         let response = match req.send_json(&body) {
             Ok(resp) => resp,
             Err(e) => {
+                // C6: キャンセル時は非ストリーミングへのフォールバック（再推論）を遮断
+                if cancel.is_cancelled() {
+                    return Err(e.into());
+                }
                 // ストリーミングリクエスト失敗時は非ストリーミングでフォールバック
                 let backend_label = if self.mlx_compatible {
                     "mlx-lm server"
@@ -373,7 +387,7 @@ impl LlmBackend for LlamaServerBackend {
                     "[{backend_label}] ストリーミングリクエスト失敗 ({}): {e}。非ストリーミングにフォールバック",
                     self.base_url,
                 );
-                return self.generate_non_streaming(messages, tools, on_token, start);
+                return self.generate_non_streaming(messages, tools, on_token, start, cancel);
             }
         };
 
@@ -403,6 +417,10 @@ impl LlmBackend for LlamaServerBackend {
                 })
             }
             Err(e) => {
+                // C6: キャンセル時は非ストリーミングへのフォールバック（再推論）を遮断
+                if cancel.is_cancelled() {
+                    return Err(e);
+                }
                 // SSEパース失敗時は非ストリーミングでフォールバック
                 let backend_label = if self.mlx_compatible {
                     "mlx-lm server"
@@ -410,7 +428,7 @@ impl LlmBackend for LlamaServerBackend {
                     "llama-server"
                 };
                 eprintln!("[{backend_label}] SSEパース失敗、非ストリーミングにフォールバック: {e}");
-                self.generate_non_streaming(messages, tools, on_token, start)
+                self.generate_non_streaming(messages, tools, on_token, start, cancel)
             }
         }
     }
@@ -646,6 +664,7 @@ sse_chunk_timeout_secs = 0
             Message::user("こんにちは"),
         ];
         let body = backend.build_request_body(&messages, &[]);
+        assert_eq!(body["model"], "test");
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0]["role"], "system");
@@ -897,5 +916,74 @@ sse_chunk_timeout_secs = 0
             LlamaServerBackend::connect("http://localhost:8000", "Qwen3-8B-ERP-v0.1-GGUF")
                 .with_api_key("sk-unsloth-secret");
         assert_eq!(backend.api_key.as_deref(), Some("sk-unsloth-secret"));
+    }
+
+    #[test]
+    fn test_llama_server_cancel_aborts_immediately_without_fallback() {
+        // C6: キャンセル時は即座にエラーとなり、非ストリーミングへのフォールバック（再推論）は実行されない
+        let backend = LlamaServerBackend::connect("http://127.0.0.1:19997", "test");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let messages = vec![Message::user("test")];
+        let tools = vec![];
+        let mut tokens = Vec::new();
+
+        let res = backend.generate(
+            &messages,
+            &tools,
+            &mut |t| tokens.push(t.to_string()),
+            &cancel,
+        );
+        assert!(res.is_err(), "キャンセル時は必ず Err を返すこと");
+        assert!(
+            res.unwrap_err().to_string().contains("キャンセル"),
+            "キャンセル起因のエラーであること"
+        );
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_stream_cancels_mid_stream() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        let cancel_for_token = cancel.clone();
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"chunk1\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"chunk2\"}}]}\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+        let mut received = Vec::new();
+        let res = backend.parse_sse_stream(
+            reader,
+            &mut |token| {
+                received.push(token.to_string());
+                cancel_for_token.cancel(); // 最初のトークン受信時に即キャンセル
+            },
+            &cancel,
+        );
+        assert!(res.is_err(), "途中でキャンセルされたら必ず Err を返すこと");
+        assert!(
+            res.unwrap_err().to_string().contains("キャンセル"),
+            "キャンセル起因のエラーであること"
+        );
+        assert_eq!(received, vec!["chunk1"], "キャンセル前のトークンのみ受信");
+    }
+
+    #[test]
+    fn test_llama_server_cancel_on_send_error_aborts_without_fallback() {
+        // C6: ストリーミングリクエスト失敗時に cancel が立っている場合、
+        // generate_non_streaming へのフォールバック（再推論）を遮断して即座に Err を返す
+        let backend = LlamaServerBackend::connect("http://127.0.0.1:19997", "test");
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cancel_clone.cancel();
+        });
+
+        let res = backend.generate(&[Message::user("test")], &[], &mut |_| {}, &cancel);
+        let _ = handle.join();
+
+        assert!(res.is_err());
+        assert!(cancel.is_cancelled());
     }
 }

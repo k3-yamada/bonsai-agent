@@ -19,6 +19,7 @@ pub struct DmnWorker {
     pub idle_since: Option<Instant>,
     pub dream_threshold_secs: Option<f64>,
     pub last_dreamed: Option<Instant>,
+    pub auto_persist: bool,
 }
 
 impl DmnWorker {
@@ -34,6 +35,7 @@ impl DmnWorker {
             idle_since: None,
             dream_threshold_secs: None,
             last_dreamed: None,
+            auto_persist: false,
         }
     }
 
@@ -44,6 +46,11 @@ impl DmnWorker {
 
     pub fn with_dream_threshold(mut self, secs: f64) -> Self {
         self.dream_threshold_secs = Some(secs);
+        self
+    }
+
+    pub fn with_auto_persist(mut self, enabled: bool) -> Self {
+        self.auto_persist = enabled;
         self
     }
 
@@ -95,8 +102,10 @@ impl DmnWorker {
         // 内省の生成（洞察テキストと重要度スコア 0.0..1.0）
         let (insight, significance) = generator();
 
-        // 1. 既存の四層記憶（experiences テーブルの Insight）へ還元
-        if let Some(s) = store {
+        // 1. 既存の四層記憶（experiences テーブルの Insight）へ還元（auto_persist 有効時のみ）
+        if self.auto_persist
+            && let Some(s) = store
+        {
             let exp_store = ExperienceStore::new(s.conn());
             let _ = exp_store.record(&RecordParams {
                 exp_type: ExperienceType::Insight,
@@ -127,8 +136,9 @@ impl DmnWorker {
             }
         }
 
-        // 2. ナレッジVault（insights.md）および KnowledgeGraph への同期（発話相当の重要度の場合）
-        if significance >= self.speak_threshold
+        // 2. ナレッジVault（insights.md）および KnowledgeGraph への同期（auto_persist 有効 かつ 発話相当の重要度の場合）
+        if self.auto_persist
+            && significance >= self.speak_threshold
             && let Some(vault_dir) = &self.vault_path
             && let Ok(vault) = Vault::new(vault_dir)
         {
@@ -158,6 +168,9 @@ impl DmnWorker {
     /// 長時間アイドル時にメタ認知エンジン（Dreamer）を自律起動し、
     /// 過去7日間のツール・失敗パターン分析結果を多層記憶とナレッジVaultに固定化（Consolidation）する。
     fn trigger_deep_dream(&self, store: &MemoryStore) {
+        if !self.auto_persist {
+            return;
+        }
         let dreamer = crate::memory::dreams::Dreamer::new(store.conn());
         if let Ok(report) = dreamer.generate_report(7) {
             let exp_store = ExperienceStore::new(store.conn());
@@ -330,9 +343,48 @@ mod tests {
     }
 
     #[test]
+    fn test_dmn_worker_default_auto_persist_disabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::in_memory().unwrap();
+        let mut worker = DmnWorker::new(0.01, 0.001, 0.7).with_vault(temp_dir.path().to_path_buf());
+        assert!(
+            !worker.auto_persist,
+            "auto_persist must be false by default to prevent knowledge pollution"
+        );
+        worker.last_tick = Instant::now() - std::time::Duration::from_secs(1);
+
+        let outcome = worker.tick(false, Some(&store), || {
+            ("未検証の内省洞察".to_string(), 0.95)
+        });
+        assert!(matches!(outcome, DmnOutcome::SpokenReflection { .. }));
+
+        // experiences に記録されていないこと
+        let exp_store = ExperienceStore::new(store.conn());
+        let insights = exp_store.find_similar("", 5).unwrap();
+        assert!(
+            insights.is_empty(),
+            "Insight must not be recorded when auto_persist is false"
+        );
+
+        // memories に記録されていないこと
+        let memories = store.all_memories().unwrap();
+        assert!(
+            memories.is_empty(),
+            "Memory must not be recorded when auto_persist is false"
+        );
+
+        // Vault に insights.md が作成されていないこと
+        let insights_md = temp_dir.path().join("insights.md");
+        assert!(
+            !insights_md.exists(),
+            "Vault file must not be created when auto_persist is false"
+        );
+    }
+
+    #[test]
     fn test_dmn_worker_tick_records_insight_to_store() {
         let store = MemoryStore::in_memory().unwrap();
-        let mut worker = DmnWorker::new(0.01, 0.001, 0.7);
+        let mut worker = DmnWorker::new(0.01, 0.001, 0.7).with_auto_persist(true);
         worker.last_tick = Instant::now() - std::time::Duration::from_secs(1);
 
         let outcome = worker.tick(false, Some(&store), || ("新発見の知見".to_string(), 0.8));
@@ -350,7 +402,9 @@ mod tests {
     #[test]
     fn test_dmn_worker_syncs_insight_to_vault() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let mut worker = DmnWorker::new(0.01, 0.001, 0.7).with_vault(temp_dir.path().to_path_buf());
+        let mut worker = DmnWorker::new(0.01, 0.001, 0.7)
+            .with_vault(temp_dir.path().to_path_buf())
+            .with_auto_persist(true);
         worker.last_tick = Instant::now() - std::time::Duration::from_secs(1);
 
         let outcome = worker.tick(false, None, || {
@@ -368,7 +422,9 @@ mod tests {
     fn test_dmn_worker_syncs_insight_to_vault_and_kg_and_amem() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::in_memory().unwrap();
-        let mut worker = DmnWorker::new(0.01, 0.001, 0.7).with_vault(temp_dir.path().to_path_buf());
+        let mut worker = DmnWorker::new(0.01, 0.001, 0.7)
+            .with_vault(temp_dir.path().to_path_buf())
+            .with_auto_persist(true);
         worker.last_tick = Instant::now() - std::time::Duration::from_secs(1);
 
         // 事前に既存の関連メモリを1件登録しておく（リンク形成テスト用）
@@ -445,7 +501,8 @@ mod tests {
         // dream_threshold = 0.05 秒（高速テスト用）
         let mut worker = DmnWorker::new(60.0, 10.0, 0.7)
             .with_vault(temp_dir.path().to_path_buf())
-            .with_dream_threshold(0.05);
+            .with_dream_threshold(0.05)
+            .with_auto_persist(true);
 
         // 最初は通常アイドル
         worker.tick(false, Some(&store), || ("通常内省".to_string(), 0.2));

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 全レイヤーに伝播するキャンセルトークン。
 /// Ctrl+Cハンドラで cancel() を呼び、推論・ツール実行が安全に中断される。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
 }

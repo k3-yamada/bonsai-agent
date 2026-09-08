@@ -100,7 +100,9 @@ fn test_interactive_session_walkthrough() {
     // DMN ワーカーのセットアップ
     let temp_vault = temp_dir.join("vault");
     let _ = std::fs::create_dir_all(&temp_vault);
-    let mut worker = DmnWorker::new(5.0, 5.0, 0.5).with_vault(temp_vault.clone());
+    let mut worker = DmnWorker::new(5.0, 5.0, 0.5)
+        .with_vault(temp_vault.clone())
+        .with_auto_persist(true);
     worker.last_tick = std::time::Instant::now() - Duration::from_secs(10);
 
     // ユーザー入力ストリーム
