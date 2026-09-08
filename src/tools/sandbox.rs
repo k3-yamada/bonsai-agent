@@ -269,11 +269,26 @@ impl SeatbeltSandbox {
             deny_rules.push(format!("  (subpath \"{}\")", d));
             deny_rules.push(format!("  (literal \"{}\")", d));
         }
+
+        let home_dir = std::env::var("HOME").ok();
+
         for p in denied_paths {
             let p_clean = p.trim();
             if !p_clean.is_empty() {
-                deny_rules.push(format!("  (subpath \"{}\")", p_clean));
-                deny_rules.push(format!("  (literal \"{}\")", p_clean));
+                let expanded = if let Some(ref home) = home_dir {
+                    if p_clean == "~" {
+                        home.clone()
+                    } else if let Some(rest) = p_clean.strip_prefix("~/") {
+                        format!("{}/{}", home, rest)
+                    } else {
+                        p_clean.to_string()
+                    }
+                } else {
+                    p_clean.to_string()
+                };
+
+                deny_rules.push(format!("  (subpath \"{}\")", expanded));
+                deny_rules.push(format!("  (literal \"{}\")", expanded));
                 if p_clean.starts_with('.') || !p_clean.contains('/') {
                     deny_rules.push(format!("  (regex #\"{}.*\")", regex_escape(p_clean)));
                 }
@@ -356,6 +371,90 @@ impl BubblewrapSandbox {
             false
         }
     }
+
+    /// bwrap の隔離実行引数リストを生成する
+    pub fn build_bwrap_args(
+        &self,
+        cwd_opt: Option<&std::path::Path>,
+        home_opt: Option<&str>,
+        command: &str,
+        args: &[&str],
+    ) -> Vec<String> {
+        let mut bwrap_args = vec![
+            "--ro-bind".to_string(),
+            "/".to_string(),
+            "/".to_string(),
+            "--dev".to_string(),
+            "/dev".to_string(),
+            "--proc".to_string(),
+            "/proc".to_string(),
+            "--tmpfs".to_string(),
+            "/tmp".to_string(),
+        ];
+
+        if let Some(cwd) = cwd_opt {
+            let cwd_str = cwd.to_string_lossy().to_string();
+            bwrap_args.extend(["--bind".to_string(), cwd_str.clone(), cwd_str]);
+        }
+
+        let default_denies = ["/etc/shadow", "/etc/master.passwd", "/etc/sudoers"];
+        let mut all_denies: Vec<String> = default_denies.iter().map(|s| s.to_string()).collect();
+        all_denies.extend(self.denied_paths.clone());
+
+        for p in &all_denies {
+            let p_clean = p.trim();
+            if p_clean.is_empty() {
+                continue;
+            }
+
+            // ~ 展開
+            let expanded_buf = if let Some(home) = home_opt {
+                if p_clean == "~" {
+                    std::path::PathBuf::from(home)
+                } else if let Some(rest) = p_clean.strip_prefix("~/") {
+                    std::path::PathBuf::from(home).join(rest)
+                } else {
+                    std::path::PathBuf::from(p_clean)
+                }
+            } else {
+                std::path::PathBuf::from(p_clean)
+            };
+
+            // 相対パスの場合は cwd と結合して絶対パス化
+            let abs_path = if expanded_buf.is_absolute() {
+                expanded_buf
+            } else if let Some(cwd) = cwd_opt {
+                cwd.join(expanded_buf)
+            } else {
+                expanded_buf
+            };
+
+            let path_str = abs_path.to_string_lossy().to_string();
+
+            if abs_path.is_dir() {
+                // ディレクトリは空 tmpfs で隠蔽
+                bwrap_args.extend(["--tmpfs".to_string(), path_str]);
+            } else if abs_path.is_file() {
+                // 実在ファイルは /dev/null を読み取り専用バインドして無力化
+                bwrap_args.extend(["--ro-bind".to_string(), "/dev/null".to_string(), path_str]);
+            } else {
+                // 未存在または存在未確定のファイル/パスは --ro-bind-try で安全に無力化
+                bwrap_args.extend([
+                    "--ro-bind-try".to_string(),
+                    "/dev/null".to_string(),
+                    path_str,
+                ]);
+            }
+        }
+
+        bwrap_args.push("--".to_string());
+        bwrap_args.push(command.to_string());
+        for a in args {
+            bwrap_args.push(a.to_string());
+        }
+
+        bwrap_args
+    }
 }
 
 impl Default for BubblewrapSandbox {
@@ -370,32 +469,9 @@ impl Sandbox for BubblewrapSandbox {
             return self.fallback.execute(command, args, limits);
         }
 
-        let mut bwrap_args = vec![
-            "--ro-bind".to_string(),
-            "/".to_string(),
-            "/".to_string(),
-            "--dev".to_string(),
-            "/dev".to_string(),
-            "--proc".to_string(),
-            "/proc".to_string(),
-            "--tmpfs".to_string(),
-            "/tmp".to_string(),
-        ];
-
-        if let Ok(cwd) = std::env::current_dir() {
-            let cwd_str = cwd.to_string_lossy().to_string();
-            bwrap_args.extend(["--bind".to_string(), cwd_str.clone(), cwd_str]);
-        }
-
-        for p in &self.denied_paths {
-            bwrap_args.extend(["--tmpfs".to_string(), p.clone()]);
-        }
-
-        bwrap_args.push("--".to_string());
-        bwrap_args.push(command.to_string());
-        for a in args {
-            bwrap_args.push(a.to_string());
-        }
+        let cwd = std::env::current_dir().ok();
+        let home = std::env::var("HOME").ok();
+        let bwrap_args = self.build_bwrap_args(cwd.as_deref(), home.as_deref(), command, args);
 
         let arg_refs: Vec<&str> = bwrap_args.iter().map(|s| s.as_str()).collect();
         self.fallback.execute("bwrap", &arg_refs, limits)
@@ -647,5 +723,27 @@ mod tests {
     fn test_regex_escape() {
         assert_eq!(regex_escape(".env*"), "\\.env\\*");
         assert_eq!(regex_escape("abc/def"), "abc/def");
+    }
+
+    #[test]
+    fn test_seatbelt_profile_tilde_expansion() {
+        let profile = SeatbeltSandbox::build_profile(&["~/.ssh".to_string()]);
+        if let Ok(home) = std::env::var("HOME") {
+            assert!(profile.contains(&format!("(subpath \"{}/.ssh\")", home)));
+        }
+    }
+
+    #[test]
+    fn test_bubblewrap_build_args_isolation() {
+        let sandbox = BubblewrapSandbox::new(&[".env".to_string(), "~/.ssh".to_string()]);
+        let cwd = std::path::Path::new("/workspace");
+        let args = sandbox.build_bwrap_args(Some(cwd), Some("/home/user"), "cat", &["foo.txt"]);
+        assert!(args.contains(&"--ro-bind".to_string()));
+        assert!(args.contains(&"--bind".to_string()));
+        assert!(args.contains(&"/workspace".to_string()));
+        // /etc/shadow, ~/.ssh, .env が解決されてマスクに含まれること
+        assert!(args.iter().any(|a| a.contains("/etc/shadow")));
+        assert!(args.iter().any(|a| a.contains("/home/user/.ssh")));
+        assert!(args.iter().any(|a| a.contains("/workspace/.env")));
     }
 }

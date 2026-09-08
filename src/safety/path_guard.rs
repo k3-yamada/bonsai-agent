@@ -27,6 +27,11 @@ impl PathGuard {
         ])
     }
 
+    /// 設定されているアクセス禁止パスの参照を返す
+    pub fn deny_paths(&self) -> &[String] {
+        &self.deny_paths
+    }
+
     /// 指定されたパスがアクセス禁止対象かチェックする
     ///
     /// 既存のファイル/ディレクトリは `canonicalize()` を通してシンボリックリンクや `..` を解決して照合する。
@@ -192,7 +197,7 @@ fn extract_shell_tokens(command: &str) -> Vec<String> {
                     tokens.push(std::mem::take(&mut current));
                 }
             }
-            '|' | ';' | '&' | '(' | ')' => {
+            '|' | ';' | '&' | '(' | ')' | '`' => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -216,19 +221,121 @@ fn extract_shell_tokens(command: &str) -> Vec<String> {
     tokens
 }
 
-/// 単一トークンからパス照合候補を抽出（クォート除去、フラグ右辺、空白サブトークン）
+/// ANSI-C クォート ($'...') のエスケープシーケンスを展開
+fn unescape_ansic(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('a') => out.push('\x07'),
+                Some('b') => out.push('\x08'),
+                Some('e') | Some('E') => out.push('\x1B'),
+                Some('f') => out.push('\x0C'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('v') => out.push('\x0B'),
+                Some('\\') => out.push('\\'),
+                Some('\'') => out.push('\''),
+                Some('"') => out.push('"'),
+                Some('x') => {
+                    // \xHH 16進数バイト
+                    let mut hex = String::new();
+                    for _ in 0..2 {
+                        if let Some(&h) = chars.peek() {
+                            if h.is_ascii_hexdigit() {
+                                hex.push(h);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                        out.push(byte as char);
+                    }
+                }
+                Some(oct) if ('0'..='7').contains(&oct) => {
+                    // \OOO 8進数バイト
+                    let mut octal = String::from(oct);
+                    for _ in 0..2 {
+                        if let Some(&o) = chars.peek() {
+                            if ('0'..='7').contains(&o) {
+                                octal.push(o);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if let Ok(byte) = u8::from_str_radix(&octal, 8) {
+                        out.push(byte as char);
+                    }
+                }
+                Some(other) => {
+                    out.push(other);
+                }
+                None => {
+                    out.push('\\');
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// 単一トークンからパス照合候補を抽出（クォート除去、フラグ右辺、空白サブトークン、ANSI-C展開）
 fn extract_candidates_from_token(token: &str) -> Vec<String> {
     let mut candidates = Vec::new();
-    let cleaned = token.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+    let cleaned = token.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',', '`']);
     if !cleaned.is_empty() {
         candidates.push(cleaned.to_string());
     }
 
+    // ANSI-C quoting ($'/path' or $"...") のプレフィックス '$' 除去およびエスケープ解除
+    if cleaned.starts_with('$') {
+        let stripped = cleaned
+            .trim_start_matches('$')
+            .trim_matches(['\'', '"', '`']);
+        if !stripped.is_empty() {
+            if !candidates.contains(&stripped.to_string()) {
+                candidates.push(stripped.to_string());
+            }
+            if stripped.contains('\\')
+                && let Some(unescaped) = unescape_ansic(stripped)
+                && !unescaped.is_empty()
+                && !candidates.contains(&unescaped)
+            {
+                candidates.push(unescaped);
+            }
+        }
+    }
+
     // --key=value や VAR=value の右辺
     if let Some((_, val)) = cleaned.split_once('=') {
-        let val_cleaned = val.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+        let val_cleaned =
+            val.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',', '`']);
         if !val_cleaned.is_empty() && !candidates.contains(&val_cleaned.to_string()) {
             candidates.push(val_cleaned.to_string());
+        }
+        if val_cleaned.starts_with('$') {
+            let stripped = val_cleaned
+                .trim_start_matches('$')
+                .trim_matches(['\'', '"', '`']);
+            if !stripped.is_empty() && !candidates.contains(&stripped.to_string()) {
+                candidates.push(stripped.to_string());
+            }
+            if stripped.contains('\\')
+                && let Some(unescaped) = unescape_ansic(stripped)
+                && !unescaped.is_empty()
+                && !candidates.contains(&unescaped)
+            {
+                candidates.push(unescaped);
+            }
         }
     }
 
@@ -236,20 +343,36 @@ fn extract_candidates_from_token(token: &str) -> Vec<String> {
     if token.contains(' ') || token.contains('\t') {
         for word in token.split_whitespace() {
             let word_cleaned =
-                word.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+                word.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',', '`']);
             if !word_cleaned.is_empty() && !candidates.contains(&word_cleaned.to_string()) {
                 candidates.push(word_cleaned.to_string());
+            }
+            if word_cleaned.starts_with('$') {
+                let stripped = word_cleaned
+                    .trim_start_matches('$')
+                    .trim_matches(['\'', '"', '`']);
+                if !stripped.is_empty() && !candidates.contains(&stripped.to_string()) {
+                    candidates.push(stripped.to_string());
+                }
             }
         }
     }
 
     // 引用符で囲まれた部分文字列 (e.g. open('/etc/shadow') -> /etc/shadow)
-    if token.contains('\'') || token.contains('"') {
-        for part in token.split(['\'', '"']) {
+    if token.contains('\'') || token.contains('"') || token.contains('`') {
+        for part in token.split(['\'', '"', '`']) {
             let part_cleaned =
-                part.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',']);
+                part.trim_matches(['\'', '"', '(', ')', '[', ']', '{', '}', ';', ',', '`']);
             if !part_cleaned.is_empty() && !candidates.contains(&part_cleaned.to_string()) {
                 candidates.push(part_cleaned.to_string());
+            }
+            if part_cleaned.starts_with('$') {
+                let stripped = part_cleaned
+                    .trim_start_matches('$')
+                    .trim_matches(['\'', '"', '`']);
+                if !stripped.is_empty() && !candidates.contains(&stripped.to_string()) {
+                    candidates.push(stripped.to_string());
+                }
             }
         }
     }
@@ -343,8 +466,44 @@ mod tests {
         let denied = guard.find_denied_paths_in_command("echo $(cat /etc/shadow)");
         assert_eq!(denied, vec!["/etc/shadow"]);
 
+        // バッククォートによるコマンド置換 `...`
+        let denied = guard.find_denied_paths_in_command("cat `echo /etc/shadow`");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+        let denied = guard.find_denied_paths_in_command("`cat /etc/shadow`");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+        let denied = guard.find_denied_paths_in_command("echo `cat .env`");
+        assert_eq!(denied, vec![".env"]);
+
+        // ANSI-C quoting ($'/path' または $"...")
+        let denied = guard.find_denied_paths_in_command("cat $'/etc/shadow'");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+        let denied = guard.find_denied_paths_in_command("cat $'/etc/\\x73hadow'");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+        let denied = guard.find_denied_paths_in_command("head -n 1 $\".env\"");
+        assert_eq!(denied, vec![".env"]);
+
+        // クォート分割連結
+        let denied = guard.find_denied_paths_in_command("cat /etc/sha\"\"dow");
+        assert_eq!(denied, vec!["/etc/shadow"]);
+
         // 安全なコマンド
         let safe = guard.find_denied_paths_in_command("ls -la src/ && cargo check");
         assert!(safe.is_empty());
+    }
+
+    #[test]
+    fn test_unescape_ansic() {
+        assert_eq!(
+            unescape_ansic("/etc/\\x73hadow"),
+            Some("/etc/shadow".to_string())
+        );
+        assert_eq!(
+            unescape_ansic("foo\\nbar\\t"),
+            Some("foo\nbar\t".to_string())
+        );
+        assert_eq!(
+            unescape_ansic("/etc/\\163hadow"),
+            Some("/etc/shadow".to_string())
+        );
     }
 }

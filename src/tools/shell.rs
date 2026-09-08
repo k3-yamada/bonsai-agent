@@ -35,8 +35,13 @@ impl ShellTool {
     }
 
     pub fn with_path_guard(mut self, guard: PathGuard) -> Self {
+        self.sandbox = Box::new(NativeSandbox::new(guard.deny_paths()));
         self.path_guard = Some(guard);
         self
+    }
+
+    pub fn new_with_guard(guard: PathGuard) -> Self {
+        Self::new().with_path_guard(guard)
     }
 }
 
