@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cancel::CancellationToken;
 use crate::config::ServerBackend;
 use crate::domain::conversation::Message;
 
@@ -85,6 +86,8 @@ pub struct AdvisorConfig {
     /// 動的 skip 判定の最小 sample 数 (default 5)。これ未満では
     /// `verification_success_rate` が None を返し既存挙動 fallback。
     pub min_samples_for_skip: usize,
+    /// キャンセルトークン（H20: CLIサブプロセス等へ中断シグナルを伝播）
+    pub cancel: Option<CancellationToken>,
 }
 
 /// デフォルトの完了前自己検証プロンプト
@@ -215,11 +218,18 @@ impl Default for AdvisorConfig {
             // 項目 210 Self-Verify 動的 skip — default OFF (0.0) で既存挙動完全維持
             dynamic_skip_threshold: 0.0,
             min_samples_for_skip: 5,
+            cancel: None,
         }
     }
 }
 
 impl AdvisorConfig {
+    /// キャンセルトークンを設定 (H20)
+    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
     /// アドバイザー呼び出しが可能か
     pub fn can_advise(&self) -> bool {
         self.calls_used < self.max_uses
@@ -382,7 +392,8 @@ impl AdvisorConfig {
             role.user_prompt(task_context)
         );
 
-        let content = Self::exec_claude_cli(&prompt, Duration::from_secs(30))?;
+        let content =
+            Self::exec_claude_cli(&prompt, Duration::from_secs(30), self.cancel.as_ref())?;
         self.cache.insert(key, content.clone());
         Ok(Some(content))
     }
@@ -465,18 +476,23 @@ impl AdvisorConfig {
         }
 
         let prompt = format!("{system}\n\n{user}");
-        let content = Self::exec_claude_cli(&prompt, Duration::from_secs(30))?;
+        let content =
+            Self::exec_claude_cli(&prompt, Duration::from_secs(30), self.cancel.as_ref())?;
         self.cache.insert(key, content.clone());
         Ok(Some(content))
     }
 
-    /// H20: Claude CLI サブプロセス呼び出し（タイムアウトとプロセスグループ監視）
-    fn exec_claude_cli(prompt: &str, timeout: Duration) -> anyhow::Result<String> {
+    /// H20: Claude CLI サブプロセス呼び出し（タイムアウト、キャンセル、プロセスグループ監視、stderr未drain防止）
+    fn exec_claude_cli(
+        prompt: &str,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> anyhow::Result<String> {
         let mut cmd = std::process::Command::new("claude");
         cmd.args(["-p", prompt, "--output-format", "text"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::null());
 
         #[cfg(unix)]
         {
@@ -491,6 +507,16 @@ impl AdvisorConfig {
         let poll_interval = Duration::from_millis(50);
 
         let status = loop {
+            if cancel.is_some_and(|c| c.is_cancelled()) {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("Claude Code実行がキャンセルされました");
+            }
+
             match child.try_wait()? {
                 Some(status) => break status,
                 None => {
@@ -1532,5 +1558,12 @@ mod tests {
         chain.record_failure();
         chain.record_failure();
         assert_eq!(chain.current().unwrap().model_id, "b");
+    }
+
+    #[test]
+    fn t_advisor_config_with_cancel() {
+        let cancel = CancellationToken::new();
+        let cfg = AdvisorConfig::default().with_cancel(cancel.clone());
+        assert!(cfg.cancel.is_some());
     }
 }

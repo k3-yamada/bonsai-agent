@@ -47,25 +47,25 @@ impl AgentTimeouts {
         }
     }
 
-    /// SSE ストリーミング用（推論レスポンス、long body OK）
+    /// SSE ストリーミング用（H18: ureq timeout 契約再設計）
     ///
-    /// MLX のように初トークンレイテンシが長いバックエンドでは
-    /// recv_response（ヘッダー受信〜最初のチャンク）も寛容にする必要がある。
-    /// recv_response を body と同等に取り、socket-level deadline は global
-    /// と recv_body で確保する。
-    pub fn streaming(recv_body_secs: u64) -> Self {
-        let body = if recv_body_secs == 0 {
-            Duration::from_secs(DEFAULT_RECV_BODY_TIMEOUT_SECS)
+    /// - `recv_response`: HTTP リクエスト送信完了からレスポンスヘッダ（初トークン）受信までのタイムアウト (TTFT)。
+    ///   MLX 等のプリフィル待機時間を考慮し、引数で渡される秒数を設定。
+    /// - `recv_body`: ヘッダ受信後、ストリーム全体の完了までのタイムアウト。
+    ///   ストリーミング中のトークン生成が途中で不意に切断されないよう、十分な上限（最低 600s または TTFT の 4 倍）を確保。
+    /// - `global`: コネクション確立から完了までの大域デッドライン。
+    pub fn streaming(initial_chunk_secs: u64) -> Self {
+        let ttft = if initial_chunk_secs == 0 {
+            Duration::from_secs(DEFAULT_RECV_RESPONSE_TIMEOUT_SECS)
         } else {
-            Duration::from_secs(recv_body_secs)
+            Duration::from_secs(initial_chunk_secs)
         };
+        let stream_total = Duration::from_secs(600).max(ttft * 4);
         Self {
-            // body 受信完了 + 接続/ヘッダー/処理オーバーヘッドを 120s 見込む
-            global: body + Duration::from_secs(120),
+            global: stream_total + Duration::from_secs(120),
             connect: Duration::from_secs(10),
-            // 初トークンレイテンシ吸収のため body と同等に取る
-            recv_response: body,
-            recv_body: body,
+            recv_response: ttft,
+            recv_body: stream_total,
         }
     }
 }
@@ -117,16 +117,21 @@ mod tests {
     }
 
     #[test]
-    fn t_streaming_overrides_recv_body() {
+    fn t_streaming_configures_ttft_and_generous_body() {
         let t = AgentTimeouts::streaming(120);
-        assert_eq!(t.recv_body, Duration::from_secs(120));
+        assert_eq!(t.recv_response, Duration::from_secs(120));
+        assert_eq!(t.recv_body, Duration::from_secs(600));
         assert!(t.global > t.recv_body);
     }
 
     #[test]
-    fn t_streaming_zero_uses_default_body() {
+    fn t_streaming_zero_uses_default_ttft() {
         let t = AgentTimeouts::streaming(0);
-        assert_eq!(t.recv_body, Duration::from_secs(180));
+        assert_eq!(
+            t.recv_response,
+            Duration::from_secs(DEFAULT_RECV_RESPONSE_TIMEOUT_SECS)
+        );
+        assert_eq!(t.recv_body, Duration::from_secs(600));
     }
 
     #[test]

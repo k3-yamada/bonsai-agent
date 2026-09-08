@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bonsai_agent::agent::agent_loop::{run_repl, AgentConfig, ReplIo};
+use bonsai_agent::agent::agent_loop::{AgentConfig, ReplIo, run_repl};
 use bonsai_agent::agent::dmn::generator::DmnGenerator;
 use bonsai_agent::agent::dmn::worker::{DmnRunner, DmnWorker};
 use bonsai_agent::agent::validate::PathGuard;

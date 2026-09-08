@@ -297,7 +297,12 @@ impl LlamaServerBackend {
         tools: &[ToolSchema],
         on_token: &mut dyn FnMut(&str),
         start: Instant,
+        cancel: &CancellationToken,
     ) -> Result<GenerateResult> {
+        if cancel.is_cancelled() {
+            anyhow::bail!("キャンセルされました");
+        }
+
         let url = format!("{}/v1/chat/completions", self.base_url);
         let mut body = self.build_request_body(messages, tools);
         // ストリーミングを無効化してフォールバック
@@ -310,6 +315,9 @@ impl LlamaServerBackend {
             req = req.header("Authorization", format!("Bearer {key}"));
         }
         let response: serde_json::Value = req.send_json(&body)?.body_mut().read_json()?;
+        if cancel.is_cancelled() {
+            anyhow::bail!("キャンセルされました");
+        }
 
         let text = response["choices"][0]["message"]["content"]
             .as_str()
@@ -365,6 +373,10 @@ impl LlmBackend for LlamaServerBackend {
         let response = match req.send_json(&body) {
             Ok(resp) => resp,
             Err(e) => {
+                // C6: キャンセル時は非ストリーミングへのフォールバック（再推論）を遮断
+                if cancel.is_cancelled() {
+                    return Err(e.into());
+                }
                 // ストリーミングリクエスト失敗時は非ストリーミングでフォールバック
                 let backend_label = if self.mlx_compatible {
                     "mlx-lm server"
@@ -375,7 +387,7 @@ impl LlmBackend for LlamaServerBackend {
                     "[{backend_label}] ストリーミングリクエスト失敗 ({}): {e}。非ストリーミングにフォールバック",
                     self.base_url,
                 );
-                return self.generate_non_streaming(messages, tools, on_token, start);
+                return self.generate_non_streaming(messages, tools, on_token, start, cancel);
             }
         };
 
@@ -405,6 +417,10 @@ impl LlmBackend for LlamaServerBackend {
                 })
             }
             Err(e) => {
+                // C6: キャンセル時は非ストリーミングへのフォールバック（再推論）を遮断
+                if cancel.is_cancelled() {
+                    return Err(e);
+                }
                 // SSEパース失敗時は非ストリーミングでフォールバック
                 let backend_label = if self.mlx_compatible {
                     "mlx-lm server"
@@ -412,7 +428,7 @@ impl LlmBackend for LlamaServerBackend {
                     "llama-server"
                 };
                 eprintln!("[{backend_label}] SSEパース失敗、非ストリーミングにフォールバック: {e}");
-                self.generate_non_streaming(messages, tools, on_token, start)
+                self.generate_non_streaming(messages, tools, on_token, start, cancel)
             }
         }
     }
@@ -900,5 +916,42 @@ sse_chunk_timeout_secs = 0
             LlamaServerBackend::connect("http://localhost:8000", "Qwen3-8B-ERP-v0.1-GGUF")
                 .with_api_key("sk-unsloth-secret");
         assert_eq!(backend.api_key.as_deref(), Some("sk-unsloth-secret"));
+    }
+
+    #[test]
+    fn test_llama_server_cancel_aborts_immediately_without_fallback() {
+        // C6: キャンセル時は即座にエラーとなり、非ストリーミングへのフォールバック（再推論）は実行されない
+        let backend = LlamaServerBackend::connect("http://127.0.0.1:19997", "test");
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let messages = vec![Message::user("test")];
+        let tools = vec![];
+        let mut tokens = Vec::new();
+
+        let res = backend.generate(
+            &messages,
+            &tools,
+            &mut |t| tokens.push(t.to_string()),
+            &cancel,
+        );
+        assert!(res.is_err(), "キャンセル時は必ず Err を返すこと");
+        assert!(
+            res.unwrap_err().to_string().contains("キャンセル"),
+            "キャンセル起因のエラーであること"
+        );
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_stream_cancels_mid_stream() {
+        let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
+        let cancel = CancellationToken::new();
+        cancel.cancel(); // 事前キャンセル
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n";
+        let reader = std::io::Cursor::new(sse_data.as_bytes());
+        let res = backend.parse_sse_stream(reader, &mut |_| {}, &cancel);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("キャンセル"));
     }
 }

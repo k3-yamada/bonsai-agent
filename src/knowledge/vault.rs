@@ -28,6 +28,11 @@ impl Vault {
         })
     }
 
+    /// エントリ本文の正規化ハッシュを算出 (H25: 空白・改行のブレを吸収した厳密な重複判定)
+    pub fn normalized_content_hash(text: &str) -> u64 {
+        normalized_content_hash(text)
+    }
+
     /// ストックエントリをmdファイルに追記
     pub fn append(&self, entry: &StockEntry) -> Result<()> {
         let path = self.root.join(format!("{}.md", entry.category.as_str()));
@@ -38,8 +43,11 @@ impl Vault {
         }
         let entry_truncated: String = entry_clean.chars().take(200).collect();
 
+        let target_hash = normalized_content_hash(&entry_clean);
+        let target_trunc_hash = normalized_content_hash(&entry_truncated);
+
         let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-        // 重複チェック（同じ内容が既にあればスキップ）: 各行の本文と完全一致するか検証
+        // H25: 重複チェック（正規化ハッシュによる厳密な重複排除）
         for existing_line in content.lines() {
             let trimmed = existing_line.trim();
             let existing_body = if let Some(rest) = trimmed.strip_prefix("- ") {
@@ -51,7 +59,8 @@ impl Vault {
             } else {
                 trimmed
             };
-            if existing_body == entry_truncated || existing_body == entry_clean {
+            let existing_hash = normalized_content_hash(existing_body);
+            if existing_hash == target_hash || existing_hash == target_trunc_hash {
                 return Ok(());
             }
         }
@@ -209,6 +218,16 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// エントリ本文の正規化ハッシュを算出 (H25: 空白・改行のブレを吸収した厳密な重複判定)
+pub fn normalized_content_hash(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut hasher = DefaultHasher::new();
+    normalized.hash(&mut hasher);
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +295,26 @@ mod tests {
         v.append(&e1).unwrap();
         let c_after = v.read_category(&StockCategory::Insight).unwrap();
         assert_eq!(c_after.matches("SendとSyncトレイト").count(), 1);
+        std::fs::remove_dir_all(v.root()).ok();
+    }
+    #[test]
+    fn t_dedup_normalizes_whitespace() {
+        let v = tmp_vault();
+        let e1 = StockEntry {
+            category: StockCategory::Fact,
+            content: "Rustの  所有権モデルは\n安全です".into(),
+            source: "s1".into(),
+        };
+        let e2 = StockEntry {
+            category: StockCategory::Fact,
+            content: "Rustの 所有権モデルは 安全です".into(),
+            source: "s2".into(),
+        };
+        v.append(&e1).unwrap();
+        v.append(&e2).unwrap();
+        let c = v.read_category(&StockCategory::Fact).unwrap();
+        // 空白・改行の差異が正規化され、重複として1件のみ登録される
+        assert_eq!(c.matches("所有権モデル").count(), 1);
         std::fs::remove_dir_all(v.root()).ok();
     }
     #[test]
