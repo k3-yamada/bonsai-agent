@@ -365,8 +365,8 @@ mod tests {
             sensor.run(tx, cancel_clone);
         });
 
-        // 初回イベント受信
-        let ev = rx.recv_timeout(Duration::from_millis(600)).unwrap();
+        // 初回イベント受信 (スレッド起動・500msスリープ後のため余裕を持って待機)
+        let ev = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(
             ev,
             SensorEvent::WindowChanged {
@@ -377,7 +377,7 @@ mod tests {
 
         // プロバイダを変更してアプリ切り替え
         provider.set("Firefox", "Rust Docs");
-        let ev2 = rx.recv_timeout(Duration::from_millis(600)).unwrap();
+        let ev2 = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(
             ev2,
             SensorEvent::WindowChanged {
