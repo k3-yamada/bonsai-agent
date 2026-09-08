@@ -80,9 +80,9 @@ pub fn short_agent() -> Agent {
     build_agent(AgentTimeouts::short())
 }
 
-/// streaming 用 agent（指定秒数の recv_body deadline、0 はデフォルト 180s）
-pub fn streaming_agent(recv_body_secs: u64) -> Agent {
-    build_agent(AgentTimeouts::streaming(recv_body_secs))
+/// streaming 用 agent（指定秒数の初期チャンク待機時間 TTFT、0 はデフォルト 30s。ストリーム全体は十分な上限を確保）
+pub fn streaming_agent(initial_chunk_secs: u64) -> Agent {
+    build_agent(AgentTimeouts::streaming(initial_chunk_secs))
 }
 
 pub fn build_agent(t: AgentTimeouts) -> Agent {

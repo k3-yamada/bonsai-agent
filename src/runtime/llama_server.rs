@@ -947,11 +947,43 @@ sse_chunk_timeout_secs = 0
     fn test_parse_sse_stream_cancels_mid_stream() {
         let backend = LlamaServerBackend::connect("http://localhost:8080", "test");
         let cancel = CancellationToken::new();
-        cancel.cancel(); // 事前キャンセル
-        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n";
+        let cancel_for_token = cancel.clone();
+        let sse_data = "data: {\"choices\":[{\"delta\":{\"content\":\"chunk1\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"chunk2\"}}]}\n\n";
         let reader = std::io::Cursor::new(sse_data.as_bytes());
-        let res = backend.parse_sse_stream(reader, &mut |_| {}, &cancel);
+        let mut received = Vec::new();
+        let res = backend.parse_sse_stream(
+            reader,
+            &mut |token| {
+                received.push(token.to_string());
+                cancel_for_token.cancel(); // 最初のトークン受信時に即キャンセル
+            },
+            &cancel,
+        );
+        assert!(res.is_err(), "途中でキャンセルされたら必ず Err を返すこと");
+        assert!(
+            res.unwrap_err().to_string().contains("キャンセル"),
+            "キャンセル起因のエラーであること"
+        );
+        assert_eq!(received, vec!["chunk1"], "キャンセル前のトークンのみ受信");
+    }
+
+    #[test]
+    fn test_llama_server_cancel_on_send_error_aborts_without_fallback() {
+        // C6: ストリーミングリクエスト失敗時に cancel が立っている場合、
+        // generate_non_streaming へのフォールバック（再推論）を遮断して即座に Err を返す
+        let backend = LlamaServerBackend::connect("http://127.0.0.1:19997", "test");
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cancel_clone.cancel();
+        });
+
+        let res = backend.generate(&[Message::user("test")], &[], &mut |_| {}, &cancel);
+        let _ = handle.join();
+
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("キャンセル"));
+        assert!(cancel.is_cancelled());
     }
 }

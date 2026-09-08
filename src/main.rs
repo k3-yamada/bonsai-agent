@@ -181,7 +181,7 @@ fn main() -> Result<()> {
             max_tools_in_context: app_config.agent.max_tools_in_context,
             max_mcp_tools_in_context: app_config.agent.max_mcp_tools_in_context,
             base_inference: app_config.model.inference.clone(),
-            advisor: app_config.advisor.to_runtime(),
+            advisor: app_config.advisor.to_runtime().with_cancel(cancel.clone()),
             task_timeout: (app_config.experiment.task_timeout_secs > 0)
                 .then(|| std::time::Duration::from_secs(app_config.experiment.task_timeout_secs)),
             soul_path: app_config.agent.soul_path.clone(),

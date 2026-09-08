@@ -864,6 +864,16 @@ max_uses = 5
     }
 
     #[test]
+    fn test_advisor_to_runtime_with_cancel() {
+        let settings = AdvisorSettings::default();
+        let cancel = crate::cancel::CancellationToken::new();
+        let runtime = settings.to_runtime().with_cancel(cancel.clone());
+        assert!(runtime.cancel.is_some());
+        cancel.cancel();
+        assert!(runtime.cancel.as_ref().unwrap().is_cancelled());
+    }
+
+    #[test]
     fn test_model_config_ternary() {
         let toml_str = r#"
 [model]
