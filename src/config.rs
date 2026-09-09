@@ -406,6 +406,29 @@ impl InferenceParams {
         self.temperature = parsed;
         Some(prev)
     }
+
+    /// Lab 用 repeat_penalty override (`BONSAI_LAB_REPEAT_PENALTY` env 経由).
+    ///
+    /// Issue #12 Phase -1: 推論パラメータ (temp/repeat_penalty) の paired 検証を
+    /// production code (config.toml の `[model.inference] repeat_penalty`) に影響させず
+    /// Lab 起動時のみ強制 override するため、`apply_lab_temp_override` と同一パターンで
+    /// 追加する。env unset 時は no-op で完全後方互換。
+    ///
+    /// 戻り値:
+    /// - `Some(prev_repeat_penalty)`: override 適用、prev は元の値
+    /// - `None`: env unset / parse 失敗 / 範囲外 (`[0.0, 2.0]` 外)
+    ///
+    /// 範囲 `[0.0, 2.0]` は `apply_lab_temp_override` と同様、llama-server の標準受け付け範囲。
+    pub fn apply_lab_repeat_penalty_override(&mut self) -> Option<f64> {
+        let val = std::env::var("BONSAI_LAB_REPEAT_PENALTY").ok()?;
+        let parsed: f64 = val.parse().ok()?;
+        if !(0.0..=2.0).contains(&parsed) {
+            return None;
+        }
+        let prev = self.repeat_penalty;
+        self.repeat_penalty = parsed;
+        Some(prev)
+    }
 }
 
 // ─── Lab Runtime Stabilization (項目 249、plan lab-runtime-stabilization.md §3) ───
@@ -574,6 +597,13 @@ pub(crate) static LAB_RUNTIME_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::M
 /// が同 env を弄る際にも参照可能。test build のみコンパイル (release では dead_code)。
 #[cfg(test)]
 pub(crate) static LAB_TEMP_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `BONSAI_LAB_REPEAT_PENALTY` env を弄る test 間の競合回避 (Issue #12 Phase -1、
+/// `LAB_TEMP_ENV_TEST_LOCK` 同 pattern)。`apply_lab_repeat_penalty_override` test だけで
+/// なく、将来 Lab 起動側 test が同 env を弄る際にも参照可能。
+#[cfg(test)]
+pub(crate) static LAB_REPEAT_PENALTY_ENV_TEST_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -829,6 +859,9 @@ pub struct MlxOnlySwitch {
 pub struct LabOverrideReport {
     /// `BONSAI_LAB_TEMP` override 適用時の (prev, new) temperature。
     pub temp_override: Option<(f64, f64)>,
+    /// `BONSAI_LAB_REPEAT_PENALTY` override 適用時の (prev, new) repeat_penalty
+    /// (Issue #12 Phase -1)。
+    pub repeat_penalty_override: Option<(f64, f64)>,
     /// `BONSAI_LAB_LONG_SSE=1` 適用時の prev `sse_chunk_timeout_secs`。
     pub long_sse_applied: Option<u64>,
     /// `BONSAI_LAB_MLX_ONLY=1` 適用時の切替内容。
@@ -845,6 +878,8 @@ pub struct LabOverrideReport {
 /// - 項目 247 Phase C: `BONSAI_LAB_TEMP` env で temperature override.
 ///   `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
 ///   env unset 時は no-op、completely backward compatible。
+/// - Issue #12 Phase -1: `BONSAI_LAB_REPEAT_PENALTY` env で repeat_penalty override
+///   (推論パラメータ paired 検証用、`BONSAI_LAB_TEMP` と同一パターン)。env unset 時は no-op。
 /// - 項目 249 Phase 2 Green: Lab Runtime Stabilization (CCG synthesis 経由)
 ///   F1: `BONSAI_LAB_LONG_SSE=1` → SSE chunk timeout 60 → 180 で MLX 初トークン遅延 catch
 /// - F2: `BONSAI_LAB_MLX_ONLY=1` → fallback_chain 無効化 + primary backend を MLX に切替
@@ -861,6 +896,14 @@ pub fn apply_lab_overrides(app_config: &mut AppConfig) -> Result<LabOverrideRepo
 
     if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
         report.temp_override = Some((prev, app_config.model.inference.temperature));
+    }
+
+    if let Some(prev) = app_config
+        .model
+        .inference
+        .apply_lab_repeat_penalty_override()
+    {
+        report.repeat_penalty_override = Some((prev, app_config.model.inference.repeat_penalty));
     }
 
     if is_lab_long_sse_timeout() {
@@ -2020,6 +2063,90 @@ max_iterations = 20
         assert_eq!(p.temperature, original);
     }
 
+    // ─── BONSAI_LAB_REPEAT_PENALTY env override tests (Issue #12 Phase -1、
+    // BONSAI_LAB_TEMP と同一パターン) ────────────────────────────────────────────
+    //
+    // `LAB_REPEAT_PENALTY_ENV_TEST_LOCK` で cross-file serialize、各 test 末尾で env を
+    // 必ず unset して隣接 test に副作用を残さない。
+
+    #[test]
+    fn t_apply_lab_repeat_penalty_override_unset_returns_none() {
+        let _g = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::unset("BONSAI_LAB_REPEAT_PENALTY");
+        let mut p = InferenceParams::default();
+        let original = p.repeat_penalty;
+        let r = p.apply_lab_repeat_penalty_override();
+        assert!(r.is_none(), "env unset で None 戻り");
+        assert_eq!(
+            p.repeat_penalty, original,
+            "env unset では repeat_penalty 不変"
+        );
+    }
+
+    #[test]
+    fn t_apply_lab_repeat_penalty_override_valid_value() {
+        let _g = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::set("BONSAI_LAB_REPEAT_PENALTY", "1.1");
+        let default_rp = model_profile::default_profile().inference.repeat_penalty;
+        let mut p = InferenceParams::default();
+        let r = p.apply_lab_repeat_penalty_override();
+        assert_eq!(
+            r,
+            Some(default_rp),
+            "default repeat_penalty が prev として返る"
+        );
+        assert!(
+            (p.repeat_penalty - 1.1).abs() < f64::EPSILON,
+            "env=\"1.1\" で repeat_penalty=1.1 に override"
+        );
+    }
+
+    #[test]
+    fn t_apply_lab_repeat_penalty_override_invalid_parse() {
+        let _g = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::set("BONSAI_LAB_REPEAT_PENALTY", "not_a_number");
+        let mut p = InferenceParams::default();
+        let original = p.repeat_penalty;
+        let r = p.apply_lab_repeat_penalty_override();
+        assert!(r.is_none(), "parse 失敗で None");
+        assert_eq!(
+            p.repeat_penalty, original,
+            "parse 失敗時は repeat_penalty 不変"
+        );
+    }
+
+    #[test]
+    fn t_apply_lab_repeat_penalty_override_out_of_range_negative() {
+        let _g = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::set("BONSAI_LAB_REPEAT_PENALTY", "-1");
+        let mut p = InferenceParams::default();
+        let original = p.repeat_penalty;
+        let r = p.apply_lab_repeat_penalty_override();
+        assert!(r.is_none(), "範囲外負値で None");
+        assert_eq!(p.repeat_penalty, original);
+    }
+
+    #[test]
+    fn t_apply_lab_repeat_penalty_override_out_of_range_high() {
+        let _g = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = EnvGuard::set("BONSAI_LAB_REPEAT_PENALTY", "3.5");
+        let mut p = InferenceParams::default();
+        let original = p.repeat_penalty;
+        let r = p.apply_lab_repeat_penalty_override();
+        assert!(r.is_none(), "範囲外 (>2.0) で None");
+        assert_eq!(p.repeat_penalty, original);
+    }
+
     // ─── Lab Runtime Stabilization (項目 249) env getter tests ─────────────────────
     //
     // `LAB_RUNTIME_ENV_TEST_LOCK` で cross-file serialize、3 env var (BONSAI_LAB_LONG_SSE /
@@ -2070,12 +2197,18 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        // apply_lab_overrides は BONSAI_LAB_TEMP も読むため LAB_TEMP_ENV_TEST_LOCK も
-        // 併せて保持する (直接系 t_apply_lab_temp_override_* との race 防止)。
+        // apply_lab_overrides は BONSAI_LAB_TEMP / BONSAI_LAB_REPEAT_PENALTY も読むため
+        // LAB_TEMP_ENV_TEST_LOCK / LAB_REPEAT_PENALTY_ENV_TEST_LOCK も併せて保持する
+        // (直接系 t_apply_lab_temp_override_* / t_apply_lab_repeat_penalty_override_* との
+        // race 防止)。
         let _t = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        let _rp = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_rp = EnvGuard::unset("BONSAI_LAB_REPEAT_PENALTY");
         let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
         let _env_mlx = EnvGuard::unset("BONSAI_LAB_MLX_ONLY");
         let _env_allow = EnvGuard::unset("BONSAI_LAB_MLX_ALLOW_UNKNOWN");
@@ -2090,6 +2223,10 @@ max_iterations = 20
         assert!(
             report.temp_override.is_none(),
             "no-op で temp_override None"
+        );
+        assert!(
+            report.repeat_penalty_override.is_none(),
+            "no-op で repeat_penalty_override None"
         );
         assert!(
             report.long_sse_applied.is_none(),
@@ -2205,6 +2342,34 @@ max_iterations = 20
         assert_eq!(app_config.model.inference.temperature, 0.0);
         let (prev, new) = report.temp_override.expect("report.temp_override が Some");
         assert_eq!(new, 0.0);
+        assert_ne!(prev, new, "prev は override 前の値");
+    }
+
+    #[test]
+    fn t_apply_lab_overrides_repeat_penalty_override() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _rp = LAB_REPEAT_PENALTY_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
+        let _env_mlx = EnvGuard::unset("BONSAI_LAB_MLX_ONLY");
+        let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_rp = EnvGuard::set("BONSAI_LAB_REPEAT_PENALTY", "1.1");
+
+        let mut app_config = AppConfig::default();
+        let report =
+            apply_lab_overrides(&mut app_config).expect("BONSAI_LAB_REPEAT_PENALTY=1.1 は Ok");
+
+        assert!((app_config.model.inference.repeat_penalty - 1.1).abs() < f64::EPSILON);
+        let (prev, new) = report
+            .repeat_penalty_override
+            .expect("report.repeat_penalty_override が Some");
+        assert!((new - 1.1).abs() < f64::EPSILON);
         assert_ne!(prev, new, "prev は override 前の値");
     }
 
