@@ -76,7 +76,7 @@ fn main() -> Result<()> {
     // config.rs `apply_lab_overrides` に集約 (項目 247/249、SIZE-001 800 行制約対応、
     // doc は config.rs 側参照)。eprintln! はここ (main.rs、LOG-001 whitelist 対象) の責務。
     if cli.lab {
-        let report = bonsai_agent::config::apply_lab_overrides(&mut app_config);
+        let report = bonsai_agent::config::apply_lab_overrides(&mut app_config)?;
         if let Some((prev, new)) = report.temp_override {
             eprintln!("[lab] BONSAI_LAB_TEMP override: temperature {prev:.3} -> {new:.3}");
         }

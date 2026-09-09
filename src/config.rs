@@ -840,7 +840,12 @@ pub struct LabOverrideReport {
 ///   (項目 249 Phase 4 Smoke G-RT で fallback クリアのみでは primary llama-server を試行する
 ///   構造的バグを実機で検出、F2 の本来意図「MLX-only」を完全実現するため primary も切替)。
 ///   L-6: doc は `domain::model_profile::mlx_only_model_id` 参照。
-pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
+///
+/// #14-2: `mlx_only_model_id` が MLX ビルドなし profile を検出した場合は `Err` を
+/// `anyhow::Error` に変換して `?` で伝播する (実装は `map_err(anyhow::anyhow!)?`、クロスモデル
+/// 混成の hard error 化)。以前は既定 profile の mlx_repo へ黙って置換していたが、operator の
+/// 意図しないモデル混在を招くため撤廃した。
+pub fn apply_lab_overrides(app_config: &mut AppConfig) -> Result<LabOverrideReport> {
     let mut report = LabOverrideReport::default();
 
     if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
@@ -854,13 +859,18 @@ pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
     }
 
     if is_lab_mlx_only() {
+        // #14-2: 置換先 model_id を先に解決し、Err ならここで bail する。MLX-only ブロック内の
+        // 書き換え (backend / server_url / fallback_chain / model_id) より前に検証し、この
+        // ブロックの部分適用を残さない。temp / SSE override は先に適用済みだが、呼び出し元
+        // (main) は Err で即終了する。
+        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id)
+            .map_err(|msg| anyhow::anyhow!(msg))?;
         let prev_entries = app_config.fallback_chain.entries.len();
         app_config.fallback_chain.entries.clear();
         let prev_backend = format!("{:?}", app_config.model.backend);
         let prev_url = app_config.model.server_url.clone();
         app_config.model.backend = ServerBackend::MlxLm;
         app_config.model.server_url = "http://127.0.0.1:8000".to_string();
-        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id);
         let prev_model_id = std::mem::replace(&mut app_config.model.model_id, new_model_id.clone());
         report.mlx_only_applied = Some(MlxOnlySwitch {
             prev_backend,
@@ -871,7 +881,7 @@ pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
         });
     }
 
-    report
+    Ok(report)
 }
 
 impl Default for ModelConfig {
@@ -1998,6 +2008,25 @@ max_iterations = 20
         assert!(is_lab_mlx_only(), "env=\"1\" で mlx-only ON");
         unsafe { std::env::remove_var("BONSAI_LAB_MLX_ONLY") };
         assert!(!is_lab_mlx_only(), "env unset で mlx-only OFF");
+    }
+
+    // #14-2: `BONSAI_LAB_MLX_ONLY=1` かつ MLX ビルドなし legacy profile (`bonsai-8b`) を
+    // 指定した場合、`apply_lab_overrides` は `Err` を返す (クロスモデル混成の hard error 化)。
+    #[test]
+    fn t_apply_lab_overrides_mlx_only_unsupported_profile_is_error() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_ONLY", "1") };
+        let mut app_config = AppConfig::default();
+        app_config.model.model_id = "bonsai-8b".to_string();
+        let result = apply_lab_overrides(&mut app_config);
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_ONLY") };
+        let err = result.expect_err("MLX ビルドなし profile 指定は Err");
+        assert!(
+            err.to_string().contains("MLX ビルドがありません"),
+            "エラーメッセージに理由が含まれること: {err}"
+        );
     }
 
     #[test]
