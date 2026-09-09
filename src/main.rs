@@ -299,7 +299,9 @@ fn main() -> Result<()> {
 fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(Box::new(
-        ShellTool::new().with_timeout(app_config.agent.shell_timeout_secs),
+        ShellTool::new()
+            .with_timeout(app_config.agent.shell_timeout_secs)
+            .with_path_guard(PathGuard::new(app_config.safety.deny_paths.clone())),
     ));
     tools.register(Box::new(FileReadTool));
     tools.register(Box::new(FileWriteTool));
