@@ -2,13 +2,13 @@
 
 [English](README.en.md) | **日本語**
 
-Bonsai-8B（1ビット量子化Qwen3-8B、1.28GB）で動作するRust製自律型AIエージェント。
+ローカル小型LLM（既定: MiniCPM5-2B、GGUF Q4_K_M 1.56GB）で動作するRust製自律型AIエージェント。
 
 Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自律的にタスクを実行し、経験から学習する。
 
 ## 特徴
 
-- **1.28GBのLLM** — Bonsai-8B（1ビット量子化）でツール呼び出し・コード理解・Web検索が可能
+- **1.56GBのLLM** — MiniCPM5-2B（Q4_K_M量子化）でツール呼び出し・コード理解・Web検索が可能。モデルは3手順で差し替え可能（[docs/execution/model-switching.md](docs/execution/model-switching.md)）
 - **自己進化** — 経験を自動記録、3回成功でスキルに昇格、arxiv論文を自動収集して知識を蓄積
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
@@ -27,25 +27,26 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 
 ## クイックスタート
 
-### 1. Bonsai-demoセットアップ（初回のみ）
+### 1. llama-serverインストール（初回のみ）
 
 ```bash
-cd ~
-git clone https://github.com/PrismML-Eng/Bonsai-demo.git
-cd Bonsai-demo
-sh scripts/download_binaries.sh
-curl -L -o models/gguf/8B/Bonsai-8B.gguf \
-  "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf"
+brew install llama.cpp
 ```
 
-### 2. llama-server起動
+### 2. モデルのダウンロード
 
 ```bash
 cd ~/bonsai-agent
+./scripts/download_model.sh
+```
+
+### 3. llama-server起動
+
+```bash
 ./scripts/start-server.sh
 ```
 
-### 3. bonsai-agent起動
+### 4. bonsai-agent起動
 
 ```bash
 cargo run
@@ -58,9 +59,25 @@ bonsai> Rustについて検索して
 bonsai> exit
 ```
 
+### Bonsai-8B（legacy）を使う場合
+
+旧既定モデルの Bonsai-8B（1ビット量子化Qwen3-8B、1.28GB）は legacy プロファイルとして引き続き使える。
+
+```bash
+cd ~
+git clone https://github.com/PrismML-Eng/Bonsai-demo.git
+cd Bonsai-demo
+sh scripts/download_binaries.sh
+cd ~/bonsai-agent
+BONSAI_MODEL_ID=bonsai-8b ./scripts/download_model.sh
+BONSAI_MODEL_ID=bonsai-8b BONSAI_LLAMA_SERVER_BIN=~/Bonsai-demo/bin/mac/llama-server ./scripts/start-server.sh
+```
+
+モデル切替の詳細は [docs/execution/model-switching.md](docs/execution/model-switching.md) を参照。
+
 ### MLXバックエンド（Apple Silicon向け代替）
 
-Ternary Bonsai 8B の MLX 版を 2 通りで起動可能:
+MLX モデル（既定: MiniCPM5-2B、`openbmb/MiniCPM5-2B-MLX`）を 2 通りで起動可能:
 
 ```bash
 # セットアップ（初回のみ）
@@ -81,9 +98,11 @@ config.toml でバックエンドを切替（port は使用するスクリプト
 [model]
 backend = "mlx-lm"
 server_url = "http://localhost:8888"  # sidecar 使用時。cubist は 8000
-model_id = "ternary-bonsai-8b"
-context_length = 65536
+model_id = "minicpm5-2b"
+context_length = 16384
 ```
+
+legacy の ternary-bonsai-8b（PrismML MLX fork 必要）に切替える場合は `model_id = "ternary-bonsai-8b"` / `context_length = 65536` にする。
 
 ### モックモード（LLMなしで動作確認）
 
@@ -250,7 +269,7 @@ cargo run --no-default-features --features cli,tree-sitter
  ↓
 過去の経験（成功/失敗）→ プロンプトに注入
  ↓
-LLM推論（Bonsai-8B via llama-server / mlx-lm）
+LLM推論（MiniCPM5-2B via llama-server / mlx-lm）
  ↓
 パース → バリデーション → ツール実行
  ↓                              ↓
@@ -278,17 +297,17 @@ LLM推論（Bonsai-8B via llama-server / mlx-lm）
 ```toml
 [model]
 server_url = "http://localhost:8080"
-model_id = "bonsai-8b"
-context_length = 16384
+model_id = "minicpm5-2b"
+context_length = 16384  # M2 16GB向け保守的既定。32k以上は BONSAI_MODEL_CTX 等で opt-in
 # backend = "mlx-lm"  # MLXバックエンドを使う場合
 
 [model.inference]
-temperature = 0.5
-top_p = 0.85
+temperature = 0.6
+top_p = 0.95
 top_k = 20
 min_p = 0.05
-max_tokens = 1024
-repeat_penalty = 1.15
+max_tokens = 2048
+repeat_penalty = 1.05
 
 [agent]
 max_iterations = 10
@@ -332,6 +351,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 # args = []
 # url = "http://localhost:3000/mcp"
 ```
+
+他モデルへの切替例（minicpm5-1b / ternary-bonsai-8b / bonsai-8b）は [config.toml.example](config.toml.example) と [docs/execution/model-switching.md](docs/execution/model-switching.md) を参照。
 
 ## ナレッジVault
 
@@ -418,14 +439,15 @@ cargo clippy --lib -- -D warnings  # リント
 cargo fmt -- --check           # フォーマット
 ```
 
-開発フローの詳細（Lab 起動、env 一覧、smoke 手順）は [docs/execution/runbook.md](docs/execution/runbook.md)、設計判断は [docs/decisions/](docs/decisions/)（ADR-001〜011）、設計思想は [docs/VALUES.md](docs/VALUES.md) を参照。
+開発フローの詳細（Lab 起動、env 一覧、smoke 手順）は [docs/execution/runbook.md](docs/execution/runbook.md)、設計判断は [docs/decisions/](docs/decisions/)（ADR-001〜013）、設計思想は [docs/VALUES.md](docs/VALUES.md) を参照。
 
 ## 必要環境
 
 - macOS (Apple Silicon) or Linux
 - Rust 1.80+ (edition 2024)
-- llama-server（[PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo)から取得）
+- llama-server（`brew install llama.cpp`。legacy の Bonsai-8B を使う場合のみ [PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) 同梱バイナリが必要）
 - または mlx-lm + mlx-openai-server（`./scripts/setup_mlx_ternary.sh` でセットアップ）
+- RAM目安: MiniCPM5-2B Q4_K_M 重み 1.56GB + KV cache（q8_0、既定 context_length=16384）≈0.35GB
 
 ## ライセンス
 

@@ -7,4 +7,5 @@ pub mod conversation;
 pub mod embedder;
 pub mod event;
 pub mod llm;
+pub mod model_profile;
 pub mod tool_schema;

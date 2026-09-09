@@ -7,7 +7,7 @@ This document provides system instructions, architectural boundaries, and operat
 ## 1. Project Overview & Identity
 
 - **Name**: `bonsai-agent`
-- **Core Engine**: Bonsai-8B (1-bit quantized Qwen3-8B, 1.28GB memory footprint).
+- **Core Engine**: a small local LLM, default MiniCPM5-2B (GGUF Q4_K_M, 1.56GB memory footprint). Legacy: Bonsai-8B (1-bit quantized Qwen3-8B, 1.28GB). See [docs/execution/model-switching.md](docs/execution/model-switching.md).
 - **Runtime Environment**: Mac M2 (16GB), inference executed via local HTTP API (`llama-server`, `MLX sidecar`, or `Unsloth Desktop`).
 - **Scale & Architecture**: 1,480+ unit tests, 100+ Rust source files, Rust 2024 edition.
 - **Concurrency & Concurrency Primitives**: **Strict synchronous architecture**. Uses `ureq`, `reqwest::blocking`, `std::thread`, `std::sync::mpsc`, and `CancellationToken`. Non-blocking / async runtimes (such as `tokio`) are prohibited in the core loop.

@@ -7,8 +7,8 @@
 #   + /v1/models を提供しつつ、env で MLX メモリ最適化 (set_cache_limit / KV量子化 /
 #   max_kv_size) を解禁する。既定値は全 OFF = cubist 等価。
 #
-# 前提: scripts/setup_mlx_ternary.sh 実行済 (venv + mlx-lm + PrismML fork)。fastapi/uvicorn は
-#   mlx-openai-server の依存で同 venv に既に存在。
+# 前提: scripts/setup_mlx_ternary.sh 実行済 (venv + mlx-lm。legacy ternary-bonsai-8b を使う場合のみ
+#   PrismML fork も同 venv に入る)。fastapi/uvicorn は mlx-openai-server の依存で同 venv に既に存在。
 #
 # メモリ最適化 env (任意、段階導入):
 #   BONSAI_MLX_CACHE_LIMIT_GB=10   # MLX バッファ上限 (swap 阻止)
@@ -24,12 +24,21 @@
 # 停止: Ctrl+C
 set -e
 
+SCRIPT_DIR="$(dirname "$0")"
+# shellcheck source=./model.env
+. "$SCRIPT_DIR/model.env"
+
 VENV_DIR="${HOME}/.venvs/bonsai-mlx"
 PY="${VENV_DIR}/bin/python"
-SERVER="$(dirname "$0")/mlx_server/server.py"
+SERVER="$SCRIPT_DIR/mlx_server/server.py"
 
-export BONSAI_MLX_MODEL="${BONSAI_MLX_MODEL:-prism-ml/Ternary-Bonsai-8B-mlx-2bit}"
+export BONSAI_MLX_MODEL="${BONSAI_MLX_MODEL:-$BONSAI_MODEL_MLX_REPO}"
 export BONSAI_MLX_PORT="${BONSAI_MLX_PORT:-8888}"
+
+if [ -z "$BONSAI_MLX_MODEL" ]; then
+    echo "エラー: BONSAI_MODEL_ID=$BONSAI_MODEL_ID には MLX ビルドがありません。BONSAI_MODEL_MLX_REPO または BONSAI_MLX_MODEL を指定してください" >&2
+    exit 1
+fi
 
 if [ ! -x "$PY" ]; then
     echo "エラー: venv python が見つかりません: $PY"

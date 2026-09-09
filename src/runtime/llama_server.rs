@@ -581,6 +581,7 @@ fn format_tool_schemas(tools: &[ToolSchema]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::model_profile;
 
     #[test]
     fn test_connect() {
@@ -839,8 +840,11 @@ sse_chunk_timeout_secs = 0
         assert_eq!(b.model_id(), "ternary-bonsai-8b");
         assert!((b.inference.temperature - 0.3).abs() < f64::EPSILON);
         assert_eq!(b.inference.top_k, 10);
-        // 未指定はデフォルト
-        assert_eq!(b.inference.max_tokens, 1024);
+        // 未指定はデフォルト (= model_profile::default_profile() 由来。値の直書き禁止)
+        assert_eq!(
+            b.inference.max_tokens,
+            model_profile::default_profile().inference.max_tokens
+        );
     }
 
     #[test]

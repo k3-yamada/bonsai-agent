@@ -7,7 +7,7 @@
 ## 1. プロジェクト概要
 
 - **名称**: `bonsai-agent`
-- **中核技術**: Bonsai-8B（1-bit 量子化 Qwen3-8B、1.28GB）で動作する Rust 製自律型エージェント。
+- **中核技術**: ローカル小型LLM（既定 MiniCPM5-2B、GGUF Q4_K_M 1.56GB。旧既定 Bonsai-8B 1-bit）で動作する Rust 製自律型エージェント。
 - **実行環境**: Mac M2 16GB、llama-server / MLX HTTP API 経由で推論。
 - **テスト規模**: 1,480+ unit tests、100+ ソースファイル、Rust 2024 edition。
 - **アーキテクチャ特性**: 非同期ランタイム (tokio) ではなく、**完全同期アーキテクチャ** (`ureq`, `reqwest::blocking`, `CancellationToken`) を採用。
@@ -17,7 +17,7 @@
 ## 2. 最重要設計原則
 
 ### ① 「Scaffolding > Model」原則
-1-bit 量子化モデル（Bonsai-8B）の推論能力には物理的限界があります。モデルの能力に依存するのではなく、**ハーネス（Scaffolding）、ガードレール、自己反省ループ、文脈圧縮、リトライ・検証機構** によってシステム全体の信頼性を底上げします。
+小型ローカルモデル（旧 1-bit 量子化 Bonsai-8B、現 MiniCPM5-2B）の推論能力には物理的限界があります。モデルの能力に依存するのではなく、**ハーネス（Scaffolding）、ガードレール、自己反省ループ、文脈圧縮、リトライ・検証機構** によってシステム全体の信頼性を底上げします。
 
 ### ② VALUES.md（思想の錨）
 設計や判断に迷ったときは、必ず [`docs/VALUES.md`](docs/VALUES.md) に立ち返ってください。

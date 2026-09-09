@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::domain::model_profile::{self, InferenceDefaults, ModelProfile};
+
 /// bonsai-agent設定ファイル
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -306,26 +308,66 @@ pub struct InferenceParams {
     pub repeat_penalty: f64,
 }
 
-impl Default for InferenceParams {
-    fn default() -> Self {
+impl From<InferenceDefaults> for InferenceParams {
+    fn from(d: InferenceDefaults) -> Self {
         Self {
-            temperature: 0.5,
-            top_p: 0.85,
-            top_k: 20,
-            min_p: 0.05,
-            max_tokens: 1024,
-            repeat_penalty: 1.15,
+            temperature: d.temperature,
+            top_p: d.top_p,
+            top_k: d.top_k,
+            min_p: d.min_p,
+            max_tokens: d.max_tokens,
+            repeat_penalty: d.repeat_penalty,
         }
     }
 }
 
+impl Default for InferenceParams {
+    /// `model_profile::default_profile()` (= MiniCPM5-2B) の推奨初期値から導出。
+    fn default() -> Self {
+        model_profile::default_profile().inference.into()
+    }
+}
+
 impl InferenceParams {
+    /// `InferenceDefaults` から明示的に生成するコンストラクタ（`From` の別名）。
+    pub fn from_defaults(d: InferenceDefaults) -> Self {
+        d.into()
+    }
+
+    /// `explicit` でキー単位に明示指定されていないフィールドだけを `defaults` (profile 値)
+    /// で上書きする (M-1)。明示指定されているキーは現在値を維持する。冪等 — 同じ
+    /// `defaults`/`explicit` で複数回呼んでも結果は変わらない。
+    pub fn apply_profile_defaults(
+        &mut self,
+        defaults: InferenceDefaults,
+        explicit: InferenceExplicitKeys,
+    ) {
+        if !explicit.temperature {
+            self.temperature = defaults.temperature;
+        }
+        if !explicit.top_p {
+            self.top_p = defaults.top_p;
+        }
+        if !explicit.top_k {
+            self.top_k = defaults.top_k;
+        }
+        if !explicit.min_p {
+            self.min_p = defaults.min_p;
+        }
+        if !explicit.max_tokens {
+            self.max_tokens = defaults.max_tokens;
+        }
+        if !explicit.repeat_penalty {
+            self.repeat_penalty = defaults.repeat_penalty;
+        }
+    }
+
     /// llama-server向けデフォルト（Default::defaultと同一、明示的エイリアス）
     pub fn llama_server_default() -> Self {
         Self::default()
     }
 
-    /// MLX最適化プリセット（Ternary Bonsai向け）
+    /// MLX最適化プリセット（legacy Ternary Bonsai 向け preset、`ternary-bonsai-8b` profile と同値）
     /// - temperature: 0.3（低めでツール呼び出し精度向上）
     /// - top_p: 0.9（やや広めで多様性確保）
     /// - repeat_penalty: 1.1（緩めで自然な応答）
@@ -541,7 +583,8 @@ pub struct ModelConfig {
     /// 推論バックエンド（llama-server / mlx-lm / bitnet / unsloth）
     pub backend: ServerBackend,
     pub server_url: String,
-    /// モデルID（例: "bonsai-8b", "ternary-bonsai-8b", "ternary-bonsai-4b"）
+    /// モデルID（例: "minicpm5-2b"（既定）, "bonsai-8b"（legacy）, "ternary-bonsai-8b"（legacy）。
+    /// `domain::model_profile` に登録済みプロファイルの一覧がある）
     pub model_id: String,
     pub context_length: u32,
     pub kv_cache_type: String,
@@ -556,6 +599,69 @@ pub struct ModelConfig {
     /// API認証キー（Unsloth Desktop / 外部API用。None時は環境変数から自動検出）
     #[serde(default)]
     pub api_key: Option<String>,
+    /// TOML で `context_length` / `[model.inference].<key>` が明示指定されていたかどうか
+    /// (HIGH-1、M-1 でキー単位に細分化)。`Serialize`/`Deserialize` の対象外 —
+    /// `AppConfig::load()` が生の `toml::Value` から `ModelExplicitKeys::from_toml` で
+    /// 別途算出し設定する。`apply_profile_defaults` がユーザー明示値を profile 既定値で
+    /// 上書きしないために使う。
+    #[serde(skip)]
+    pub explicit: ModelExplicitKeys,
+}
+
+/// `ModelConfig` の各フィールドが TOML で明示指定されていたかどうかのフラグ (HIGH-1)。
+///
+/// `#[serde(default)]` によるフィールド単位の穴埋めと、profile 由来の既定値適用
+/// (`apply_profile_defaults`) を区別するために必要。例えば
+/// `[model]\nmodel_id = "bonsai-8b"` のみの TOML では `context_length` はキー自体が
+/// 存在しないため `false` になり、profile (bonsai-8b) の `default_context` で
+/// 上書きしてよいと判断できる。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelExplicitKeys {
+    pub context_length: bool,
+    /// `[model.inference]` の各キー単位の明示指定フラグ (M-1)。
+    ///
+    /// 旧実装は `inference: bool` (テーブル全体の有無のみ) だったため、
+    /// `[model.inference]\ntemperature = 0.9` のように一部キーだけを明示指定した
+    /// 場合に、明示していない他のキー (`top_p` 等) が serde のフィールド単位デフォルト
+    /// (= `InferenceParams::default()` = 既定 profile 値) で埋まってしまい、
+    /// 実際の `model_id` の profile 値とズレる不具合があった (round 2 M-1)。
+    pub inference: InferenceExplicitKeys,
+}
+
+/// `[model.inference]` の各キーが TOML で明示指定されていたかどうかのフラグ (M-1)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InferenceExplicitKeys {
+    pub temperature: bool,
+    pub top_p: bool,
+    pub top_k: bool,
+    pub min_p: bool,
+    pub max_tokens: bool,
+    pub repeat_penalty: bool,
+}
+
+impl ModelExplicitKeys {
+    /// 生の TOML (`toml::Value`) から `[model]` セクションの `context_length` キー、
+    /// および `[model.inference]` セクションの各キーの有無を判定する純粋関数。
+    /// 値の中身は問わずキー存在のみ見る。`[model]` / `[model.inference]` セクション
+    /// 自体が無ければ該当フラグは全て `false`。
+    pub fn from_toml(value: &toml::Value) -> Self {
+        let model_table = value.get("model").and_then(toml::Value::as_table);
+        let inference_table = model_table
+            .and_then(|t| t.get("inference"))
+            .and_then(toml::Value::as_table);
+        let has_key = |k: &str| inference_table.is_some_and(|t| t.contains_key(k));
+        Self {
+            context_length: model_table.is_some_and(|t| t.contains_key("context_length")),
+            inference: InferenceExplicitKeys {
+                temperature: has_key("temperature"),
+                top_p: has_key("top_p"),
+                top_k: has_key("top_k"),
+                min_p: has_key("min_p"),
+                max_tokens: has_key("max_tokens"),
+                repeat_penalty: has_key("repeat_penalty"),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,21 +717,166 @@ fn default_sse_timeout() -> u64 {
     60
 }
 
+impl ModelConfig {
+    /// `ModelProfile` から `ModelConfig` を生成する（model 切替の single source of truth）。
+    /// `api_key` は profile の関心事ではないため `None`（`Default::default()` 側で env から補完）。
+    pub fn from_profile(p: &ModelProfile) -> Self {
+        Self {
+            backend: ServerBackend::default(),
+            server_url: "http://localhost:8080".to_string(),
+            model_id: p.id.to_string(),
+            context_length: p.default_context,
+            kv_cache_type: "q8_0".to_string(),
+            gguf_path: None,
+            sse_chunk_timeout_secs: default_sse_timeout(),
+            inference: InferenceParams::from_defaults(p.inference),
+            api_key: None,
+            explicit: ModelExplicitKeys::default(),
+        }
+    }
+
+    /// `model_id` (ロード後・`--model`/env 等での上書き解決後) に一致する `ModelProfile` を
+    /// 見つけ、TOML で明示指定されていない `context_length` / `inference` を
+    /// profile の推奨値で上書きする (HIGH-1)。
+    ///
+    /// 呼び出し順序: `model_id` を確定した直後 (Lab 系 override より前) に 1 回呼ぶこと。
+    /// 戻り値: ヒットした profile。`None` なら未知モデルで何も変更しない。
+    pub fn apply_profile_defaults(&mut self) -> Option<&'static ModelProfile> {
+        let profile = model_profile::find_profile(&self.model_id)?;
+        if !self.explicit.context_length {
+            self.context_length = profile.default_context;
+        }
+        self.inference
+            .apply_profile_defaults(profile.inference, self.explicit.inference);
+        Some(profile)
+    }
+
+    /// `context_length` が `profile.native_context` を超過している場合の警告文言。
+    /// 超過していなければ `None`。
+    /// (呼び出し側 (main.rs / cli_diagnose.rs) が operator visibility のため出力する。
+    /// `src/config.rs` は LOG-001 whitelist 外のため、ここでは stderr 出力を行わない。)
+    pub fn native_context_warning(&self, profile: &ModelProfile) -> Option<String> {
+        (self.context_length > profile.native_context).then(|| {
+            format!(
+                "context_length {} が {} の native context {} を超過",
+                self.context_length, profile.display_name, profile.native_context
+            )
+        })
+    }
+
+    /// `apply_profile_defaults` + `native_context_warning` をまとめた便宜メソッド
+    /// (main.rs の呼び出し行数を抑えるため。SIZE-001 800 行制約対応)。
+    /// 出力は呼び出し側の責務 (このメソッド自体は print しない)。
+    pub fn apply_profile_defaults_checked(&mut self) -> Option<String> {
+        let profile = self.apply_profile_defaults()?;
+        self.native_context_warning(profile)
+    }
+}
+
+/// `resolve_model_id` に渡す 3 つの env override (L-2: 無名タプルではなく named struct にして
+/// 呼び出し側での意味の取り違えを防ぐ)。
+#[derive(Debug, Clone, Default)]
+pub struct ModelIdEnvOverrides {
+    /// `BONSAI_MODEL` env
+    pub bonsai_model: Option<String>,
+    /// `BONSAI_MODEL_ID` env
+    pub bonsai_model_id: Option<String>,
+    /// `UNSLOTH_MODEL` env
+    pub unsloth_model: Option<String>,
+}
+
+/// `resolve_model_id` に渡す 3 つの env override をまとめて読む (R-5)。
+///
+/// `main.rs` の行数を抑えるためのヘルパー (SIZE-001 800 行制約対応)。
+pub fn model_id_env_overrides() -> ModelIdEnvOverrides {
+    ModelIdEnvOverrides {
+        bonsai_model: std::env::var("BONSAI_MODEL").ok(),
+        bonsai_model_id: std::env::var("BONSAI_MODEL_ID").ok(),
+        unsloth_model: std::env::var("UNSLOTH_MODEL").ok(),
+    }
+}
+
+/// `apply_lab_overrides` が `BONSAI_LAB_MLX_ONLY=1` を検知して適用した内容
+/// (呼び出し元 `main.rs` が operator 向けログ出力で表示するための報告値。ログ出力自体は
+/// main.rs 側の責務に留める、LOG-001)。
+#[derive(Debug)]
+pub struct MlxOnlySwitch {
+    pub prev_backend: String,
+    pub prev_url: String,
+    pub prev_model_id: String,
+    pub new_model_id: String,
+    pub prev_fallback_entries: usize,
+}
+
+/// `apply_lab_overrides` の適用結果まとめ。各フィールドは該当 env が未設定/no-op なら `None`。
+#[derive(Debug, Default)]
+pub struct LabOverrideReport {
+    /// `BONSAI_LAB_TEMP` override 適用時の (prev, new) temperature。
+    pub temp_override: Option<(f64, f64)>,
+    /// `BONSAI_LAB_LONG_SSE=1` 適用時の prev `sse_chunk_timeout_secs`。
+    pub long_sse_applied: Option<u64>,
+    /// `BONSAI_LAB_MLX_ONLY=1` 適用時の切替内容。
+    pub mlx_only_applied: Option<MlxOnlySwitch>,
+}
+
+/// Lab (`--lab`) 起動時のみ有効な 3 種の env override
+/// (`BONSAI_LAB_TEMP` / `BONSAI_LAB_LONG_SSE` / `BONSAI_LAB_MLX_ONLY`) を一括適用する。
+///
+/// `main.rs` の行数を抑えるためのヘルパー (SIZE-001 800 行制約対応)。呼び出し元は `cli.lab`
+/// のときのみ呼び、戻り値の各 `Some` を operator 向けログ出力で表示する (このメソッド自体は
+/// print しない、LOG-001: config.rs はログ出力 whitelist 対象外)。
+///
+/// - 項目 247 Phase C: `BONSAI_LAB_TEMP` env で temperature override.
+///   `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
+///   env unset 時は no-op、completely backward compatible。
+/// - 項目 249 Phase 2 Green: Lab Runtime Stabilization (CCG synthesis 経由)
+///   F1: `BONSAI_LAB_LONG_SSE=1` → SSE chunk timeout 60 → 180 で MLX 初トークン遅延 catch
+/// - F2: `BONSAI_LAB_MLX_ONLY=1` → fallback_chain 無効化 + primary backend を MLX に切替
+///   (項目 249 Phase 4 Smoke G-RT で fallback クリアのみでは primary llama-server を試行する
+///   構造的バグを実機で検出、F2 の本来意図「MLX-only」を完全実現するため primary も切替)。
+///   L-6: doc は `domain::model_profile::mlx_only_model_id` 参照。
+pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
+    let mut report = LabOverrideReport::default();
+
+    if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
+        report.temp_override = Some((prev, app_config.model.inference.temperature));
+    }
+
+    if is_lab_long_sse_timeout() {
+        let prev_sse = app_config.model.sse_chunk_timeout_secs;
+        app_config.model.sse_chunk_timeout_secs = 180;
+        report.long_sse_applied = Some(prev_sse);
+    }
+
+    if is_lab_mlx_only() {
+        let prev_entries = app_config.fallback_chain.entries.len();
+        app_config.fallback_chain.entries.clear();
+        let prev_backend = format!("{:?}", app_config.model.backend);
+        let prev_url = app_config.model.server_url.clone();
+        app_config.model.backend = ServerBackend::MlxLm;
+        app_config.model.server_url = "http://127.0.0.1:8000".to_string();
+        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id);
+        let prev_model_id = std::mem::replace(&mut app_config.model.model_id, new_model_id.clone());
+        report.mlx_only_applied = Some(MlxOnlySwitch {
+            prev_backend,
+            prev_url,
+            prev_model_id,
+            new_model_id,
+            prev_fallback_entries: prev_entries,
+        });
+    }
+
+    report
+}
+
 impl Default for ModelConfig {
     fn default() -> Self {
         let api_key = std::env::var("UNSLOTH_API_KEY")
             .ok()
             .or_else(|| std::env::var("BONSAI_API_KEY").ok());
         Self {
-            backend: ServerBackend::default(),
-            server_url: "http://localhost:8080".to_string(),
-            model_id: "bonsai-8b".to_string(),
-            context_length: 16384,
-            kv_cache_type: "q8_0".to_string(),
-            gguf_path: None,
-            sse_chunk_timeout_secs: 60,
-            inference: InferenceParams::default(),
             api_key,
+            ..Self::from_profile(model_profile::default_profile())
         }
     }
 }
@@ -681,7 +932,13 @@ impl AppConfig {
         let path = Self::config_path();
         let mut config: AppConfig = if path.exists() {
             let content = std::fs::read_to_string(&path)?;
-            toml::from_str(&content)?
+            let mut parsed: AppConfig = toml::from_str(&content)?;
+            // HIGH-1: `context_length` / `[model.inference]` の明示指定有無を生 TOML から
+            // 記録する。`apply_profile_defaults` (main.rs が model_id 解決直後に呼ぶ) が
+            // ユーザー明示値を profile 既定値で上書きしないために必要。
+            let raw: toml::Value = toml::from_str(&content)?;
+            parsed.model.explicit = ModelExplicitKeys::from_toml(&raw);
+            parsed
         } else {
             Self::default()
         };
@@ -690,6 +947,14 @@ impl AppConfig {
                 .ok()
                 .or_else(|| std::env::var("BONSAI_API_KEY").ok());
         }
+        // M-3: config ファイルの model_id に対して profile 既定値を適用する。
+        // 従来は main.rs (`--model`/env での model_id 解決後) でのみ適用していたため、
+        // `longmemeval_bench` 等 main.rs を経由しない全バイナリが恩恵を受けられなかった。
+        // ここで適用しても、main.rs は resolve_model_id 解決後に
+        // `apply_profile_defaults_checked()` を再度呼ぶため、CLI/env で model_id が
+        // 変わった場合の profile 切替は引き続き効く (explicit フラグはロード時のまま
+        // 保持されるので、ファイル未指定キーだけが新 profile 値に切り替わる)。
+        config.model.apply_profile_defaults();
         Ok(config)
     }
 
@@ -752,7 +1017,7 @@ mod tests {
         let config = AppConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: AppConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.model.model_id, "bonsai-8b");
+        assert_eq!(parsed.model.model_id, model_profile::DEFAULT_MODEL_ID);
         assert_eq!(parsed.agent.max_retries, 3);
     }
 
@@ -770,7 +1035,10 @@ max_iterations = 20
         assert_eq!(config.agent.max_iterations, 20);
         // 未指定の値はデフォルト
         assert_eq!(config.agent.max_retries, 3);
-        assert_eq!(config.model.context_length, 16384);
+        assert_eq!(
+            config.model.context_length,
+            model_profile::default_profile().default_context
+        );
     }
 
     #[test]
@@ -938,6 +1206,277 @@ context_length = 65536
     }
 
     #[test]
+    fn test_model_config_default_is_profile_derived() {
+        // ModelConfig::default() は model_profile::default_profile() (= MiniCPM5-2B) 由来。
+        let profile = model_profile::default_profile();
+        let config = ModelConfig::default();
+        assert_eq!(config.model_id, profile.id);
+        assert_eq!(config.context_length, profile.default_context);
+        assert!(
+            (config.inference.temperature - profile.inference.temperature).abs() < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn test_model_config_from_profile_uses_profile_values() {
+        let profile = model_profile::find_profile("ternary-bonsai-8b").expect("既知プロファイル");
+        let config = ModelConfig::from_profile(profile);
+        assert_eq!(config.model_id, "ternary-bonsai-8b");
+        assert_eq!(config.context_length, 65536);
+        assert!((config.inference.temperature - 0.3).abs() < f64::EPSILON);
+    }
+
+    // --- HIGH-1: ModelExplicitKeys::from_toml ---
+
+    #[test]
+    fn test_model_explicit_keys_from_toml_no_model_section() {
+        let raw: toml::Value = toml::from_str("").unwrap();
+        let explicit = ModelExplicitKeys::from_toml(&raw);
+        assert!(!explicit.context_length);
+        assert_eq!(explicit.inference, InferenceExplicitKeys::default());
+    }
+
+    #[test]
+    fn test_model_explicit_keys_from_toml_context_length_only() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+[model]
+model_id = "bonsai-8b"
+context_length = 8192
+"#,
+        )
+        .unwrap();
+        let explicit = ModelExplicitKeys::from_toml(&raw);
+        assert!(explicit.context_length);
+        assert_eq!(explicit.inference, InferenceExplicitKeys::default());
+    }
+
+    /// M-1: `[model.inference]` の一部キーのみ明示指定した場合、そのキーだけ `true` に
+    /// なる (テーブル全体の有無だけを見ていた旧実装からの回帰確認)。
+    #[test]
+    fn test_model_explicit_keys_from_toml_inference_section_partial_key() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+[model]
+model_id = "bonsai-8b"
+
+[model.inference]
+temperature = 0.9
+"#,
+        )
+        .unwrap();
+        let explicit = ModelExplicitKeys::from_toml(&raw);
+        assert!(!explicit.context_length);
+        assert!(explicit.inference.temperature);
+        assert!(!explicit.inference.top_p);
+        assert!(!explicit.inference.top_k);
+        assert!(!explicit.inference.min_p);
+        assert!(!explicit.inference.max_tokens);
+        assert!(!explicit.inference.repeat_penalty);
+    }
+
+    /// M-1: `[model.inference]` の全キーを明示指定した場合、全て `true` になる。
+    #[test]
+    fn test_model_explicit_keys_from_toml_inference_section_all_keys() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+[model]
+model_id = "bonsai-8b"
+
+[model.inference]
+temperature = 0.9
+top_p = 0.8
+top_k = 10
+min_p = 0.1
+max_tokens = 512
+repeat_penalty = 1.2
+"#,
+        )
+        .unwrap();
+        let explicit = ModelExplicitKeys::from_toml(&raw);
+        assert!(explicit.inference.temperature);
+        assert!(explicit.inference.top_p);
+        assert!(explicit.inference.top_k);
+        assert!(explicit.inference.min_p);
+        assert!(explicit.inference.max_tokens);
+        assert!(explicit.inference.repeat_penalty);
+    }
+
+    // --- HIGH-1: ModelConfig::apply_profile_defaults ---
+    // qa-round1-fixes.md HIGH-1 記載のケース (a)-(e) に対応。
+
+    /// (a) `[model]\nmodel_id = "bonsai-8b"` のみ → apply 後 context_length 16384 /
+    /// temperature 0.5 / max_tokens 1024 (bonsai-8b profile 由来)。
+    #[test]
+    fn test_apply_profile_defaults_case_a_model_id_only() {
+        let toml_str = "[model]\nmodel_id = \"bonsai-8b\"\n";
+        let mut config: AppConfig = toml::from_str(toml_str).unwrap();
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        config.model.explicit = ModelExplicitKeys::from_toml(&raw);
+
+        let profile = config.model.apply_profile_defaults();
+        assert!(profile.is_some());
+        assert_eq!(config.model.context_length, 16384);
+        assert!((config.model.inference.temperature - 0.5).abs() < f64::EPSILON);
+        assert_eq!(config.model.inference.max_tokens, 1024);
+    }
+
+    /// (b) `model_id = "bonsai-8b"` + 明示 `context_length = 8192` → 8192 維持、
+    /// inference は profile 由来。
+    #[test]
+    fn test_apply_profile_defaults_case_b_explicit_context_length_kept() {
+        let toml_str = "[model]\nmodel_id = \"bonsai-8b\"\ncontext_length = 8192\n";
+        let mut config: AppConfig = toml::from_str(toml_str).unwrap();
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        config.model.explicit = ModelExplicitKeys::from_toml(&raw);
+
+        config.model.apply_profile_defaults();
+        assert_eq!(config.model.context_length, 8192, "明示値は上書きしない");
+        assert!((config.model.inference.temperature - 0.5).abs() < f64::EPSILON);
+    }
+
+    /// (c) M-1: `[model.inference] temperature = 0.9` **のみ**明示 → temperature は維持、
+    /// 明示されていない他キー (top_p/max_tokens/repeat_penalty) は profile (bonsai-8b) 値
+    /// で埋まる (旧実装はテーブル全体の有無しか見ておらず、これらが誤って
+    /// serde フィールド単位デフォルト = 既定 profile (minicpm5-2b) 値のまま残っていた)。
+    #[test]
+    fn test_apply_profile_defaults_case_c_partial_inference_key_explicit() {
+        let toml_str =
+            "[model]\nmodel_id = \"bonsai-8b\"\n\n[model.inference]\ntemperature = 0.9\n";
+        let mut config: AppConfig = toml::from_str(toml_str).unwrap();
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        config.model.explicit = ModelExplicitKeys::from_toml(&raw);
+
+        config.model.apply_profile_defaults();
+        assert!(
+            (config.model.inference.temperature - 0.9).abs() < f64::EPSILON,
+            "明示 temperature は上書きしない"
+        );
+        assert!(
+            (config.model.inference.top_p - 0.85).abs() < f64::EPSILON,
+            "未明示 top_p は bonsai-8b profile 値"
+        );
+        assert_eq!(
+            config.model.inference.max_tokens, 1024,
+            "未明示 max_tokens は bonsai-8b profile 値"
+        );
+        assert!(
+            (config.model.inference.repeat_penalty - 1.15).abs() < f64::EPSILON,
+            "未明示 repeat_penalty は bonsai-8b profile 値"
+        );
+        assert_eq!(
+            config.model.context_length, 16384,
+            "context_length は profile 由来"
+        );
+    }
+
+    /// M-1: `[model.inference]` の全キーを明示指定した場合、apply 後も全て維持される。
+    #[test]
+    fn test_apply_profile_defaults_all_inference_keys_explicit_kept() {
+        let toml_str = r#"
+[model]
+model_id = "bonsai-8b"
+
+[model.inference]
+temperature = 0.9
+top_p = 0.8
+top_k = 10
+min_p = 0.1
+max_tokens = 512
+repeat_penalty = 1.2
+"#;
+        let mut config: AppConfig = toml::from_str(toml_str).unwrap();
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        config.model.explicit = ModelExplicitKeys::from_toml(&raw);
+
+        config.model.apply_profile_defaults();
+        assert!((config.model.inference.temperature - 0.9).abs() < f64::EPSILON);
+        assert!((config.model.inference.top_p - 0.8).abs() < f64::EPSILON);
+        assert_eq!(config.model.inference.top_k, 10);
+        assert!((config.model.inference.min_p - 0.1).abs() < f64::EPSILON);
+        assert_eq!(config.model.inference.max_tokens, 512);
+        assert!((config.model.inference.repeat_penalty - 1.2).abs() < f64::EPSILON);
+    }
+
+    /// M-3: 同じ model_id に対して `apply_profile_defaults` を複数回呼んでも結果は
+    /// 変わらない (main.rs は `AppConfig::load()` 内での適用に加え、`resolve_model_id`
+    /// 解決後に再度 `apply_profile_defaults_checked()` を呼ぶため、CLI/env で model_id
+    /// が変わらない限り 2 回目の呼び出しは no-op であることが必要)。
+    #[test]
+    fn test_apply_profile_defaults_idempotent_for_same_model_id() {
+        let toml_str = "[model]\nmodel_id = \"bonsai-8b\"\n";
+        let mut config: AppConfig = toml::from_str(toml_str).unwrap();
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        config.model.explicit = ModelExplicitKeys::from_toml(&raw);
+
+        config.model.apply_profile_defaults();
+        let context_length_after_first = config.model.context_length;
+        let inference_after_first = config.model.inference.clone();
+
+        config.model.apply_profile_defaults();
+        assert_eq!(config.model.context_length, context_length_after_first);
+        assert!(
+            (config.model.inference.temperature - inference_after_first.temperature).abs()
+                < f64::EPSILON
+        );
+        assert!((config.model.inference.top_p - inference_after_first.top_p).abs() < f64::EPSILON);
+        assert_eq!(
+            config.model.inference.max_tokens,
+            inference_after_first.max_tokens
+        );
+    }
+
+    /// (d) 未知 model_id → 何も変わらず `None`。
+    #[test]
+    fn test_apply_profile_defaults_case_d_unknown_model_id_noop() {
+        let mut config = ModelConfig {
+            model_id: "totally-unknown-model-xyz".to_string(),
+            context_length: 12345,
+            ..ModelConfig::default()
+        };
+        let before = config.context_length;
+        let profile = config.apply_profile_defaults();
+        assert!(profile.is_none());
+        assert_eq!(config.context_length, before);
+    }
+
+    /// (e) `--model` 相当: load 後に model_id を差し替えても profile が効く
+    /// (context_length/inference の explicit フラグは model_id とは独立)。
+    #[test]
+    fn test_apply_profile_defaults_case_e_model_id_overridden_after_load() {
+        let toml_str = "[model]\nmodel_id = \"minicpm5-2b\"\n";
+        let mut config: AppConfig = toml::from_str(toml_str).unwrap();
+        let raw: toml::Value = toml::from_str(toml_str).unwrap();
+        config.model.explicit = ModelExplicitKeys::from_toml(&raw);
+
+        // `--model bonsai-8b` 相当の CLI 上書き
+        config.model.model_id = "bonsai-8b".to_string();
+        let profile = config.model.apply_profile_defaults();
+        assert_eq!(profile.map(|p| p.id), Some("bonsai-8b"));
+        assert_eq!(config.model.context_length, 16384);
+        assert!((config.model.inference.temperature - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_native_context_warning_none_when_within_native() {
+        let config = ModelConfig::default();
+        let profile = model_profile::default_profile();
+        assert!(config.native_context_warning(profile).is_none());
+    }
+
+    #[test]
+    fn test_native_context_warning_some_when_exceeds_native() {
+        let profile = model_profile::find_profile("bonsai-8b").expect("既知プロファイル");
+        let config = ModelConfig {
+            context_length: profile.native_context + 1,
+            ..ModelConfig::from_profile(profile)
+        };
+        let warning = config.native_context_warning(profile);
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("native context"));
+    }
+
+    #[test]
     fn test_server_backend_serialize_llama() {
         let backend = ServerBackend::LlamaServer;
         let json = serde_json::to_string(&backend).unwrap();
@@ -1019,10 +1558,13 @@ api_key = "sk-unsloth-testkey"
 
     #[test]
     fn test_inference_params_default() {
+        // 値は model_profile::default_profile() (= MiniCPM5-2B) 由来。値の直書き禁止、
+        // profile 変更で自動追従させる。
+        let expected = model_profile::default_profile().inference;
         let params = InferenceParams::default();
-        assert!((params.temperature - 0.5).abs() < f64::EPSILON);
-        assert_eq!(params.top_k, 20);
-        assert_eq!(params.max_tokens, 1024);
+        assert!((params.temperature - expected.temperature).abs() < f64::EPSILON);
+        assert_eq!(params.top_k, expected.top_k);
+        assert_eq!(params.max_tokens, expected.max_tokens);
     }
 
     #[test]
@@ -1040,8 +1582,9 @@ max_tokens = 2048
         assert!((config.model.inference.temperature - 0.3).abs() < f64::EPSILON);
         assert_eq!(config.model.inference.top_k, 10);
         assert_eq!(config.model.inference.max_tokens, 2048);
-        // 未指定はデフォルト
-        assert!((config.model.inference.top_p - 0.85).abs() < f64::EPSILON);
+        // 未指定はデフォルト (= model_profile::default_profile() 由来)
+        let expected_top_p = model_profile::default_profile().inference.top_p;
+        assert!((config.model.inference.top_p - expected_top_p).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1323,9 +1866,14 @@ max_iterations = 20
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("BONSAI_LAB_TEMP", "0") };
+        let default_temp = model_profile::default_profile().inference.temperature;
         let mut p = InferenceParams::default();
         let r = p.apply_lab_temp_override();
-        assert_eq!(r, Some(0.5), "default temperature 0.5 が prev として返る");
+        assert_eq!(
+            r,
+            Some(default_temp),
+            "default temperature が prev として返る"
+        );
         assert_eq!(
             p.temperature, 0.0,
             "env=\"0\" で temperature=0.0 に override"
@@ -1339,9 +1887,10 @@ max_iterations = 20
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         unsafe { std::env::set_var("BONSAI_LAB_TEMP", "0.3") };
+        let default_temp = model_profile::default_profile().inference.temperature;
         let mut p = InferenceParams::default();
         let r = p.apply_lab_temp_override();
-        assert_eq!(r, Some(0.5));
+        assert_eq!(r, Some(default_temp));
         assert!(
             (p.temperature - 0.3).abs() < f64::EPSILON,
             "env=\"0.3\" で temperature=0.3 に override"

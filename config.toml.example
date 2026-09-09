@@ -1,0 +1,70 @@
+# bonsai-agent 設定ファイル例
+#
+# 配置先:
+#   macOS: ~/Library/Application Support/bonsai-agent/config.toml
+#   Linux: ~/.config/bonsai-agent/config.toml
+#
+# 省略可能。存在しない場合は既定値 (MiniCPM5-2B) で動作する。
+# `cargo run -- --init` でもテンプレートを生成できる。
+#
+# モデルを差し替える手順は docs/execution/model-switching.md を参照。
+
+[model]
+server_url = "http://localhost:8080"
+model_id = "minicpm5-2b"
+# M2 16GB 向け保守的既定。Q4_K_M 重み 1.56 GB + KV q8_0 ≈ 21.5 KB/token
+# (16k ≈ 0.35 GB、32k ≈ 0.7 GB)。32k 以上に増やす場合はここか BONSAI_MODEL_CTX で opt-in する。
+context_length = 16384
+# gguf_path = "~/.cache/bonsai-agent/models/MiniCPM5-2B-Q4_K_M.gguf"  # llama-server起動時のみ使用
+
+[model.inference]
+temperature = 0.6
+top_p = 0.95
+top_k = 20
+min_p = 0.05
+max_tokens = 2048
+repeat_penalty = 1.05
+
+# --- モデル切替の例 (いずれか1つを使う場合、上の [model] / [model.inference] を置き換える) ---
+#
+# minicpm5-1b (MiniCPM5-2B より軽量、HF 確認済 2026-09-09、Q4_K_M 688MB):
+#   [model]
+#   model_id = "minicpm5-1b"
+#   context_length = 16384
+#
+# ternary-bonsai-8b (legacy、mlx-lm backend、PrismML MLX fork が必要):
+#   [model]
+#   backend = "mlx-lm"
+#   server_url = "http://localhost:8000"
+#   model_id = "ternary-bonsai-8b"
+#   context_length = 65536
+#
+#   [model.inference]
+#   temperature = 0.3
+#   top_p = 0.9
+#   top_k = 20
+#   min_p = 0.05
+#   max_tokens = 1024
+#   repeat_penalty = 1.1
+#
+# bonsai-8b (legacy、1-bit Qwen3-8B、Bonsai-demo の llama-server fork が必要):
+#   [model]
+#   model_id = "bonsai-8b"
+#   context_length = 16384
+#
+#   [model.inference]
+#   temperature = 0.5
+#   top_p = 0.85
+#   top_k = 20
+#   min_p = 0.05
+#   max_tokens = 1024
+#   repeat_penalty = 1.15
+
+[agent]
+max_iterations = 10
+max_retries = 3
+shell_timeout_secs = 30
+auto_checkpoint = true
+
+[advisor]
+# api_key は環境変数 OPENAI_API_KEY / ANTHROPIC_API_KEY から自動検出

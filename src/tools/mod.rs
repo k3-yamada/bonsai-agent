@@ -352,7 +352,7 @@ impl ToolRegistry {
                 crate::observability::logger::LogLevel::Warn,
                 "tools",
                 &format!(
-                    "登録ツール数({})が上限({})を超過。1bitモデルの精度低下リスク",
+                    "登録ツール数({})が上限({})を超過。小型モデルの精度低下リスク",
                     self.tools.len(),
                     limit
                 ),
