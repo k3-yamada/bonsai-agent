@@ -15,7 +15,9 @@
 #   - MLX server 起動済 (`./scripts/start-mlx-server.sh`、port 8000、本 session 整備済)
 #   - target/release/bonsai が build 済 (本 session の項目 247 Phase C 後の binary、
 #     `BONSAI_LAB_TEMP` env 対応版)
-#   - `BONSAI_LAB_TEMP=0` で greedy/deterministic 化 (Gemini 提案)
+#   - `BONSAI_LAB_TEMP=0` で greedy/deterministic 化 (Gemini 提案)。既定値だが、
+#     Issue #12 Phase -1 以降は外部から `BONSAI_LAB_TEMP` を明示指定すれば
+#     (例: control 温度 T=0.6) そちらが優先される (`: "${BONSAI_LAB_TEMP:=0}"` パターン)。
 #
 # Wall: ~5h (T=0 で cycle 30 min 想定 × 10 cycle、現行 v21 の 47 min より速い見込み)
 #
@@ -50,15 +52,18 @@ fi
 # SMOKE 15 task tier (BONSAI_LAB_SMOKE=1 → smoke_tasks() = SMOKE_TASK_IDS 15 件)
 export BONSAI_LAB_SMOKE=1
 
-# Phase C: T=0 greedy 化で sampling noise 排除 (Gemini 提案、項目 247 Phase C)
-export BONSAI_LAB_TEMP=0
+# Phase C: T=0 greedy 化で sampling noise 排除 (Gemini 提案、項目 247 Phase C)。
+# Issue #12 Phase -1: 外部から BONSAI_LAB_TEMP が明示指定されていればそれを尊重し
+# (例: control 温度 T=0.6 での A/A 実施)、未指定時のみ既定 0 にフォールバックする。
+: "${BONSAI_LAB_TEMP:=0}"
+export BONSAI_LAB_TEMP
 
 run_cycle() {
     local label="$1"
     local logfile="$LOG_DIR/${label}.log"
     local start
     start=$(date +%s)
-    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${label} START (A/A、両側 OFF、T=0) ===" | tee -a "$logfile"
+    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${label} START (A/A、両側 OFF、BONSAI_LAB_TEMP=${BONSAI_LAB_TEMP}) ===" | tee -a "$logfile"
 
     # A/A test: 両側とも factcheck OFF (noise floor 測定のため env unset)。
     # ファイル名は `on`/`off` を使うが、env は両側同一 = OFF×OFF。
