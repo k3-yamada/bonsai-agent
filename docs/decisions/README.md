@@ -27,6 +27,7 @@ Z-1 Phase 6 (CLAUDE.md 項目 1-254 から 30-40 件を ADR 化、~6-8h) で起�
 - [ADR-010](ADR-010-clean-architecture-domain-layer.md) — クリーンアーキテクチャ準拠: domain 層新設と DEP-001 違反ゼロ化 (Accepted 2026-06-04)
 - [ADR-011](ADR-011-chat-template-backend-source-of-truth.md) — Chat Template Backend SSOT (Accepted 2026-06-15)
 - [ADR-012](ADR-012-dmn-magi-fastpath-extension.md) — 自律知能拡張: FastPath / DMN思考ループ / MAGI三重監視 / 外部知覚センサー / 記憶力学グラフ可視化 (Accepted 2026-09-07)
+- [ADR-013](ADR-013-model-profile-minicpm5.md) — ModelProfile レジストリ導入と既定モデルの MiniCPM5-2B 化 (Accepted 2026-09-08)
 
 ## 関連
 - .claude/plan/agents-md-docs-knowledge-base.md (Z-1 plan §6)

@@ -41,7 +41,9 @@ cargo run -- --lab
 ### Smoke G-RT2 (項目 252 M2 解消後の本番 Smoke)
 ```bash
 cargo build --release  # ~28s
-# MLX server 起動 (port 8000、prism-ml/Ternary-Bonsai-8B-mlx-2bit)
+# MLX server 起動 (port 8000、既定は openbmb/MiniCPM5-2B-MLX)。
+# Ternary Bonsai-8B での再現は `BONSAI_MODEL_ID=ternary-bonsai-8b ./scripts/start-mlx-server.sh` +
+# config `model_id = "ternary-bonsai-8b"` を使う。
 BONSAI_LAB_LONG_SSE=1 \              # F1: SSE chunk timeout 60→180s
 BONSAI_LAB_MLX_ONLY=1 \              # F2: primary backend を MLX 切替
 BONSAI_LAB_MLX_WARMUP=1 \            # F4: MLX server pre-warm 有効化
@@ -78,7 +80,9 @@ ACCEPT 条件 (各 target 共通): Δ ≥ max(0.010, σ_noise × 2) かつ Wilco
 ### Smoke G-MCT2 (項目 265 max_context_tokens reduction 効果検証)
 ```bash
 cargo build --release  # ~30s (Phase 1-3 反映後の binary 必須)
-# MLX server 起動 (port 8000、prism-ml/Ternary-Bonsai-8B-mlx-2bit)
+# MLX server 起動 (port 8000、既定は openbmb/MiniCPM5-2B-MLX)。
+# Ternary Bonsai-8B での再現は `BONSAI_MODEL_ID=ternary-bonsai-8b ./scripts/start-mlx-server.sh` +
+# config `model_id = "ternary-bonsai-8b"` を使う。
 ./scripts/start-mlx-server.sh &
 
 mkdir -p lab-265-smoke-logs
@@ -130,6 +134,29 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_MLX_AUTO_CLAMP` | OFF | bool | B-3: 起動時 MLX `/props` の n_ctx で context_length を `min(configured, n_ctx)` にクランプ。server 未応答時 no-op。LocalAI fit_params 思想 |
 | `BONSAI_EMBED_URL` | None | url | `HttpEmbedder` 有効化。設定時 `create_embedder()` が `{url}/v1/embeddings` (OpenAI 互換) 経由でローカル埋め込みを取得 (MLX sidecar 等)。**`embeddings` feature 非依存** = ort バイナリDLなしのオフライン/Linux ビルドでも実埋め込み。例: `http://localhost:8888`。未設定で従来挙動 (fastembed→SimpleEmbedder) |
 | `BONSAI_EMBED_MODEL` | `bonsai-embed` | str | `HttpEmbedder` が送る model 名。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持) |
+| `BONSAI_MODEL` | None | str | `resolve_model_id()` 経由の model_id override。優先順位は `--model` CLI > `BONSAI_MODEL` > `UNSLOTH_MODEL` (後方互換) > config の `model_id` (ADR-013) |
+
+### モデル選択 (scripts、`scripts/model.env`)
+
+Rust 側の env (`BONSAI_MODEL`) とは別に、shell スクリプト (`start-server.sh` 等) はこちらを読む。
+`BONSAI_MODEL_ID` を変えると、`scripts/model.env` の `case` 節が repo/file/context/推論パラメータを
+まとめて preset に切り替える（Rust 側 `ModelProfile` レジストリと 1:1 対応）。個々の値は
+env で個別上書きもできる。詳細は [docs/execution/model-switching.md](model-switching.md)。
+
+| Env | Default (`minicpm5-2b`) | 効果 |
+|---|---|---|
+| `BONSAI_MODEL_ID` | `minicpm5-2b` | config.toml `model_id` に対応する短縮名。`model.env` の preset 選択キー |
+| `BONSAI_MODEL_GGUF_REPO` | `openbmb/MiniCPM5-2B-GGUF` | GGUF 配布元 Hugging Face repo |
+| `BONSAI_MODEL_GGUF_FILE` | `MiniCPM5-2B-Q4_K_M.gguf` | ダウンロードする GGUF ファイル名 |
+| `BONSAI_MODEL_MLX_REPO` | `openbmb/MiniCPM5-2B-MLX` | MLX 配布元 Hugging Face repo |
+| `BONSAI_MODEL_CTX` | `32768` | `start-server.sh` が `-c` に渡す context 長 |
+| `BONSAI_MODEL_DIR` | `$HOME/.cache/bonsai-agent/models` | GGUF ファイルの保存先ディレクトリ |
+| `BONSAI_MODEL_TEMP` | `0.6` | `start-server.sh` が `--temp` に渡す推論温度 |
+| `BONSAI_MODEL_TOP_P` | `0.95` | `start-server.sh` が `--top-p` に渡す値 |
+| `BONSAI_MODEL_REPEAT_PENALTY` | `1.05` | `start-server.sh` が `--repeat-penalty` に渡す値 |
+| `BONSAI_ENABLE_THINKING` | `false` | `true`/`false` のみ許可 (他の値は `start-server.sh` がエラー exit)。`--chat-template-kwargs` の `enable_thinking` を制御する shell 側の唯一の切替点 |
+| `BONSAI_LLAMA_SERVER_BIN` | PATH の `llama-server`、無ければ `~/Bonsai-demo/bin/mac/llama-server` | 起動する llama-server バイナリ |
+| `BONSAI_GGUF_PATH` | None | 設定時、`start-server.sh` は `BONSAI_MODEL_DIR`/`BONSAI_MODEL_GGUF_FILE` より優先してこのパスを使う |
 
 ### Phase 2 メモリ最適化 sidecar (`scripts/start-mlx-sidecar.sh`)
 

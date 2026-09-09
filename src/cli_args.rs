@@ -3,7 +3,11 @@
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "bonsai-agent", version, about = "Bonsai-8B自律型エージェント")]
+#[command(
+    name = "bonsai-agent",
+    version,
+    about = "ローカル小型LLM自律型エージェント (既定: MiniCPM5-2B)"
+)]
 pub struct Cli {
     /// llama-serverのURL（デフォルト: http://localhost:8080）
     #[arg(long, default_value = "http://localhost:8080")]

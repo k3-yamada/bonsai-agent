@@ -2,13 +2,13 @@
 
 **English** | [日本語](README.md)
 
-An autonomous AI agent written in Rust, powered by Bonsai-8B (a 1-bit quantized Qwen3-8B, 1.28 GB).
+An autonomous AI agent written in Rust, powered by a small local LLM (default: MiniCPM5-2B, GGUF Q4_K_M, 1.56 GB).
 
 Runs entirely on a Mac M2 (16 GB). No external cloud API required. It executes tasks autonomously and learns from experience using a local LLM alone.
 
 ## Features
 
-- **1.28 GB LLM** — Bonsai-8B (1-bit quantized) handles tool calls, code understanding, and web search
+- **1.56 GB LLM** — MiniCPM5-2B (Q4_K_M quantized) handles tool calls, code understanding, and web search. The model can be swapped in three steps ([docs/execution/model-switching.md](docs/execution/model-switching.md))
 - **Self-evolution** — automatically records experience, promotes a tool chain to a skill after 3 successes, and ingests arXiv papers to grow its knowledge
 - **Flow → Stock** — automatically extracts decisions, learnings, and TODOs from conversations into Markdown files (the "Karpathy pattern")
 - **Safety by design** — sandbox, path guard, secret filter, graduated autonomy levels, safe mode
@@ -27,25 +27,26 @@ Runs entirely on a Mac M2 (16 GB). No external cloud API required. It executes t
 
 ## Quick start
 
-### 1. Set up Bonsai-demo (first time only)
+### 1. Install llama-server (first time only)
 
 ```bash
-cd ~
-git clone https://github.com/PrismML-Eng/Bonsai-demo.git
-cd Bonsai-demo
-sh scripts/download_binaries.sh
-curl -L -o models/gguf/8B/Bonsai-8B.gguf \
-  "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf"
+brew install llama.cpp
 ```
 
-### 2. Start llama-server
+### 2. Download the model
 
 ```bash
 cd ~/bonsai-agent
+./scripts/download_model.sh
+```
+
+### 3. Start llama-server
+
+```bash
 ./scripts/start-server.sh
 ```
 
-### 3. Start bonsai-agent
+### 4. Start bonsai-agent
 
 ```bash
 cargo run
@@ -58,9 +59,25 @@ bonsai> Search the web about Rust
 bonsai> exit
 ```
 
+### Using Bonsai-8B (legacy)
+
+The previous default model, Bonsai-8B (a 1-bit quantized Qwen3-8B, 1.28 GB), remains available as a legacy profile.
+
+```bash
+cd ~
+git clone https://github.com/PrismML-Eng/Bonsai-demo.git
+cd Bonsai-demo
+sh scripts/download_binaries.sh
+cd ~/bonsai-agent
+BONSAI_MODEL_ID=bonsai-8b ./scripts/download_model.sh
+BONSAI_MODEL_ID=bonsai-8b BONSAI_LLAMA_SERVER_BIN=~/Bonsai-demo/bin/mac/llama-server ./scripts/start-server.sh
+```
+
+See [docs/execution/model-switching.md](docs/execution/model-switching.md) for the full model-switching procedure.
+
 ### MLX backend (alternative for Apple Silicon)
 
-The MLX build of Ternary Bonsai 8B can be started in two ways:
+The MLX model (default: MiniCPM5-2B, `openbmb/MiniCPM5-2B-MLX`) can be started in two ways:
 
 ```bash
 # Setup (first time only)
@@ -81,9 +98,11 @@ Switch the backend in `config.toml` (match the port to the script you use):
 [model]
 backend = "mlx-lm"
 server_url = "http://localhost:8888"  # when using the sidecar; cubist is 8000
-model_id = "ternary-bonsai-8b"
-context_length = 65536
+model_id = "minicpm5-2b"
+context_length = 32768
 ```
+
+To switch to the legacy ternary-bonsai-8b (requires the PrismML MLX fork), use `model_id = "ternary-bonsai-8b"` / `context_length = 65536`.
 
 ### Mock mode (run without an LLM)
 
@@ -204,7 +223,7 @@ Hybrid search (FTS5 + vector) → inject relevant memory into the prompt
  ↓
 Past experience (success/failure) → inject into the prompt
  ↓
-LLM inference (Bonsai-8B via llama-server / mlx-lm)
+LLM inference (MiniCPM5-2B via llama-server / mlx-lm)
  ↓
 Parse → validate → execute tool
  ↓                              ↓
@@ -232,17 +251,17 @@ Generate a template with `cargo run -- --init`.
 ```toml
 [model]
 server_url = "http://localhost:8080"
-model_id = "bonsai-8b"
-context_length = 16384
+model_id = "minicpm5-2b"
+context_length = 32768
 # backend = "mlx-lm"  # when using the MLX backend
 
 [model.inference]
-temperature = 0.5
-top_p = 0.85
+temperature = 0.6
+top_p = 0.95
 top_k = 20
 min_p = 0.05
-max_tokens = 1024
-repeat_penalty = 1.15
+max_tokens = 2048
+repeat_penalty = 1.05
 
 [agent]
 max_iterations = 10
@@ -286,6 +305,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 # args = []
 # url = "http://localhost:3000/mcp"
 ```
+
+For switching examples to other models (minicpm5-1b / ternary-bonsai-8b / bonsai-8b), see [config.toml.example](config.toml.example) and [docs/execution/model-switching.md](docs/execution/model-switching.md).
 
 ## Knowledge Vault
 
@@ -372,13 +393,13 @@ cargo clippy --lib -- -D warnings  # lint
 cargo fmt -- --check           # formatting
 ```
 
-For development-flow details (Lab startup, env list, smoke procedure) see [docs/execution/runbook.md](docs/execution/runbook.md); for design decisions see [docs/decisions/](docs/decisions/) (ADR-001–011); for design philosophy see [docs/VALUES.md](docs/VALUES.md).
+For development-flow details (Lab startup, env list, smoke procedure) see [docs/execution/runbook.md](docs/execution/runbook.md); for design decisions see [docs/decisions/](docs/decisions/) (ADR-001–013); for design philosophy see [docs/VALUES.md](docs/VALUES.md).
 
 ## Requirements
 
 - macOS (Apple Silicon) or Linux
 - Rust 1.80+ (edition 2024)
-- llama-server (obtain from [PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo))
+- llama-server (`brew install llama.cpp`; the legacy Bonsai-8B needs the bundled binary from [PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) instead)
 - or mlx-lm + mlx-openai-server (set up via `./scripts/setup_mlx_ternary.sh`)
 
 ## License

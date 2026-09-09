@@ -10,6 +10,7 @@ use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
 use bonsai_agent::config::{AppConfig, ServerBackend};
 use bonsai_agent::domain::llm::{LlmBackend, MockLlmBackend};
+use bonsai_agent::domain::model_profile::{mlx_only_model_id, resolve_model_id};
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::inference::FallbackBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
@@ -57,16 +58,18 @@ fn main() -> Result<()> {
     if let Some(ref key) = cli.api_key {
         app_config.model.api_key = Some(key.clone());
     }
-    if let Some(ref model_id) = cli.model {
-        app_config.model.model_id = model_id.clone();
-    } else if let Ok(env_model) = std::env::var("UNSLOTH_MODEL") {
-        app_config.model.model_id = env_model;
-    } else if app_config.model.backend == ServerBackend::Unsloth
-        && app_config.model.model_id == "bonsai-8b"
-    {
-        app_config.model.model_id = "Aratako/Qwen3-8B-ERP-v0.1-GGUF".to_string();
+    app_config.model.model_id = resolve_model_id(
+        cli.model.as_deref(),
+        std::env::var("BONSAI_MODEL").ok().as_deref(),
+        std::env::var("UNSLOTH_MODEL").ok().as_deref(),
+        app_config.model.backend == ServerBackend::Unsloth,
+        &app_config.model.model_id,
+    );
+    // M-3: `AppConfig::load()` 適用済み。ここでは model_id 変更時 (`--model`/env) 用に再適用
+    // (同じ model_id なら idempotent no-op、doc: config.rs `AppConfig::load`)。
+    if let Some(w) = app_config.model.apply_profile_defaults_checked() {
+        eprintln!("[warn] {w}"); // HIGH-1 (doc: config.rs ModelConfig::apply_profile_defaults_checked)
     }
-
     // 項目 247 Phase C: Lab 起動時のみ `BONSAI_LAB_TEMP` env で temperature override.
     // `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
     // env unset 時は no-op、completely backward compatible。
@@ -98,10 +101,12 @@ fn main() -> Result<()> {
             let prev_url = app_config.model.server_url.clone();
             app_config.model.backend = ServerBackend::MlxLm;
             app_config.model.server_url = "http://127.0.0.1:8000".to_string();
-            app_config.model.model_id = "prism-ml/Ternary-Bonsai-8B-mlx-2bit".to_string();
+            // L-6: doc は domain::model_profile::mlx_only_model_id 参照
+            let new_model_id = mlx_only_model_id(&app_config.model.model_id);
+            let prev_model_id = std::mem::replace(&mut app_config.model.model_id, new_model_id);
             eprintln!(
-                "[lab] BONSAI_LAB_MLX_ONLY=1 → primary backend {}({}) → MlxLm(8000) + fallback_chain.entries cleared ({} → 0)",
-                prev_backend, prev_url, prev_entries
+                "[lab] BONSAI_LAB_MLX_ONLY=1 → primary backend {}({}) → MlxLm(8000) + model_id {} → {} + fallback_chain.entries cleared ({} → 0)",
+                prev_backend, prev_url, prev_model_id, app_config.model.model_id, prev_entries
             );
         }
     }

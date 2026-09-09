@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use bonsai_agent::config::{AppConfig, ServerBackend};
+use bonsai_agent::domain::model_profile::find_profile;
 use bonsai_agent::runtime::http_agent::{shared_agent, short_agent};
 
 pub fn handle_diagnose_mode(server_url: &str, app_config: &AppConfig) -> Result<()> {
@@ -21,6 +22,20 @@ pub fn handle_diagnose_mode(server_url: &str, app_config: &AppConfig) -> Result<
     println!("  server_url: {}", server_url);
     println!("  backend: {}", backend_name);
     println!("  model_id: {}", app_config.model.model_id);
+    if let Some(profile) = find_profile(&app_config.model.model_id) {
+        let notes_suffix = if profile.notes.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", profile.notes)
+        };
+        println!(
+            "  profile: {} (ctx native={}, default={}){}",
+            profile.display_name, profile.native_context, profile.default_context, notes_suffix
+        );
+        if let Some(warning) = app_config.model.native_context_warning(profile) {
+            println!("  [warn] {}", warning);
+        }
+    }
     println!("  context_length: {}", app_config.model.context_length);
     println!("  mlx_compatible: {}", mlx_compat);
 

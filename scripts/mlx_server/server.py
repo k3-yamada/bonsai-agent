@@ -16,7 +16,7 @@ backend tokenizer に委ねる = ADR-011)。
 既定値は全メモリ機能 OFF = 現状 (cubist) と等価動作。env で段階的に有効化する。
 
 env:
-  BONSAI_MLX_MODEL              既定 prism-ml/Ternary-Bonsai-8B-mlx-2bit
+  BONSAI_MLX_MODEL              既定 openbmb/MiniCPM5-2B-MLX
   BONSAI_MLX_PORT               既定 8888
   BONSAI_MLX_CACHE_LIMIT_GB     設定時 mx.set_cache_limit(GB)
   BONSAI_MLX_WIRED_LIMIT_GB     設定時 mx.set_wired_limit(GB)
@@ -223,7 +223,7 @@ def build_app():
     from mlx_lm import load, stream_generate
     from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
-    model_id = os.environ.get("BONSAI_MLX_MODEL", "prism-ml/Ternary-Bonsai-8B-mlx-2bit")
+    model_id = os.environ.get("BONSAI_MLX_MODEL", "openbmb/MiniCPM5-2B-MLX")
 
     # ── メモリ上限を load 前に固定 (swap 阻止、99% ディスク環境で致命的な swap を回避) ──
     cache_gb = env_float("BONSAI_MLX_CACHE_LIMIT_GB")

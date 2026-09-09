@@ -1,32 +1,16 @@
-#!/bin/bash
-# Ternary Bonsai 8B ダウンロードスクリプト
+#!/bin/sh
+# Ternary Bonsai 8B ダウンロードスクリプト (legacy モデル用ラッパー)
 # Usage: ./scripts/download_ternary.sh
+#
+# 現在の既定モデルは MiniCPM5-2B (scripts/download_model.sh)。
+# 本スクリプトは後方互換のため残しており、BONSAI_MODEL_ID を ternary-bonsai-8b に
+# 固定した上で download_model.sh に処理を委譲する。repo/file/dir 等の値は
+# scripts/model.env の preset (BONSAI_MODEL_ID=ternary-bonsai-8b) からそのまま解決される。
+set -e
 
-MODEL_DIR="${HOME}/Bonsai-demo/models/gguf/8B"
-HF_REPO="prism-ml/Ternary-Bonsai-8B-GGUF"
-MODEL_FILE="Ternary-Bonsai-8B.gguf"
+SCRIPT_DIR="$(dirname "$0")"
 
-echo "=== Ternary Bonsai 8B ダウンロード ==="
-echo "保存先: ${MODEL_DIR}/${MODEL_FILE}"
-echo ""
+BONSAI_MODEL_ID="ternary-bonsai-8b"
+export BONSAI_MODEL_ID
 
-# huggingface-cli チェック
-if ! command -v huggingface-cli &> /dev/null; then
-    echo "huggingface-cli が見つかりません。pip install huggingface_hub でインストールしてください。"
-    echo "代替: curl -L https://huggingface.co/${HF_REPO}/resolve/main/${MODEL_FILE} -o ${MODEL_DIR}/${MODEL_FILE}"
-    exit 1
-fi
-
-mkdir -p "${MODEL_DIR}"
-huggingface-cli download "${HF_REPO}" "${MODEL_FILE}" --local-dir "${MODEL_DIR}"
-
-echo ""
-echo "=== ダウンロード完了 ==="
-echo "llama-server で使用:"
-echo "  llama-server -m ${MODEL_DIR}/${MODEL_FILE} --host 127.0.0.1 --port 8080 -ngl 99 -c 65536 --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on"
-echo ""
-echo "config.toml 設定:"
-echo "  [model]"
-echo "  model_id = \"ternary-bonsai-8b\""
-echo "  context_length = 65536"
-echo "  gguf_path = \"${MODEL_DIR}/${MODEL_FILE}\""
+exec "$SCRIPT_DIR/download_model.sh" "$@"
