@@ -67,6 +67,33 @@
    - `Explorer`: ファイル・コードの探索・読取専用。親へは 3 行以内の要約のみ返却。
    - `Builder`: コード変更・差分生成専用。
    - `Verifier`: コンパイル・テスト・リント検証専用。
+5. **ツール allowlist の enforcement（Issue #25）**:
+   - `SubAgentConfig.allowed_tools` は `SubAgentExecutor::build_sub_config()` で
+     `AgentConfig.allowed_tools` へ伝播し、`agent_loop::step::execute_step` の2段で強制される。
+     1. 提示フィルタ: 許可外ツールのスキーマをLLMに提示しない（プロンプト汚染の抑制）。
+     2. dispatchガード: `ToolRegistry::get()` 到達前に許可外呼び出しを遮断し、拒否理由と
+        「使用可能なツール一覧」を `Message::tool` でセッションへ返す（ループは継続）。
+   - 意味論: `None` = 全許可（既定・既存挙動不変） / `Some([..])` = 完全一致のみ許可 / `Some([])` = 全禁止。
+     `ToolRegistry::apply_whitelist` の「空slice=no-op」とは意図的に非対称。
+   - 判定は設定名の完全一致。prefix / glob / MCP `server:*` ワイルドカードは非対応。
+   - 既知の制約: 提示フィルタはtop-k選択の後段で働くため、許可ツールが選択枠から溢れると
+     提示数が減りうる（部分集合性は常に成立）。
+
+### ロール別権限方針
+
+| ロール | 既定allowlist | 方針 |
+|---|---|---|
+| `General` | `None`（全許可） | 従来動作の後方互換 |
+| `Explorer` | `file_read`, `repo_map`, `recall` | 読み取り専用。副作用ツールを構造的に遮断 |
+| `Builder` | `file_read`, `file_write`, `multi_edit` | 編集に限定。`shell` は与えない |
+| `Verifier` | `file_read`, `shell` | shellを意図的に保持（下記） |
+
+`Verifier` が `shell` を保持する根拠:
+1. ロールの本質が `cargo test` / `cargo clippy` の実行であり、`shell` を外すと役割が機能ゼロになる。
+2. `shell` の危険性はallowlist層ではなく既存の多層防御（`DANGEROUS_PATTERNS` Block、`PathGuard`、
+   非read-onlyツールへのMAGI合議intercept、`Permission` / `DaemonPolicy` / `AutonomyLevel`）で抑える。
+   allowlistは「役割の絞り込み」であって「危険操作の防壁」ではない（責務が別）。
+3. read-only shell（コマンドallowlist）は現時点で存在せず、新規安全機構の設計を要するため別issue扱い。
 
 ---
 

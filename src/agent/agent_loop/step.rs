@@ -14,6 +14,7 @@ use crate::agent::tool_exec::{ValidatedCall, execute_validated_calls};
 use crate::agent::validate::{Severity, validate_tool_call};
 use crate::domain::conversation::{Message, Role, Session};
 use crate::domain::event::EventType;
+use crate::observability::logger::{LogLevel, log_event};
 use crate::tools::ToolResultCache;
 use crate::tools::{detect_task_type, memory_directive};
 
@@ -49,11 +50,17 @@ pub fn execute_step(
         .unwrap_or("");
 
     // セマンティックツール選択（ローカルONNX埋め込み、失敗時は自動でキーワード版にフォールバック）
-    let selected_tools = ctx.tools.select_relevant_split_semantic(
+    let mut selected_tools = ctx.tools.select_relevant_split_semantic(
         last_user_msg,
         ctx.config.max_tools_in_context,
         ctx.config.max_mcp_tools_in_context,
     );
+    // Issue #25 提示フィルタ（1段目防御）: allowed_tools が Some のとき、
+    // 許可外ツールのスキーマをそもそも LLM へ提示しない。allowed_tools == None では
+    // retain 自体を実行しないため、既存挙動と 100% 同一（受入条件6）。
+    if ctx.config.allowed_tools.is_some() {
+        selected_tools.retain(|t| ctx.config.is_tool_allowed(t.name()));
+    }
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
     // 2. タスク種別に応じた推論パラメータ導出
@@ -272,6 +279,36 @@ pub fn execute_step(
             session.add_message(Message::tool(
                 format!(
                     "ツール '{}' は連続で失敗したため使えません。別の方法を試してください。",
+                    tool_call.name
+                ),
+                &tool_call.name,
+            ));
+            continue;
+        }
+        // Issue #25 dispatch ガード（2段目防御 / 最終防波堤）:
+        // 提示フィルタを迂回してハルシネーションで直接名指しされた許可外ツールを、
+        // ToolRegistry::get() へ到達する前に遮断する。ループは abort せず継続する。
+        if !ctx.config.is_tool_allowed(&tool_call.name) {
+            let allowed_list = ctx
+                .config
+                .allowed_tools
+                .as_deref()
+                .unwrap_or_default()
+                .join(", ");
+            let hint = if allowed_list.is_empty() {
+                "このサブタスクではツールを使用できません。手元の情報だけで回答してください。"
+                    .to_string()
+            } else {
+                format!("使用できるツールは次のみです: {allowed_list}")
+            };
+            log_event(
+                LogLevel::Warn,
+                "agent_loop",
+                &format!("allowed_tools により拒否: '{}'", tool_call.name),
+            );
+            session.add_message(Message::tool(
+                format!(
+                    "拒否: ツール '{}' はこのサブエージェントでは許可されていません。{hint}",
                     tool_call.name
                 ),
                 &tool_call.name,

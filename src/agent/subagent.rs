@@ -67,6 +67,15 @@ impl SubAgentRole {
     /// 実際に登録される名前）とのみ一致させること。H-1: 過去に Antigravity/Windsurf
     /// 系の語彙（`find_by_name` 等）が誤って混入したため、回帰防止テスト
     /// `test_default_tools_only_reference_registered_tools` で検証している。
+    ///
+    /// # ロール別権限方針（Issue #25）
+    ///
+    /// `Verifier` が `shell` を保持するのは意図的。ロールの本質が
+    /// `cargo test` / `cargo clippy` の実行であり、`shell` を外すと役割が機能ゼロになる。
+    /// `shell` の危険性は allowlist 層ではなく既存の多層防御
+    /// （`DANGEROUS_PATTERNS` Block / `PathGuard` / 非 read-only ツールへの MAGI 合議
+    ///  intercept / `Permission`・`DaemonPolicy`・`AutonomyLevel`）で抑える。
+    /// read-only shell（コマンド allowlist）は現時点で存在せず、新規機能のため別 issue 扱い。
     pub fn default_tools(&self) -> Option<Vec<String>> {
         match self {
             SubAgentRole::General => None,
@@ -112,7 +121,10 @@ pub struct SubAgentConfig {
     pub depth: usize,
     /// サブエージェントの最大反復数（親の半分）
     pub max_iterations: usize,
-    /// 許可するツール名（Noneなら全ツール）
+    /// 許可するツール名（`None` なら全ツール、`Some(vec![])` なら全禁止）。
+    /// Issue #25 以降、これは設定値ではなく実効的な強制ポリシーであり、
+    /// `build_sub_config()` で `AgentConfig.allowed_tools` へ伝播し、
+    /// `agent_loop::step::execute_step` の提示フィルタと dispatch ガードで強制される。
     pub allowed_tools: Option<Vec<String>>,
     /// 親エージェントから引き継ぐ LLM context 予算 (項目 187 F2 ContextOverflowGuard)
     /// `None` なら legacy compaction 動作。サブエージェントが同じ backend を使う場合の
@@ -120,32 +132,85 @@ pub struct SubAgentConfig {
     pub n_ctx_budget: Option<u32>,
     /// サブエージェントの専門化ロール
     pub role: SubAgentRole,
+    /// `with_tools()` により `allowed_tools` が明示指定されたかどうかの内部フラグ。
+    /// `from_parent()` 由来（継承）の値と区別するために用いる。`true` の間は
+    /// `with_role()` が積集合を取らず明示指定を無条件で優先する（Issue #25
+    /// qa-reviewer 合意: 明示指定は単調性の保証対象外）。
+    tools_explicit: bool,
 }
 
 impl SubAgentConfig {
     /// デフォルト設定（深度0、親の設定から自動導出）
+    ///
+    /// # 権限の単調性（Issue #25 qa-reviewer MEDIUM-1）
+    ///
+    /// `allowed_tools` は親の allowlist をそのまま継承する。子が親より広い
+    /// 権限を持つことは許されないため（monotonicity）、親が `None`（全許可）
+    /// なら子も `None`、親が `Some(...)` で制限されていれば子も少なくとも
+    /// 同等に制限される。
+    ///
+    /// この単調性の保証は `from_parent()` の継承についてのみ成立する。
+    /// 後続で呼べるビルダーメソッドの扱いは以下のように異なる:
+    /// - `.with_role(role)`: 親の allowlist とロール既定値の**積集合**を取るため、
+    ///   単調性を維持する（親の制限をロールで上書き・拡大することはない）。
+    /// - `.with_tools(tools)`: 明示指定として無条件に上書きする。単調性の
+    ///   保証対象**外**。呼び出し元は同一プロセス内の信頼されたコードのみであり、
+    ///   LLM出力が到達する経路は存在しないため、明示指定を無条件に優先する
+    ///   設計としている（`with_tools()` 呼び出し後は `with_role()` を呼んでも
+    ///   明示指定が保持される）。
     pub fn from_parent(parent_config: &AgentConfig, depth: usize) -> Self {
         Self {
             depth,
             max_iterations: (parent_config.max_iterations / 2).max(3),
-            allowed_tools: None,
+            allowed_tools: parent_config.allowed_tools.clone(),
             n_ctx_budget: parent_config.n_ctx_budget,
             role: SubAgentRole::General,
+            tools_explicit: false,
         }
     }
 
-    /// ツール制限付き設定
+    /// ツール制限付き設定（明示指定、無条件上書き）
     pub fn with_tools(mut self, tools: Vec<String>) -> Self {
         self.allowed_tools = Some(tools);
+        self.tools_explicit = true;
         self
     }
 
     /// ロール指定設定（ロールに応じたデフォルトツールも自動適用）
+    ///
+    /// # 積集合セマンティクス（Issue #25 qa-reviewer MEDIUM-1 再指摘）
+    ///
+    /// `with_tools()` による明示指定が既にある場合（`tools_explicit == true`）は
+    /// 一切変更しない（明示指定を無条件で優先。上記 `from_parent()` doc 参照）。
+    ///
+    /// それ以外（`allowed_tools` が `from_parent()` 由来の継承値、または未設定）の
+    /// 場合、親の allowlist（`self.allowed_tools`）とロール既定値
+    /// （`role.default_tools()`）が両方 `Some` であれば両者の**積集合（交差）**
+    /// を採用する。親が Builder（`file_write`/`multi_edit` 等含む）でロールが
+    /// Explorer のような、親より狭いロールを指定した場合でも、ロール既定に
+    /// 含まれないツールは確実に落ちる。逆に親が Explorer でロールが
+    /// Verifier（`shell` 要求）の場合、親にない `shell` は積集合に含まれず、
+    /// 「親を超えない」単調性は保たれる（ロールが機能しなくなる場合がある点は
+    /// 呼び出し元が親の allowlist 設計時に考慮すべき責務）。
+    ///
+    /// ロール既定が `None`（`SubAgentRole::General`）の場合は親の allowlist を
+    /// そのまま維持する。親が `None`（無制限）の場合はロール既定値をそのまま
+    /// 適用する（従来どおり）。
     pub fn with_role(mut self, role: SubAgentRole) -> Self {
         self.role = role;
-        if self.allowed_tools.is_none() {
-            self.allowed_tools = role.default_tools();
+        if self.tools_explicit {
+            return self;
         }
+        self.allowed_tools = match (self.allowed_tools.take(), role.default_tools()) {
+            (Some(parent), Some(role_default)) => Some(
+                parent
+                    .into_iter()
+                    .filter(|t| role_default.contains(t))
+                    .collect(),
+            ),
+            (None, Some(role_default)) => Some(role_default),
+            (parent, None) => parent,
+        };
         self
     }
 
@@ -239,6 +304,22 @@ impl<'a> SubAgentExecutor<'a> {
                 self.sub_config.depth
             ),
         );
+
+        // Issue #25 Should: allowlist に live registry 未登録の名前が混ざっていたら1回だけ警告。
+        if let Some(allowed) = &self.sub_config.allowed_tools {
+            let unknown: Vec<&str> = allowed
+                .iter()
+                .filter(|n| !self.tools.has(n))
+                .map(|s| s.as_str())
+                .collect();
+            if !unknown.is_empty() {
+                log_event(
+                    LogLevel::Warn,
+                    "subagent",
+                    &format!("allowed_tools に未登録のツール名: {}", unknown.join(", ")),
+                );
+            }
+        }
 
         let independent = check_independence(subtask_goals);
         let store_clonable = self.store.map(|s| s.path().is_some()).unwrap_or(true);
@@ -401,6 +482,9 @@ impl<'a> SubAgentExecutor<'a> {
             system_prompt: format!("{instruction}\n\nタスク: {goal}"),
             // 項目 187 F2: 親から引き継いだ n_ctx_budget をサブエージェント実行にも適用
             n_ctx_budget: self.sub_config.n_ctx_budget,
+            // Issue #25: ロール/明示指定の allowlist を AgentConfig へ伝播。
+            // これが唯一の伝播経路であり、ここを落とすと enforcement が丸ごと無効になる。
+            allowed_tools: self.sub_config.allowed_tools.clone(),
             ..Default::default()
         }
     }
@@ -710,6 +794,7 @@ mod tests {
             allowed_tools: None,
             n_ctx_budget: None,
             role: SubAgentRole::General,
+            tools_explicit: false,
         };
 
         let executor = SubAgentExecutor::new(
@@ -865,6 +950,31 @@ mod tests {
         };
         let sub_none = SubAgentConfig::from_parent(&parent_none, 0);
         assert_eq!(sub_none.n_ctx_budget, None);
+    }
+
+    /// qa-reviewer MEDIUM-1 fix: `from_parent()` は親の `allowed_tools` を
+    /// そのまま継承すること（権限の単調性）。親が制限されているのに
+    /// 子が `None`（全許可）へリセットされる非対称を防ぐ回帰テスト。
+    #[test]
+    fn test_sub_config_inherits_allowed_tools_when_parent_restricted() {
+        let parent = AgentConfig {
+            allowed_tools: Some(vec!["file_read".to_string()]),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert_eq!(sub.allowed_tools, Some(vec!["file_read".to_string()]));
+    }
+
+    /// qa-reviewer MEDIUM-1 fix: 親が無制限（`None`）のときは子も `None`
+    /// のままであること（従来動作を維持）。
+    #[test]
+    fn test_sub_config_inherits_none_allowed_tools_when_parent_unrestricted() {
+        let parent = AgentConfig {
+            allowed_tools: None,
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert_eq!(sub.allowed_tools, None);
     }
 
     #[test]
@@ -1124,6 +1234,47 @@ mod tests {
         assert_eq!(tools, &vec!["custom_tool".to_string()]);
     }
 
+    /// qa-reviewer Changes Requested (Issue #25 再指摘) MEDIUM-1: 親が Builder
+    /// (`file_read`/`file_write`/`multi_edit`) で `.with_role(Explorer)` を
+    /// 適用した場合、積集合セマンティクスにより `file_write` が結果から
+    /// 落ちること（Explorer = 読み取り専用というロールの本質を親の allowlist
+    /// が黙って無効化しない）。
+    #[test]
+    fn test_with_role_intersects_builder_parent_with_explorer_role() {
+        let parent = AgentConfig {
+            allowed_tools: Some(vec![
+                "file_read".to_string(),
+                "file_write".to_string(),
+                "multi_edit".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0).with_role(SubAgentRole::Explorer);
+        let tools = sub.allowed_tools.as_ref().unwrap();
+        assert!(!tools.contains(&"file_write".to_string()));
+        assert!(!tools.contains(&"multi_edit".to_string()));
+        assert!(tools.contains(&"file_read".to_string()));
+    }
+
+    /// qa-reviewer Changes Requested (Issue #25 再指摘) MEDIUM-1: 親が
+    /// Explorer (`file_read`/`repo_map`/`recall`) で `.with_role(Verifier)`
+    /// を適用した場合、積集合により結果が `file_read` のみとなること
+    /// （`shell` は親の allowlist に含まれないため交差で消える）。
+    #[test]
+    fn test_with_role_intersects_explorer_parent_with_verifier_role() {
+        let parent = AgentConfig {
+            allowed_tools: Some(vec![
+                "file_read".to_string(),
+                "repo_map".to_string(),
+                "recall".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0).with_role(SubAgentRole::Verifier);
+        let tools = sub.allowed_tools.as_ref().unwrap();
+        assert_eq!(tools, &vec!["file_read".to_string()]);
+    }
+
     #[test]
     fn test_build_sub_config_role_prompt_injection() {
         let store = test_store();
@@ -1146,5 +1297,111 @@ mod tests {
         let config = executor.build_sub_config("コード探索タスク");
         assert!(config.system_prompt.contains("探索特化サブエージェント"));
         assert!(config.system_prompt.contains("タスク: コード探索タスク"));
+    }
+
+    // ===== Issue #25: allowed_tools 伝播 (build_sub_config) =====
+
+    #[test]
+    fn test_build_sub_config_propagates_allowed_tools_for_role() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+        let sub_config = SubAgentConfig::from_parent(&AgentConfig::default(), 0)
+            .with_role(SubAgentRole::Explorer);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+
+        let config = executor.build_sub_config("g");
+        assert_eq!(
+            config.allowed_tools,
+            Some(vec![
+                "file_read".to_string(),
+                "repo_map".to_string(),
+                "recall".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_build_sub_config_propagates_none_for_general_role() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+        let sub_config = SubAgentConfig::from_parent(&AgentConfig::default(), 0);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+
+        let config = executor.build_sub_config("g");
+        assert_eq!(config.allowed_tools, None);
+    }
+
+    #[test]
+    fn test_build_sub_config_propagates_explicit_with_tools() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+        let sub_config = SubAgentConfig::from_parent(&AgentConfig::default(), 0)
+            .with_tools(vec!["echo".to_string()]);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+
+        let config = executor.build_sub_config("g");
+        assert_eq!(config.allowed_tools, Some(vec!["echo".to_string()]));
+    }
+
+    #[test]
+    fn test_build_sub_config_propagates_verifier_shell() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+        let sub_config = SubAgentConfig::from_parent(&AgentConfig::default(), 0)
+            .with_role(SubAgentRole::Verifier);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+
+        let config = executor.build_sub_config("g");
+        assert!(
+            config
+                .allowed_tools
+                .as_ref()
+                .unwrap()
+                .contains(&"shell".to_string())
+        );
     }
 }
