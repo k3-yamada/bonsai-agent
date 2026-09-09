@@ -128,6 +128,9 @@ pub struct AdvisorSettings {
     /// 外部APIエンドポイント（None = ローカル検証プロンプトのみ）
     pub api_endpoint: Option<String>,
     /// API認証キー（指定なし時は env から自動検出）
+    /// `#[serde(skip_serializing)]`: `--init` 等での config.toml 書き出し時に平文で
+    /// 残さないため (Issue #15)。deserialize (config.toml からの読み込み) は従来どおり可能。
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     /// 使用モデル名
     pub api_model: Option<String>,
@@ -597,7 +600,9 @@ pub struct ModelConfig {
     #[serde(default)]
     pub inference: InferenceParams,
     /// API認証キー（Unsloth Desktop / 外部API用。None時は環境変数から自動検出）
-    #[serde(default)]
+    /// `#[serde(skip_serializing)]`: `--init` 等での config.toml 書き出し時に平文で
+    /// 残さないため (Issue #15)。deserialize (config.toml からの読み込み) は従来どおり可能。
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     /// TOML で `context_length` / `[model.inference].<key>` が明示指定されていたかどうか
     /// (HIGH-1、M-1 でキー単位に細分化)。`Serialize`/`Deserialize` の対象外 —
@@ -835,7 +840,12 @@ pub struct LabOverrideReport {
 ///   (項目 249 Phase 4 Smoke G-RT で fallback クリアのみでは primary llama-server を試行する
 ///   構造的バグを実機で検出、F2 の本来意図「MLX-only」を完全実現するため primary も切替)。
 ///   L-6: doc は `domain::model_profile::mlx_only_model_id` 参照。
-pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
+///
+/// #14-2: `mlx_only_model_id` が MLX ビルドなし profile を検出した場合は `Err` を
+/// `anyhow::Error` に変換して `?` で伝播する (実装は `map_err(anyhow::anyhow!)?`、クロスモデル
+/// 混成の hard error 化)。以前は既定 profile の mlx_repo へ黙って置換していたが、operator の
+/// 意図しないモデル混在を招くため撤廃した。
+pub fn apply_lab_overrides(app_config: &mut AppConfig) -> Result<LabOverrideReport> {
     let mut report = LabOverrideReport::default();
 
     if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
@@ -849,13 +859,18 @@ pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
     }
 
     if is_lab_mlx_only() {
+        // #14-2: 置換先 model_id を先に解決し、Err ならここで bail する。MLX-only ブロック内の
+        // 書き換え (backend / server_url / fallback_chain / model_id) より前に検証し、この
+        // ブロックの部分適用を残さない。temp / SSE override は先に適用済みだが、呼び出し元
+        // (main) は Err で即終了する。
+        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id)
+            .map_err(|msg| anyhow::anyhow!(msg))?;
         let prev_entries = app_config.fallback_chain.entries.len();
         app_config.fallback_chain.entries.clear();
         let prev_backend = format!("{:?}", app_config.model.backend);
         let prev_url = app_config.model.server_url.clone();
         app_config.model.backend = ServerBackend::MlxLm;
         app_config.model.server_url = "http://127.0.0.1:8000".to_string();
-        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id);
         let prev_model_id = std::mem::replace(&mut app_config.model.model_id, new_model_id.clone());
         report.mlx_only_applied = Some(MlxOnlySwitch {
             prev_backend,
@@ -866,7 +881,7 @@ pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
         });
     }
 
-    report
+    Ok(report)
 }
 
 impl Default for ModelConfig {
@@ -961,12 +976,41 @@ impl AppConfig {
     /// デフォルト設定をファイルに書き出す（初回セットアップ用）
     pub fn save_default() -> Result<PathBuf> {
         let path = Self::config_path();
+        Self::save_default_to(&path)?;
+        Ok(path)
+    }
+
+    /// `save_default()` の実体。書き出し先を明示指定できるようテスト用に分離 (Issue #15)。
+    ///
+    /// `api_key` フィールドは `#[serde(skip_serializing)]` により内容に含まれないが、
+    /// 念のためファイル権限も unix では `0o600` (owner 読み書きのみ) に揃える。
+    /// 既存ファイルがある場合は上書きする (従来どおり)。
+    fn save_default_to(path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(&Self::default())?;
-        std::fs::write(&path, content)?;
-        Ok(path)
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            std::io::Write::write_all(&mut file, content.as_bytes())?;
+            // 既存ファイル (作成前から存在) の場合、`mode()` は umask 適用前の初回作成
+            // 時のみ効くため、上書き時も権限を明示的に揃える。
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, content)?;
+        }
+
+        Ok(())
     }
 
     /// 設定ファイルのパス
@@ -1547,13 +1591,14 @@ api_key = "sk-unsloth-testkey"
         assert_eq!(config.model.backend, ServerBackend::Unsloth);
         assert_eq!(config.model.model_id, "Qwen3-8B-ERP-v0.1-GGUF");
         assert_eq!(config.model.api_key.as_deref(), Some("sk-unsloth-testkey"));
+        // Issue #15: api_key は `#[serde(skip_serializing)]` のため re-serialize 後の
+        // TOML には含まれない (config.toml への平文書き出し防止)。backend 等の他フィールドは
+        // 従来どおり round-trip する。
         let re_toml = toml::to_string_pretty(&config).unwrap();
+        assert!(!re_toml.contains("sk-unsloth-testkey"));
         let re_config: AppConfig = toml::from_str(&re_toml).unwrap();
         assert_eq!(re_config.model.backend, ServerBackend::Unsloth);
-        assert_eq!(
-            re_config.model.api_key.as_deref(),
-            Some("sk-unsloth-testkey")
-        );
+        assert_eq!(re_config.model.api_key, None);
     }
 
     #[test]
@@ -1965,6 +2010,25 @@ max_iterations = 20
         assert!(!is_lab_mlx_only(), "env unset で mlx-only OFF");
     }
 
+    // #14-2: `BONSAI_LAB_MLX_ONLY=1` かつ MLX ビルドなし legacy profile (`bonsai-8b`) を
+    // 指定した場合、`apply_lab_overrides` は `Err` を返す (クロスモデル混成の hard error 化)。
+    #[test]
+    fn t_apply_lab_overrides_mlx_only_unsupported_profile_is_error() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("BONSAI_LAB_MLX_ONLY", "1") };
+        let mut app_config = AppConfig::default();
+        app_config.model.model_id = "bonsai-8b".to_string();
+        let result = apply_lab_overrides(&mut app_config);
+        unsafe { std::env::remove_var("BONSAI_LAB_MLX_ONLY") };
+        let err = result.expect_err("MLX ビルドなし profile 指定は Err");
+        assert!(
+            err.to_string().contains("MLX ビルドがありません"),
+            "エラーメッセージに理由が含まれること: {err}"
+        );
+    }
+
     #[test]
     fn t_lab_task_limit_env_parse() {
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
@@ -2220,5 +2284,69 @@ max_iterations = 20
 
         unsafe { std::env::remove_var("BONSAI_SENSOR_WINDOW") };
         assert_eq!(is_window_sensor_enabled_env(), None);
+    }
+
+    // --- Issue #15: `--init` の API key 平文書き出し防止 ---
+
+    #[test]
+    fn t_issue15_serialize_omits_model_and_advisor_api_key() {
+        let mut config = AppConfig::default();
+        config.model.api_key = Some("sk-secret-model-key".to_string());
+        config.advisor.api_key = Some("sk-secret-advisor-key".to_string());
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            !toml_str.contains("api_key"),
+            "api_key キー自体が serialize 結果に含まれてはならない: {toml_str}"
+        );
+        assert!(!toml_str.contains("sk-secret-model-key"));
+        assert!(!toml_str.contains("sk-secret-advisor-key"));
+    }
+
+    #[test]
+    fn t_issue15_deserialize_from_config_toml_still_reads_api_key() {
+        // `#[serde(skip_serializing)]` は serialize のみ抑制する。config.toml に
+        // 手動で書かれた api_key は従来どおり読み込めること。
+        let toml_str = r#"
+[model]
+api_key = "sk-from-config-toml"
+
+[advisor]
+api_key = "sk-advisor-from-config-toml"
+"#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.model.api_key.as_deref(), Some("sk-from-config-toml"));
+        assert_eq!(
+            config.advisor.api_key.as_deref(),
+            Some("sk-advisor-from-config-toml")
+        );
+    }
+
+    #[test]
+    fn t_issue15_save_default_to_does_not_leak_api_key() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var("UNSLOTH_API_KEY", "sk-test-should-not-leak") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        AppConfig::save_default_to(&path).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !content.contains("sk-test-should-not-leak"),
+            "api_key の値が config.toml に書き出されてはならない"
+        );
+        assert!(!content.contains("api_key"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "config.toml は 0600 で作成されること");
+        }
+
+        unsafe { std::env::remove_var("UNSLOTH_API_KEY") };
     }
 }

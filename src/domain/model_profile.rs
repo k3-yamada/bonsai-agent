@@ -200,14 +200,20 @@ fn non_blank(value: Option<&str>) -> Option<&str> {
 /// - `current` が未知 model_id (`find_profile` が `None`) → `current` を **そのまま保持**
 ///   (書き換えない)。未知の自由文字列 model_id を無関係な既定 profile の mlx_repo で
 ///   上書きしないため。
-/// - ヒットしたが `mlx_repo` が空文字列 (例 "bonsai-8b") → `default_profile().mlx_repo`
-///   に置換 (legacy profile は MLX 未提供のため、既定 profile の MLX 実装で代替する)。
-/// - ヒットして `mlx_repo` が非空 → その `mlx_repo`。
-pub fn mlx_only_model_id(current: &str) -> String {
+/// - ヒットしたが `mlx_repo` が空文字列 (例 "bonsai-8b") → `Err` (#14-2)。
+///   クロスモデル混成 (例: bonsai-8b 指定のまま無関係な既定 profile の MLX 実装へ
+///   黙って差し替わる) を防ぐため、legacy profile は明示的な hard error とし、
+///   呼び出し側 (operator) に MLX 対応 profile を明示させる。
+/// - ヒットして `mlx_repo` が非空 → `Ok` でその `mlx_repo`。
+pub fn mlx_only_model_id(current: &str) -> Result<String, String> {
     match find_profile(current) {
-        None => current.to_string(),
-        Some(p) if p.mlx_repo.is_empty() => default_profile().mlx_repo.to_string(),
-        Some(p) => p.mlx_repo.to_string(),
+        None => Ok(current.to_string()),
+        Some(p) if p.mlx_repo.is_empty() => Err(format!(
+            "profile '{}' には MLX ビルドがありません。BONSAI_LAB_MLX_ONLY=1 では \
+             BONSAI_MODEL_ID=minicpm5-2b 等の MLX 対応 profile を明示してください",
+            p.id
+        )),
+        Some(p) => Ok(p.mlx_repo.to_string()),
     }
 }
 
@@ -402,21 +408,27 @@ mod tests {
     #[test]
     fn test_mlx_only_model_id_unknown_model_id_kept() {
         assert_eq!(
-            mlx_only_model_id("totally-unknown-model-xyz"),
+            mlx_only_model_id("totally-unknown-model-xyz").expect("未知 id は Ok で保持"),
             "totally-unknown-model-xyz"
         );
     }
 
+    // #14-2: mlx_repo が空 (legacy profile) はクロスモデル混成を防ぐため hard error にする
+    // (以前は default_profile().mlx_repo へ黙って置換していたが、operator の意図しない
+    // モデル混在を招くため撤廃)。
     #[test]
-    fn test_mlx_only_model_id_empty_mlx_repo_falls_back_to_default_profile() {
-        // bonsai-8b.mlx_repo == "" のため、既定 profile (minicpm5-2b) の mlx_repo で代替する
-        assert_eq!(mlx_only_model_id("bonsai-8b"), default_profile().mlx_repo);
+    fn test_mlx_only_model_id_empty_mlx_repo_is_error() {
+        let err = mlx_only_model_id("bonsai-8b").expect_err("MLX ビルドなし profile は Err");
+        assert!(
+            err.contains("MLX ビルドがありません"),
+            "エラーメッセージに理由が含まれること: {err}"
+        );
     }
 
     #[test]
     fn test_mlx_only_model_id_uses_matched_profile_mlx_repo() {
         assert_eq!(
-            mlx_only_model_id("ternary-bonsai-8b"),
+            mlx_only_model_id("ternary-bonsai-8b").expect("mlx_repo 非空は Ok"),
             "prism-ml/Ternary-Bonsai-8B-mlx-2bit"
         );
     }

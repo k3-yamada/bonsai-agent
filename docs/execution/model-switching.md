@@ -34,6 +34,16 @@ Unsloth backend かつ `model_id` が**旧既定** `bonsai-8b` のままの場�
 `Aratako/Qwen3-8B-ERP-v0.1-GGUF` に置き換わる。現行既定の `minicpm5-2b` はこの特例の対象外であり、
 Unsloth backend でもそのまま `minicpm5-2b` が渡る。
 
+`BONSAI_LAB_MLX_ONLY=1`（Lab 実行時限定、`--lab` 経由）は primary backend を強制的に MLX に
+切替え、model_id も MLX 対応 repo に置換する。この置換先解決は `mlx_only_model_id()`
+（`src/domain/model_profile.rs`）が担うが、`model_id` が既知 profile に一致していても
+`mlx_repo` が空 (legacy profile、例 `bonsai-8b`) の場合は**エラーで停止する**（#14-2）。
+以前は既定 profile 側の `mlx_repo` へ黙って置換していたが、operator が意図しないモデル
+（config.toml で指定した profile とは無関係な既定 profile）に混成してしまうため、
+`apply_lab_overrides()` が `anyhow::Error` に変換して `?` で即座にエラー終了するよう変更した。
+`BONSAI_LAB_MLX_ONLY=1` を使う場合は `BONSAI_MODEL_ID=minicpm5-2b` 等、`mlx_repo` を持つ
+profile を明示する必要がある。
+
 profile 既定値の適用は `AppConfig::load()` 内でキー単位に行われる。つまり `config.toml` で
 明示していないキー（`context_length` や `[model.inference]` の各値）だけが profile 値で埋まり、
 明示したキーはそのまま維持される。`--init` が生成する config は全キーを明示的に書き出すため、

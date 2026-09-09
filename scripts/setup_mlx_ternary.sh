@@ -4,9 +4,9 @@
 # Mac M2/M3/M4 Apple Silicon向け
 #
 # 既定モデル (MiniCPM5-2B 等の標準 LlamaForCausalLM アーキ) は素の mlx-lm で動く。
-# 本スクリプトが追加install する PrismML MLX fork (手順3) は legacy ternary-bonsai-8b
-# 専用 (ternary カーネル対応) で、ternary-bonsai-8b 指定時のみインストールする
-# (upstream mlx を置き換えるため既定では入れない)。
+# 本スクリプトが追加install する PrismML MLX fork (手順3) は legacy Ternary-Bonsai 系列
+# 専用 (ternary カーネル対応) で、解決後の MLX repo (MLX_MODEL) が Ternary-Bonsai の
+# ときのみインストールする (upstream mlx を置き換えるため既定では入れない)。
 
 set -e
 
@@ -17,11 +17,6 @@ SCRIPT_DIR="$(dirname "$0")"
 VENV_DIR="${HOME}/.venvs/bonsai-mlx"
 MLX_MODEL="${MLX_MODEL:-$BONSAI_MODEL_MLX_REPO}"
 PORT=8000
-
-if [ -z "$MLX_MODEL" ]; then
-    echo "エラー: BONSAI_MODEL_ID=$BONSAI_MODEL_ID には MLX ビルドがありません。BONSAI_MODEL_MLX_REPO または MLX_MODEL を指定してください" >&2
-    exit 1
-fi
 
 echo "=== bonsai-agent MLX セットアップ ==="
 echo ""
@@ -51,14 +46,16 @@ pip install --quiet --upgrade pip
 echo "2. mlx-lm インストール..."
 pip install --quiet mlx-lm
 
-# PrismML fork の MLX（legacy ternary-bonsai-8b の ternary カーネル対応。既定モデルでは未使用）
-case "$BONSAI_MODEL_ID" in
-    ternary-bonsai-8b)
+# PrismML fork の MLX（legacy Ternary-Bonsai 系列専用の ternary カーネル対応。既定モデルでは未使用）
+# 判定は解決後の MLX repo (MLX_MODEL) 基準。BONSAI_MODEL_ID は見ない
+# (未知の BONSAI_MODEL_ID でも MLX_MODEL を直接 Ternary-Bonsai 系列に指定すれば fork が入る)。
+case "$MLX_MODEL" in
+    prism-ml/Ternary-Bonsai-*|*/Ternary-Bonsai-*)
         echo "3. PrismML MLX fork インストール..."
         pip install --quiet "mlx @ git+https://github.com/PrismML-Eng/mlx.git@prism"
         ;;
     *)
-        echo "  (PrismML MLX fork は ternary-bonsai-8b 専用のため skip)"
+        echo "  (MLX_MODEL=$MLX_MODEL は ternary ではないため PrismML fork を skip)"
         ;;
 esac
 
@@ -69,6 +66,14 @@ pip install --quiet mlx-openai-server
 # mlx-embeddings インストール（sidecar の /v1/embeddings 用、ローカル埋め込み）
 echo "5. mlx-embeddings インストール..."
 pip install --quiet mlx-embeddings
+
+# MLX_MODEL 未指定なら venv・mlx-lm・mlx-openai-server・mlx-embeddings までは準備済みの
+# 状態で打ち切る (起動コマンド案内にはモデル repo が要るため exit 1 する。呼び出し側の
+# set -e 連鎖を維持する)
+if [ -z "$MLX_MODEL" ]; then
+    echo "エラー: venv と mlx-lm、mlx-openai-server、mlx-embeddings は準備済みです。BONSAI_MODEL_ID=$BONSAI_MODEL_ID には MLX ビルドがありません。BONSAI_MODEL_MLX_REPO または MLX_MODEL を指定してください。モデル指定がないため起動案内を中断します" >&2
+    exit 1
+fi
 
 echo ""
 echo "=== セットアップ完了 ==="

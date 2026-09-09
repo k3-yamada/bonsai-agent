@@ -115,7 +115,7 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_VAULT_LINT_STALE_DAYS` | 90 | 1..=365 | Vault stale 軸閾値 |
 | `BONSAI_VAULT_UNREVIEWED_DAYS` | 14 | 1..=90 | Vault unreviewed_aged 5 軸目閾値 (項目 254) |
 | `BONSAI_LAB_LONG_SSE` | OFF | bool | SSE chunk timeout 60→180s (項目 249 F1) |
-| `BONSAI_LAB_MLX_ONLY` | OFF | bool | primary backend を MLX 切替 (項目 249 F2) |
+| `BONSAI_LAB_MLX_ONLY` | OFF | bool | primary backend を MLX 切替 (項目 249 F2)。MLX ビルドなし profile (例 `bonsai-8b`) 指定時はエラーで停止 (#14-2) |
 | `BONSAI_LAB_TASK_LIMIT` | None | int | task pool 削減 (項目 249 F3) |
 | `BONSAI_LAB_MLX_WARMUP` | OFF | bool | MLX server pre-warm 有効化 (項目 252 F4 案 A) |
 | `BONSAI_LAB_MLX_WARMUP_COUNT` | 3 | 1..=10 | pre-warm 回数 (項目 252) |
@@ -135,6 +135,14 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_EMBED_URL` | None | url | `HttpEmbedder` 有効化。設定時 `create_embedder()` が `{url}/v1/embeddings` (OpenAI 互換) 経由でローカル埋め込みを取得 (MLX sidecar 等)。**`embeddings` feature 非依存** = ort バイナリDLなしのオフライン/Linux ビルドでも実埋め込み。例: `http://localhost:8888`。未設定で従来挙動 (fastembed→SimpleEmbedder) |
 | `BONSAI_EMBED_MODEL` | `bonsai-embed` | str | `HttpEmbedder` が送る model 名。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持) |
 | `BONSAI_MODEL` | None | str | `resolve_model_id()` 経由の model_id override。優先順位は `--model` CLI > `BONSAI_MODEL` > `BONSAI_MODEL_ID` (fallback alias (BONSAI_MODEL 優先)) > `UNSLOTH_MODEL` (後方互換) > config の `model_id` (ADR-013)。Unsloth backend への旧既定 `bonsai-8b` 置換特例は現行既定 `minicpm5-2b` には適用されない |
+
+`--init` は API key を config.toml に書き出さない（`ModelConfig.api_key` / `AdvisorSettings.api_key` は
+`#[serde(skip_serializing)]`、ファイルは 0600 で作成、Issue #15）。`UNSLOTH_API_KEY` / `BONSAI_API_KEY` /
+Advisor 用 `OPENAI_API_KEY` 等は env のまま管理し、config.toml には書かない。以前の `--init` で
+`api_key = ...` が config.toml に平文で書かれている場合は削除して env に移すこと（deserialize は
+従来どおり動作するため config.toml 側に残っていても読めてしまう点に注意）。既存の config.toml がある場合
+`--init` はファイルに触れない (早期 return) ため、権限は自動修正されない。以前の `--init` で作成した 644
+のファイルは `chmod 600` すること。
 
 ### モデル選択 (scripts、`scripts/model.env`)
 

@@ -6,7 +6,7 @@ General autonomous agent guidelines are maintained in [AGENTS.md](AGENTS.md).
 ## プロジェクト概要
 
 `bonsai-agent` — ローカル小型LLM（既定: MiniCPM5-2B、GGUF Q4_K_M 1.56GB。旧既定 Bonsai-8B 1bit）で動作するRust製自律型エージェント。
-Mac M2 16GB上でllama-server HTTP API経由で推論。1663 unit test (2026-09-08 時点)、142 ソースファイル。
+Mac M2 16GB上でllama-server HTTP API経由で推論。unit test 数は `cargo test --lib`、ソースファイル数は `find src -name '*.rs' | wc -l` で確認。
 
 設計原則: **「Scaffolding > Model」** — 1ビットモデルの改善余地は限定的。ハーネス側で信頼性を底上げする。
 
