@@ -13,7 +13,7 @@ Runs entirely on a Mac M2 (16 GB). No external cloud API required. It executes t
 - **Flow → Stock** — automatically extracts decisions, learnings, and TODOs from conversations into Markdown files (the "Karpathy pattern")
 - **Safety by design** — sandbox, path guard, secret filter, graduated autonomy levels, safe mode
 - **Extensible** — TOML plugins, MCP client, pre/post hooks
-- **Rich harness patterns** — raises the reliability of a 1-bit model under the "Scaffolding > Model" principle (~1,500 tests; design principles in [CLAUDE.md](CLAUDE.md) / [docs/quality/lab-history.md](docs/quality/lab-history.md))
+- **Rich harness patterns** — raises the reliability of a 1-bit model under the "Scaffolding > Model" principle (test count verified via `cargo test --lib`; design principles in [CLAUDE.md](CLAUDE.md) / [docs/quality/lab-history.md](docs/quality/lab-history.md))
 - **Design-philosophy anchor ([VALUES.md](docs/VALUES.md))** — values V1–V7 written down, with Goodhart's-Law monitoring (env-gated metric-degeneration detection) to guard against self-drift
 - **LLM-as-judge evaluation harness** — Judge Gate + rubric scoring, expanding the benchmark from 22 → 40 tasks
 - **MLX backend support** — in addition to llama-server, inference can run on mlx-lm (Apple Silicon optimized)
@@ -387,7 +387,7 @@ For design principles and representative patterns, see [CLAUDE.md](CLAUDE.md). (
 ## Development
 
 ```bash
-cargo test --lib               # ~1,500 tests
+cargo test --lib               # unit tests (run it for the current count)
 cargo test --test structural   # layer/size/eprintln lint (Z-4)
 cargo clippy --lib -- -D warnings  # lint
 cargo fmt -- --check           # formatting

@@ -13,7 +13,7 @@ Mac M2 16GBで完結。外部クラウドAPI不要。ローカルLLMだけで自
 - **フロー→ストック** — 会話の中から意思決定・学び・TODOを自動抽出しmdファイルに蓄積（Karpathyパターン）
 - **安全設計** — Sandbox、パスガード、秘密情報フィルタ、段階的自律レベル、セーフモード
 - **拡張可能** — TOMLプラグイン、MCPクライアント、pre/postフック
-- **豊富なハーネスパターン** — 「Scaffolding > Model」原則で1ビットモデルの信頼性を底上げ（~1,500 テスト、設計原則は [CLAUDE.md](CLAUDE.md) / [docs/quality/lab-history.md](docs/quality/lab-history.md)）
+- **豊富なハーネスパターン** — 「Scaffolding > Model」原則で1ビットモデルの信頼性を底上げ（テスト数は `cargo test --lib` で確認。設計原則は [CLAUDE.md](CLAUDE.md) / [docs/quality/lab-history.md](docs/quality/lab-history.md)）
 - **設計思想の錨（[VALUES.md](docs/VALUES.md)）** — V1〜V7 の価値観を明文化、Goodhart's Law 監視（指標の形骸化検出、env-gated）で自己の変質を警戒
 - **LLM-as-judge 評価基盤** — Judge Gate + ルーブリック採点でベンチマークを 22→40 タスクに拡張
 - **MLXバックエンド対応** — llama-serverに加え、mlx-lm（Apple Silicon最適化）でも推論可能
@@ -433,7 +433,7 @@ Bonsai-8B 1bit、k=3、10 cycle paired による変異評価。全履歴・詳�
 ## 開発
 
 ```bash
-cargo test --lib               # ~1,500 テスト
+cargo test --lib               # ユニットテスト（正確な件数は実行して確認）
 cargo test --test structural   # レイヤー/サイズ/eprintln lint（Z-4）
 cargo clippy --lib -- -D warnings  # リント
 cargo fmt -- --check           # フォーマット

@@ -9,7 +9,7 @@
 - **名称**: `bonsai-agent`
 - **中核技術**: ローカル小型LLM（既定 MiniCPM5-2B、GGUF Q4_K_M 1.56GB。旧既定 Bonsai-8B 1-bit）で動作する Rust 製自律型エージェント。
 - **実行環境**: Mac M2 16GB、llama-server / MLX HTTP API 経由で推論。
-- **テスト規模**: 1,480+ unit tests、100+ ソースファイル、Rust 2024 edition。
+- **テスト規模**: テスト数は `cargo test --lib`、ソースファイル数は `find src -name '*.rs' | wc -l` で確認。Rust 2024 edition。
 - **アーキテクチャ特性**: 非同期ランタイム (tokio) ではなく、**完全同期アーキテクチャ** (`ureq`, `reqwest::blocking`, `CancellationToken`) を採用。
 
 ---
