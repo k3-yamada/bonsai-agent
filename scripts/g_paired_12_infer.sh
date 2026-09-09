@@ -15,6 +15,12 @@
 #     既定値) との paired 比較を行う。
 #   - 各 cycle ログ冒頭に有効な env (BONSAI_LAB_TEMP / BONSAI_LAB_REPEAT_PENALTY /
 #     BONSAI_MODEL_ID / BONSAI_LAB_SMOKE / BONSAI_BENCH_LADDER) を echo し事後検証可能にする。
+#   - ログファイル名は `scripts/lab_v22_metric.py::collect_cycles()` の fallback 規約
+#     (`cycle_a_{i}.log` = OFF/baseline, `cycle_b_{i}.log` = ON/variant、
+#     delta = on(cycle_b) − off(cycle_a)) に厳密対応させる:
+#       control (baseline)  → cycle_a_${i}.log
+#       candidate (比較対象) → cycle_b_${i}.log
+#     どちらの cycle かはファイル名ではなくログ内容 (ROLE= 行) で識別する。
 #
 # Design:
 #   candidate_a: temp=0.3, repeat_penalty=1.1
@@ -84,11 +90,20 @@ unset BONSAI_T6_MEMORY_AUG
 unset BONSAI_LAB_MLX_ONLY
 unset BONSAI_LAB_MLX_WARMUP
 
+# ファイル名ラベル (file_label) は lab_v22_metric.py::collect_cycles() の fallback 規約
+# (`cycle_a_{i}.log` = OFF/baseline, `cycle_b_{i}.log` = ON/variant) に厳密対応させる。
+# 符号規約: delta = on(cycle_b) − off(cycle_a) のため、
+#   control (baseline)  → file_label="a" (cycle_a_${i}.log)
+#   candidate (比較対象) → file_label="b" (cycle_b_${i}.log)
+# role_desc は人間可読なラベル (ログ内容側にのみ残し、事後にどちらの cycle かを
+# ファイル名に依らず検証できるようにする)。
 run_cycle() {
-    local label="$1"
-    local temp="$2"
-    local rp="$3"
-    local logfile="$LOG_DIR/${label}.log"
+    local file_label="$1"
+    local role_desc="$2"
+    local temp="$3"
+    local rp="$4"
+    local i="$5"
+    local logfile="$LOG_DIR/cycle_${file_label}_${i}.log"
     local start
     start=$(date +%s)
 
@@ -96,7 +111,8 @@ run_cycle() {
     export BONSAI_LAB_REPEAT_PENALTY="$rp"
 
     {
-        echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${label} START ==="
+        echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${role_desc} (file_label=${file_label}, pair=${i}) START ==="
+        echo "    ROLE=${role_desc}"
         echo "    BONSAI_LAB_TEMP=${BONSAI_LAB_TEMP}"
         echo "    BONSAI_LAB_REPEAT_PENALTY=${BONSAI_LAB_REPEAT_PENALTY}"
         echo "    BONSAI_MODEL_ID=${BONSAI_MODEL_ID:-<unset>}"
@@ -109,7 +125,7 @@ run_cycle() {
     local end
     end=$(date +%s)
     local dur=$((end - start))
-    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${label} END (duration=${dur}s) ===" | tee -a "$logfile"
+    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] cycle ${role_desc} (file_label=${file_label}, pair=${i}) END (duration=${dur}s) ===" | tee -a "$logfile"
 }
 
 # N paired = 2N cycle (control/candidate 交互)、N は BONSAI_PAIRED_COUNT で override 可 (default 5)
@@ -117,9 +133,11 @@ PAIRED_COUNT="${BONSAI_PAIRED_COUNT:-5}"
 echo "CANDIDATE=${CANDIDATE} (temp=${CAND_TEMP}, repeat_penalty=${CAND_RP}) vs" \
     "CONTROL (temp=${CONTROL_TEMP}, repeat_penalty=${CONTROL_RP})"
 echo "PAIRED_COUNT=${PAIRED_COUNT} (env BONSAI_PAIRED_COUNT で override 可、default 5)"
+echo "log naming: cycle_a_{i}.log=control(baseline) / cycle_b_{i}.log=${CANDIDATE}" \
+    "(lab_v22_metric.py collect_cycles() 規約準拠、delta=on(b)-off(a))"
 for i in $(seq 1 "$PAIRED_COUNT"); do
-    run_cycle "cycle_control_${i}" "$CONTROL_TEMP" "$CONTROL_RP"
-    run_cycle "cycle_${CANDIDATE}_${i}" "$CAND_TEMP" "$CAND_RP"
+    run_cycle "a" "control" "$CONTROL_TEMP" "$CONTROL_RP" "$i"
+    run_cycle "b" "$CANDIDATE" "$CAND_TEMP" "$CAND_RP" "$i"
 done
 
 echo "=== ALL PAIRED CYCLES COMPLETE ==="
