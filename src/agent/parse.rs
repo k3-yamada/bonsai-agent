@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use regex::Regex;
 
+use crate::agent::xml_toolcall::{is_xml_toolcall_fallback_enabled, parse_xml_function_output};
 use crate::domain::conversation::{ParsedOutput, ToolCall};
 
 static RE_TAG_NORMALIZE: LazyLock<Regex> = LazyLock::new(|| {
@@ -86,12 +87,25 @@ pub fn sanitize_tool_call_json(raw: &str) -> String {
 /// LLMの生出力をパースする。
 /// `<think>` ブロックから思考テキスト、`<tool_call>` ブロックからツール呼び出し、
 /// 残りのテキストを最終回答として抽出する。
+///
+/// `BONSAI_XML_TOOLCALL_FALLBACK=1` の場合、入力に `<tool_call>` が存在せず
+/// `<function name=...>` (MiniCPM5 native XML tool-call形式) が存在するときのみ
+/// フォールバック抽出を行う（Issue #13）。`<tool_call>` が存在する場合は常に
+/// 既存のJSON抽出を優先する。
 pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
+    let normalized = normalize_special_tags(raw);
+
+    if is_xml_toolcall_fallback_enabled()
+        && !normalized.contains("<tool_call>")
+        && normalized.contains("<function")
+    {
+        return parse_xml_function_output(&normalized);
+    }
+
     let mut thinking = None;
     let mut tool_calls = Vec::new();
     let mut text_parts = Vec::new();
 
-    let normalized = normalize_special_tags(raw);
     let mut remaining = normalized.as_ref();
 
     while !remaining.is_empty() {
@@ -689,208 +703,5 @@ mod tests {
         assert!(prompt.contains("You are a model that can do function calling"));
         assert!(prompt.contains("declaration:shell"));
         assert!(prompt.contains("declaration:file_read"));
-    }
-
-    // --- Issue #13: MiniCPM5 native XML tool-call フォールバックパーサー ---
-    // `BONSAI_XML_TOOLCALL_FALLBACK` env-gated、production default = OFF。
-    // env mutation race を避けるため module-local Mutex で serialize する
-    // (memory/decay.rs DECAY_TEST_LOCK と同パターン)。
-    static XML_TOOLCALL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn reset_xml_toolcall_env() {
-        unsafe {
-            std::env::remove_var("BONSAI_XML_TOOLCALL_FALLBACK");
-        }
-    }
-
-    fn enable_xml_toolcall_fallback() {
-        unsafe {
-            std::env::set_var("BONSAI_XML_TOOLCALL_FALLBACK", "1");
-        }
-    }
-
-    #[test]
-    fn test_xml_function_call_disabled_by_default() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        let input = r#"<function name="get_weather"><param name="city">Tokyo</param></function>"#;
-        let result = parse_assistant_output(input).unwrap();
-        assert!(
-            result.tool_calls.is_empty(),
-            "env未設定時はXML fallbackが無効でtool_callが抽出されない"
-        );
-        assert!(
-            result.text.unwrap().contains("<function"),
-            "env未設定時は<function>ブロックがプレーンテキストとして残る"
-        );
-    }
-
-    #[test]
-    fn test_xml_function_call_simple() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<function name="get_weather"><param name="city">Tokyo</param></function>"#;
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].name, "get_weather");
-        assert_eq!(result.tool_calls[0].arguments["city"], "Tokyo");
-    }
-
-    #[test]
-    fn test_xml_function_call_multiple_params() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<function name="shell"><param name="command">ls -la</param><param name="timeout">30</param></function>"#;
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].name, "shell");
-        assert_eq!(result.tool_calls[0].arguments["command"], "ls -la");
-        assert_eq!(result.tool_calls[0].arguments["timeout"], "30");
-    }
-
-    #[test]
-    fn test_xml_function_call_cdata_param_value() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = "<function name=\"file_write\"><param name=\"content\"><![CDATA[line1\n<tag>not xml</tag>\nline2]]></param></function>";
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].name, "file_write");
-        assert_eq!(
-            result.tool_calls[0].arguments["content"],
-            "line1\n<tag>not xml</tag>\nline2"
-        );
-    }
-
-    #[test]
-    fn test_xml_function_call_multiple_via_tool_sep() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<function name="shell"><param name="command">ls</param></function><tool_sep><function name="file_read"><param name="path">README.md</param></function>"#;
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(result.tool_calls.len(), 2);
-        assert_eq!(result.tool_calls[0].name, "shell");
-        assert_eq!(result.tool_calls[0].arguments["command"], "ls");
-        assert_eq!(result.tool_calls[1].name, "file_read");
-        assert_eq!(result.tool_calls[1].arguments["path"], "README.md");
-    }
-
-    #[test]
-    fn test_xml_function_call_coexists_with_tool_call_json_prefers_tool_call() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<tool_call>{"name":"shell","arguments":{"command":"date"}}</tool_call><function name="ignored"><param name="x">y</param></function>"#;
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(
-            result.tool_calls.len(),
-            1,
-            "tool_callが存在する場合はXML fallbackを無視しJSON抽出を優先する"
-        );
-        assert_eq!(result.tool_calls[0].name, "shell");
-        let text = result.text.unwrap();
-        assert!(
-            text.contains(r#"<function name="ignored">"#),
-            "無視された<function>ブロックはプレーンテキストとして残る"
-        );
-    }
-
-    #[test]
-    fn test_xml_function_call_only_tool_call_present_normal_operation() {
-        // fallback有効時でも<tool_call>のみの入力は既存動作のまま変わらない
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<tool_call>{"name":"shell","arguments":{"command":"date"}}</tool_call>"#;
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].name, "shell");
-        assert_eq!(result.tool_calls[0].arguments["command"], "date");
-    }
-
-    #[test]
-    fn test_xml_function_call_missing_function_closing_tag_errors() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<function name="shell"><param name="command">ls</param>"#; // </function> 欠損
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_xml_function_call_missing_param_closing_tag_errors() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<function name="shell"><param name="command">ls</function>"#; // </param> 欠損
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_xml_function_call_missing_name_attribute_errors() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<function ><param name="command">ls</param></function>"#; // name属性欠損
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_xml_function_call_with_think_block() {
-        let _g = XML_TOOLCALL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_xml_toolcall_env();
-        enable_xml_toolcall_fallback();
-        let input = r#"<think>天気を調べよう</think><function name="get_weather"><param name="city">Osaka</param></function>"#;
-        let result = parse_assistant_output(input);
-        reset_xml_toolcall_env();
-        let result = result.unwrap();
-        assert_eq!(result.thinking, Some("天気を調べよう".to_string()));
-        assert_eq!(result.tool_calls.len(), 1);
-        assert_eq!(result.tool_calls[0].name, "get_weather");
-        assert_eq!(result.tool_calls[0].arguments["city"], "Osaka");
     }
 }
