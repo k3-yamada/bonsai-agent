@@ -99,7 +99,7 @@ config.toml でバックエンドを切替（port は使用するスクリプト
 backend = "mlx-lm"
 server_url = "http://localhost:8888"  # sidecar 使用時。cubist は 8000
 model_id = "minicpm5-2b"
-context_length = 32768
+context_length = 16384
 ```
 
 legacy の ternary-bonsai-8b（PrismML MLX fork 必要）に切替える場合は `model_id = "ternary-bonsai-8b"` / `context_length = 65536` にする。
@@ -298,7 +298,7 @@ LLM推論（MiniCPM5-2B via llama-server / mlx-lm）
 [model]
 server_url = "http://localhost:8080"
 model_id = "minicpm5-2b"
-context_length = 32768
+context_length = 16384  # M2 16GB向け保守的既定。32k以上は BONSAI_MODEL_CTX 等で opt-in
 # backend = "mlx-lm"  # MLXバックエンドを使う場合
 
 [model.inference]
@@ -447,6 +447,7 @@ cargo fmt -- --check           # フォーマット
 - Rust 1.80+ (edition 2024)
 - llama-server（`brew install llama.cpp`。legacy の Bonsai-8B を使う場合のみ [PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) 同梱バイナリが必要）
 - または mlx-lm + mlx-openai-server（`./scripts/setup_mlx_ternary.sh` でセットアップ）
+- RAM目安: MiniCPM5-2B Q4_K_M 重み 1.56GB + KV cache（q8_0、既定 context_length=16384）≈0.35GB
 
 ## ライセンス
 

@@ -773,6 +773,102 @@ impl ModelConfig {
     }
 }
 
+/// `resolve_model_id` に渡す 3 つの env override (L-2: 無名タプルではなく named struct にして
+/// 呼び出し側での意味の取り違えを防ぐ)。
+#[derive(Debug, Clone, Default)]
+pub struct ModelIdEnvOverrides {
+    /// `BONSAI_MODEL` env
+    pub bonsai_model: Option<String>,
+    /// `BONSAI_MODEL_ID` env
+    pub bonsai_model_id: Option<String>,
+    /// `UNSLOTH_MODEL` env
+    pub unsloth_model: Option<String>,
+}
+
+/// `resolve_model_id` に渡す 3 つの env override をまとめて読む (R-5)。
+///
+/// `main.rs` の行数を抑えるためのヘルパー (SIZE-001 800 行制約対応)。
+pub fn model_id_env_overrides() -> ModelIdEnvOverrides {
+    ModelIdEnvOverrides {
+        bonsai_model: std::env::var("BONSAI_MODEL").ok(),
+        bonsai_model_id: std::env::var("BONSAI_MODEL_ID").ok(),
+        unsloth_model: std::env::var("UNSLOTH_MODEL").ok(),
+    }
+}
+
+/// `apply_lab_overrides` が `BONSAI_LAB_MLX_ONLY=1` を検知して適用した内容
+/// (呼び出し元 `main.rs` が operator 向けログ出力で表示するための報告値。ログ出力自体は
+/// main.rs 側の責務に留める、LOG-001)。
+#[derive(Debug)]
+pub struct MlxOnlySwitch {
+    pub prev_backend: String,
+    pub prev_url: String,
+    pub prev_model_id: String,
+    pub new_model_id: String,
+    pub prev_fallback_entries: usize,
+}
+
+/// `apply_lab_overrides` の適用結果まとめ。各フィールドは該当 env が未設定/no-op なら `None`。
+#[derive(Debug, Default)]
+pub struct LabOverrideReport {
+    /// `BONSAI_LAB_TEMP` override 適用時の (prev, new) temperature。
+    pub temp_override: Option<(f64, f64)>,
+    /// `BONSAI_LAB_LONG_SSE=1` 適用時の prev `sse_chunk_timeout_secs`。
+    pub long_sse_applied: Option<u64>,
+    /// `BONSAI_LAB_MLX_ONLY=1` 適用時の切替内容。
+    pub mlx_only_applied: Option<MlxOnlySwitch>,
+}
+
+/// Lab (`--lab`) 起動時のみ有効な 3 種の env override
+/// (`BONSAI_LAB_TEMP` / `BONSAI_LAB_LONG_SSE` / `BONSAI_LAB_MLX_ONLY`) を一括適用する。
+///
+/// `main.rs` の行数を抑えるためのヘルパー (SIZE-001 800 行制約対応)。呼び出し元は `cli.lab`
+/// のときのみ呼び、戻り値の各 `Some` を operator 向けログ出力で表示する (このメソッド自体は
+/// print しない、LOG-001: config.rs はログ出力 whitelist 対象外)。
+///
+/// - 項目 247 Phase C: `BONSAI_LAB_TEMP` env で temperature override.
+///   `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
+///   env unset 時は no-op、completely backward compatible。
+/// - 項目 249 Phase 2 Green: Lab Runtime Stabilization (CCG synthesis 経由)
+///   F1: `BONSAI_LAB_LONG_SSE=1` → SSE chunk timeout 60 → 180 で MLX 初トークン遅延 catch
+/// - F2: `BONSAI_LAB_MLX_ONLY=1` → fallback_chain 無効化 + primary backend を MLX に切替
+///   (項目 249 Phase 4 Smoke G-RT で fallback クリアのみでは primary llama-server を試行する
+///   構造的バグを実機で検出、F2 の本来意図「MLX-only」を完全実現するため primary も切替)。
+///   L-6: doc は `domain::model_profile::mlx_only_model_id` 参照。
+pub fn apply_lab_overrides(app_config: &mut AppConfig) -> LabOverrideReport {
+    let mut report = LabOverrideReport::default();
+
+    if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
+        report.temp_override = Some((prev, app_config.model.inference.temperature));
+    }
+
+    if is_lab_long_sse_timeout() {
+        let prev_sse = app_config.model.sse_chunk_timeout_secs;
+        app_config.model.sse_chunk_timeout_secs = 180;
+        report.long_sse_applied = Some(prev_sse);
+    }
+
+    if is_lab_mlx_only() {
+        let prev_entries = app_config.fallback_chain.entries.len();
+        app_config.fallback_chain.entries.clear();
+        let prev_backend = format!("{:?}", app_config.model.backend);
+        let prev_url = app_config.model.server_url.clone();
+        app_config.model.backend = ServerBackend::MlxLm;
+        app_config.model.server_url = "http://127.0.0.1:8000".to_string();
+        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id);
+        let prev_model_id = std::mem::replace(&mut app_config.model.model_id, new_model_id.clone());
+        report.mlx_only_applied = Some(MlxOnlySwitch {
+            prev_backend,
+            prev_url,
+            prev_model_id,
+            new_model_id,
+            prev_fallback_entries: prev_entries,
+        });
+    }
+
+    report
+}
+
 impl Default for ModelConfig {
     fn default() -> Self {
         let api_key = std::env::var("UNSLOTH_API_KEY")

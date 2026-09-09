@@ -8,9 +8,9 @@ use bonsai_agent::agent::agent_loop::{
 };
 use bonsai_agent::agent::validate::PathGuard;
 use bonsai_agent::cancel::CancellationToken;
-use bonsai_agent::config::{AppConfig, ServerBackend};
+use bonsai_agent::config::{AppConfig, ServerBackend, model_id_env_overrides};
 use bonsai_agent::domain::llm::{LlmBackend, MockLlmBackend};
-use bonsai_agent::domain::model_profile::{mlx_only_model_id, resolve_model_id};
+use bonsai_agent::domain::model_profile::resolve_model_id;
 use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::inference::FallbackBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
@@ -58,10 +58,12 @@ fn main() -> Result<()> {
     if let Some(ref key) = cli.api_key {
         app_config.model.api_key = Some(key.clone());
     }
+    let env = model_id_env_overrides();
     app_config.model.model_id = resolve_model_id(
         cli.model.as_deref(),
-        std::env::var("BONSAI_MODEL").ok().as_deref(),
-        std::env::var("UNSLOTH_MODEL").ok().as_deref(),
+        env.bonsai_model.as_deref(),
+        env.bonsai_model_id.as_deref(),
+        env.unsloth_model.as_deref(),
         app_config.model.backend == ServerBackend::Unsloth,
         &app_config.model.model_id,
     );
@@ -70,43 +72,27 @@ fn main() -> Result<()> {
     if let Some(w) = app_config.model.apply_profile_defaults_checked() {
         eprintln!("[warn] {w}"); // HIGH-1 (doc: config.rs ModelConfig::apply_profile_defaults_checked)
     }
-    // 項目 247 Phase C: Lab 起動時のみ `BONSAI_LAB_TEMP` env で temperature override.
-    // `.claude/plan/lab-v22-metric-redesign.md` §3.5 — Lab cycle 内 sampling noise 排除。
-    // env unset 時は no-op、completely backward compatible。
+    // Lab (`--lab`) 起動時のみの env override 3 種の適用 + 表示。適用ロジックは
+    // config.rs `apply_lab_overrides` に集約 (項目 247/249、SIZE-001 800 行制約対応、
+    // doc は config.rs 側参照)。eprintln! はここ (main.rs、LOG-001 whitelist 対象) の責務。
     if cli.lab {
-        if let Some(prev) = app_config.model.inference.apply_lab_temp_override() {
+        let report = bonsai_agent::config::apply_lab_overrides(&mut app_config);
+        if let Some((prev, new)) = report.temp_override {
+            eprintln!("[lab] BONSAI_LAB_TEMP override: temperature {prev:.3} -> {new:.3}");
+        }
+        if let Some(prev_sse) = report.long_sse_applied {
             eprintln!(
-                "[lab] BONSAI_LAB_TEMP override: temperature {:.3} -> {:.3}",
-                prev, app_config.model.inference.temperature
+                "[lab] BONSAI_LAB_LONG_SSE=1 → sse_chunk_timeout_secs {prev_sse} -> 180 (MLX cold start catch)"
             );
         }
-
-        // 項目 249 Phase 2 Green: Lab Runtime Stabilization (CCG synthesis 経由)
-        // F1: BONSAI_LAB_LONG_SSE=1 → SSE chunk timeout 60 → 180 で MLX 初トークン遅延 catch
-        if bonsai_agent::config::is_lab_long_sse_timeout() {
-            let prev_sse = app_config.model.sse_chunk_timeout_secs;
-            app_config.model.sse_chunk_timeout_secs = 180;
-            eprintln!(
-                "[lab] BONSAI_LAB_LONG_SSE=1 → sse_chunk_timeout_secs {} -> 180 (MLX cold start catch)",
-                prev_sse
-            );
-        }
-        // F2: BONSAI_LAB_MLX_ONLY=1 → fallback_chain 無効化 + primary backend を MLX に切替
-        // (項目 249 Phase 4 Smoke G-RT で fallback クリアのみでは primary llama-server を試行する
-        // 構造的バグを実機で検出、F2 の本来意図「MLX-only」を完全実現するため primary も切替).
-        if bonsai_agent::config::is_lab_mlx_only() {
-            let prev_entries = app_config.fallback_chain.entries.len();
-            app_config.fallback_chain.entries.clear();
-            let prev_backend = format!("{:?}", app_config.model.backend);
-            let prev_url = app_config.model.server_url.clone();
-            app_config.model.backend = ServerBackend::MlxLm;
-            app_config.model.server_url = "http://127.0.0.1:8000".to_string();
-            // L-6: doc は domain::model_profile::mlx_only_model_id 参照
-            let new_model_id = mlx_only_model_id(&app_config.model.model_id);
-            let prev_model_id = std::mem::replace(&mut app_config.model.model_id, new_model_id);
+        if let Some(m) = report.mlx_only_applied {
             eprintln!(
                 "[lab] BONSAI_LAB_MLX_ONLY=1 → primary backend {}({}) → MlxLm(8000) + model_id {} → {} + fallback_chain.entries cleared ({} → 0)",
-                prev_backend, prev_url, prev_model_id, app_config.model.model_id, prev_entries
+                m.prev_backend,
+                m.prev_url,
+                m.prev_model_id,
+                m.new_model_id,
+                m.prev_fallback_entries
             );
         }
     }

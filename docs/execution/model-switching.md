@@ -12,7 +12,7 @@ Rust 側で `src/domain/model_profile.rs` の `ModelProfile` レジストリに�
 ```toml
 [model]
 model_id = "minicpm5-1b"
-context_length = 32768
+context_length = 16384
 ```
 
 `model_id` は既知プロファイルの `id` / `gguf_repo` / `mlx_repo` / gguf ファイル名
@@ -20,11 +20,19 @@ context_length = 32768
 `find_profile()` がそのプロファイルを解決する。未知の文字列を渡した場合は
 自由入力のモデルIDとしてそのまま扱われる（`find_profile()` は `None` を返す）。
 
-一時的な切替は `--model` CLI 引数、または `BONSAI_MODEL` 環境変数でも上書きできる。
+一時的な切替は `--model` CLI 引数、または `BONSAI_MODEL` / `BONSAI_MODEL_ID` 環境変数でも
+上書きできる（`BONSAI_MODEL_ID` は `BONSAI_MODEL` の alias。両方設定した場合は `BONSAI_MODEL` が勝つ）。
+shell 側の `scripts/model.env`（手順2）ではこの優先順位が逆で、`BONSAI_MODEL_ID` を優先する。
+`BONSAI_MODEL_ID` が未設定のときに `BONSAI_MODEL` をフォールバックとして採用するのは、値が
+既知 preset id と一致する場合に限られ、一致しない自由文字列（HF repo id 等）は無視して
+警告を出す。両方を設定していて値が食い違う場合も、Rust 側と shell 側で別モデルになる旨の
+警告が出る。
 優先順位は `resolve_model_id()`（`src/domain/model_profile.rs`）に実装されており、
-`--model` > `BONSAI_MODEL` > `UNSLOTH_MODEL`（後方互換）> config の `model_id` の順で解決する。
-Unsloth backend かつ `model_id` が既定 `minicpm5-2b` または旧既定 `bonsai-8b` のままの場合のみ、
-既存挙動を保つため `Aratako/Qwen3-8B-ERP-v0.1-GGUF` に置き換わる。
+`--model` > `BONSAI_MODEL` > `BONSAI_MODEL_ID` > `UNSLOTH_MODEL`（後方互換）>
+config の `model_id` の順で解決する。
+Unsloth backend かつ `model_id` が**旧既定** `bonsai-8b` のままの場合に限り、既存挙動を保つため
+`Aratako/Qwen3-8B-ERP-v0.1-GGUF` に置き換わる。現行既定の `minicpm5-2b` はこの特例の対象外であり、
+Unsloth backend でもそのまま `minicpm5-2b` が渡る。
 
 profile 既定値の適用は `AppConfig::load()` 内でキー単位に行われる。つまり `config.toml` で
 明示していないキー（`context_length` や `[model.inference]` の各値）だけが profile 値で埋まり、
@@ -55,11 +63,11 @@ env が既に設定されていれば preset より優先される）。
 
 | env | 既定値 (`minicpm5-2b`) | 意味 |
 |---|---|---|
-| `BONSAI_MODEL_ID` | `minicpm5-2b` | config.toml の `model_id` に対応する短縮名。`model.env` の preset 選択キー |
+| `BONSAI_MODEL_ID` | `${BONSAI_MODEL:-minicpm5-2b}` | config.toml の `model_id` に対応する短縮名。`model.env` の preset 選択キー。未設定なら Rust 側の `BONSAI_MODEL` を読み、それも無ければ `minicpm5-2b` |
 | `BONSAI_MODEL_GGUF_REPO` | `openbmb/MiniCPM5-2B-GGUF` | GGUF 配布元 Hugging Face repo |
 | `BONSAI_MODEL_GGUF_FILE` | `MiniCPM5-2B-Q4_K_M.gguf` | ダウンロードする GGUF ファイル名 |
 | `BONSAI_MODEL_MLX_REPO` | `openbmb/MiniCPM5-2B-MLX` | MLX 配布元 Hugging Face repo |
-| `BONSAI_MODEL_CTX` | `32768` | `start-server.sh` が `-c` に渡す context 長 |
+| `BONSAI_MODEL_CTX` | `16384` | `start-server.sh` が `-c` に渡す context 長。M2 16GB 向け保守的既定。32k 以上に増やす場合はこの env で opt-in する |
 | `BONSAI_MODEL_DIR` | `$HOME/.cache/bonsai-agent/models` | GGUF ファイルの保存先ディレクトリ |
 | `BONSAI_MODEL_TEMP` | `0.6` | `start-server.sh` が `--temp` に渡す推論温度 |
 | `BONSAI_MODEL_TOP_P` | `0.95` | `start-server.sh` が `--top-p` に渡す値 |
@@ -103,8 +111,16 @@ legacy モデル (`bonsai-8b` / `ternary-bonsai-8b`) への切替は `BONSAI_MOD
 
 一時的な上書きではなく新モデルを常設の選択肢として加えるなら、
 `src/domain/model_profile.rs` の `PROFILES` 配列に `ModelProfile` を1件追加し、
+`scripts/model.env` の `case` 節にも同じ内容の preset を追加し、
 `config.toml.example` にも切替ブロックの例を足す。`id` の重複はテスト
 （`test_known_profiles_no_duplicate_ids`）で検出される。
+
+`PROFILES` と `scripts/model.env` の食い違い（例: 片方だけ値を更新し忘れる）は
+`tests/model_env_sync.rs` の drift テストが検出する。各 profile について
+`gguf_repo` / `gguf_file` / `mlx_repo` / `context_length` / 推論パラメータを
+`scripts/model.env` を実際に source した結果と突き合わせるほか、`model.env` の
+`case` 節に定義されていて `PROFILES` に無い preset（逆方向の drift）も検出する。
+新しい profile を追加したら、両方を同時に更新すること。
 
 ## 関連する設計判断
 
@@ -125,6 +141,9 @@ legacy モデル (`bonsai-8b` / `ternary-bonsai-8b`) への切替は `BONSAI_MOD
 | chat template | ChatML + `<think>`、`enable_thinking` kwarg。native tool call は `<function name=..><param ..>` の XML 形式だが、bonsai は system prompt 経由の `<tool_call>` JSON 方式を使うため当面関係しない |
 | license | Apache-2.0 |
 
-Mac M2 16GB 向けの既定値は GGUF = Q4_K_M、context_length = 32768（KV q8_0 で追加メモリ ~0.7GB）、
+Mac M2 16GB 向けの既定値は GGUF = Q4_K_M（重み 1.56 GB）、context_length = 16384、
 推論は temperature 0.6 / top_p 0.95 / top_k 20 / min_p 0.05 / max_tokens 2048 / repeat_penalty 1.05 とした。
+KV cache は q8_0 量子化で ≈21.5 KB/token（42 layer × 2 KV head × 128 dim × (K+V) × 1 byte の概算）となり、
+16k トークンで ≈0.35 GB、32k トークンで ≈0.7 GB を追加で消費する。32k 以上へ増やす場合は
+`context_length`（config.toml）または `BONSAI_MODEL_CTX`（scripts）で明示的に opt-in する。
 **これらは初期値であり、確定した推奨値ではない。** Lab paired evidence（ADR-003）による検証は後日行う。

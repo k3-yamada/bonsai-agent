@@ -12,7 +12,9 @@
 [model]
 server_url = "http://localhost:8080"
 model_id = "minicpm5-2b"
-context_length = 32768
+# M2 16GB 向け保守的既定。Q4_K_M 重み 1.56 GB + KV q8_0 ≈ 21.5 KB/token
+# (16k ≈ 0.35 GB、32k ≈ 0.7 GB)。32k 以上に増やす場合はここか BONSAI_MODEL_CTX で opt-in する。
+context_length = 16384
 # gguf_path = "~/.cache/bonsai-agent/models/MiniCPM5-2B-Q4_K_M.gguf"  # llama-server起動時のみ使用
 
 [model.inference]
@@ -25,10 +27,10 @@ repeat_penalty = 1.05
 
 # --- モデル切替の例 (いずれか1つを使う場合、上の [model] / [model.inference] を置き換える) ---
 #
-# minicpm5-1b (MiniCPM5-2B より軽量、gguf file 名は要確認):
+# minicpm5-1b (MiniCPM5-2B より軽量、HF 確認済 2026-09-09、Q4_K_M 688MB):
 #   [model]
 #   model_id = "minicpm5-1b"
-#   context_length = 32768
+#   context_length = 16384
 #
 # ternary-bonsai-8b (legacy、mlx-lm backend、PrismML MLX fork が必要):
 #   [model]

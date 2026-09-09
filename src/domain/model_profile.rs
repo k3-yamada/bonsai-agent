@@ -19,6 +19,10 @@ pub struct ModelProfile {
     /// model card 記載の max_position_embeddings。
     pub native_context: u32,
     /// 推奨 context_length (config 既定値)。
+    ///
+    /// Mac M2 16GB 想定の保守的既定。KV q8_0 で ≈21.5 KB/token
+    /// (16k ≈ 0.35 GB)。32k 以上は config `context_length` /
+    /// `BONSAI_MODEL_CTX` で opt-in。
     pub default_context: u32,
     /// 推論パラメータの推奨初期値。
     pub inference: InferenceDefaults,
@@ -49,7 +53,7 @@ const PROFILES: &[ModelProfile] = &[
         gguf_file: "MiniCPM5-2B-Q4_K_M.gguf",
         mlx_repo: "openbmb/MiniCPM5-2B-MLX",
         native_context: 131_072,
-        default_context: 32_768,
+        default_context: 16_384,
         inference: InferenceDefaults {
             temperature: 0.6,
             top_p: 0.95,
@@ -67,7 +71,7 @@ const PROFILES: &[ModelProfile] = &[
         gguf_file: "MiniCPM5-1B-Q4_K_M.gguf",
         mlx_repo: "openbmb/MiniCPM5-1B-MLX",
         native_context: 131_072,
-        default_context: 32_768,
+        default_context: 16_384,
         inference: InferenceDefaults {
             temperature: 0.6,
             top_p: 0.95,
@@ -76,7 +80,7 @@ const PROFILES: &[ModelProfile] = &[
             max_tokens: 2048,
             repeat_penalty: 1.05,
         },
-        notes: "file 名は HF で要確認 (推定)",
+        notes: "HF 確認済 2026-09-09: MiniCPM5-1B-Q4_K_M.gguf (688MB)。推奨値は 2B と同じ初期値で未検証",
     },
     ModelProfile {
         id: "bonsai-8b",
@@ -150,16 +154,18 @@ pub fn find_profile(model_id: &str) -> Option<&'static ModelProfile> {
 }
 
 /// model_id 解決順序 (main.rs から純粋関数として抽出、テスト可能に):
-/// 1. `--model` CLI  2. `BONSAI_MODEL` env  3. `UNSLOTH_MODEL` env (後方互換)
-/// 4. backend == Unsloth かつ config の model_id が `DEFAULT_MODEL_ID`（現行既定 "minicpm5-2b"）
-///    または `"bonsai-8b"`（旧既定、後方互換）のままなら `"Aratako/Qwen3-8B-ERP-v0.1-GGUF"`
-///    (既存挙動維持)
-/// 5. config の model_id
+/// 1. `--model` CLI  2. `BONSAI_MODEL` env  3. `BONSAI_MODEL_ID` env (alias、R-5)
+/// 4. `UNSLOTH_MODEL` env (後方互換)
+/// 5. backend == Unsloth かつ config の model_id が旧既定 `"bonsai-8b"` のままなら
+///    `"Aratako/Qwen3-8B-ERP-v0.1-GGUF"` (旧 config.toml 向け後方互換)。現行既定
+///    minicpm5-2b (`DEFAULT_MODEL_ID`) はそのまま Unsloth に渡す。
+/// 6. config の model_id
 ///
 /// CLI / env は空文字列・空白のみを「未指定」として扱う (trim 後 empty は次の優先順位に fall through)。
 pub fn resolve_model_id(
     cli_model: Option<&str>,
     env_bonsai_model: Option<&str>,
+    env_bonsai_model_id: Option<&str>,
     env_unsloth_model: Option<&str>,
     backend_is_unsloth: bool,
     config_model_id: &str,
@@ -170,11 +176,13 @@ pub fn resolve_model_id(
     if let Some(m) = non_blank(env_bonsai_model) {
         return m.to_string();
     }
+    if let Some(m) = non_blank(env_bonsai_model_id) {
+        return m.to_string();
+    }
     if let Some(m) = non_blank(env_unsloth_model) {
         return m.to_string();
     }
-    if backend_is_unsloth && (config_model_id == DEFAULT_MODEL_ID || config_model_id == "bonsai-8b")
-    {
+    if backend_is_unsloth && config_model_id == "bonsai-8b" {
         return "Aratako/Qwen3-8B-ERP-v0.1-GGUF".to_string();
     }
     config_model_id.to_string()
@@ -271,6 +279,7 @@ mod tests {
         let resolved = resolve_model_id(
             Some("cli-model"),
             Some("env-bonsai-model"),
+            Some("env-bonsai-model-id"),
             Some("env-unsloth-model"),
             true,
             DEFAULT_MODEL_ID,
@@ -283,6 +292,7 @@ mod tests {
         let resolved = resolve_model_id(
             None,
             Some("env-bonsai-model"),
+            None,
             Some("env-unsloth-model"),
             false,
             DEFAULT_MODEL_ID,
@@ -290,9 +300,38 @@ mod tests {
         assert_eq!(resolved, "env-bonsai-model");
     }
 
+    // R-5: `BONSAI_MODEL` が `BONSAI_MODEL_ID` に勝つ (両方設定時)。
+    #[test]
+    fn test_resolve_model_id_bonsai_env_wins_over_bonsai_model_id_env() {
+        let resolved = resolve_model_id(
+            None,
+            Some("env-bonsai-model"),
+            Some("env-bonsai-model-id"),
+            Some("env-unsloth-model"),
+            false,
+            DEFAULT_MODEL_ID,
+        );
+        assert_eq!(resolved, "env-bonsai-model");
+    }
+
+    // R-5: `BONSAI_MODEL` 未設定なら `BONSAI_MODEL_ID` (alias) が効く。
+    #[test]
+    fn test_resolve_model_id_bonsai_model_id_env_used_when_bonsai_model_unset() {
+        let resolved = resolve_model_id(
+            None,
+            None,
+            Some("env-bonsai-model-id"),
+            Some("env-unsloth-model"),
+            false,
+            DEFAULT_MODEL_ID,
+        );
+        assert_eq!(resolved, "env-bonsai-model-id");
+    }
+
     #[test]
     fn test_resolve_model_id_unsloth_env_wins_over_default_substitution() {
         let resolved = resolve_model_id(
+            None,
             None,
             None,
             Some("env-unsloth-model"),
@@ -302,22 +341,24 @@ mod tests {
         assert_eq!(resolved, "env-unsloth-model");
     }
 
+    // R-1: Unsloth backend でも config の model_id が現行既定 (`DEFAULT_MODEL_ID` =
+    // minicpm5-2b) のままなら置換せずそのまま保持する (旧 "bonsai-8b" 特例のみ対象)。
     #[test]
-    fn test_resolve_model_id_unsloth_backend_default_substitution() {
-        let resolved = resolve_model_id(None, None, None, true, DEFAULT_MODEL_ID);
-        assert_eq!(resolved, "Aratako/Qwen3-8B-ERP-v0.1-GGUF");
+    fn test_resolve_model_id_unsloth_backend_default_kept() {
+        let resolved = resolve_model_id(None, None, None, None, true, DEFAULT_MODEL_ID);
+        assert_eq!(resolved, DEFAULT_MODEL_ID);
     }
 
     #[test]
     fn test_resolve_model_id_falls_back_to_config_model_id() {
-        let resolved = resolve_model_id(None, None, None, false, "custom-model-id");
+        let resolved = resolve_model_id(None, None, None, None, false, "custom-model-id");
         assert_eq!(resolved, "custom-model-id");
     }
 
     #[test]
     fn test_resolve_model_id_unsloth_backend_non_default_config_kept() {
-        // backend==Unsloth でも config の model_id が DEFAULT_MODEL_ID でなければ置換しない
-        let resolved = resolve_model_id(None, None, None, true, "custom-model-id");
+        // backend==Unsloth でも config の model_id が "bonsai-8b" でなければ置換しない
+        let resolved = resolve_model_id(None, None, None, None, true, "custom-model-id");
         assert_eq!(resolved, "custom-model-id");
     }
 
@@ -325,7 +366,7 @@ mod tests {
     // でも Unsloth backend 切替時の後方互換代替が効くこと。
     #[test]
     fn test_resolve_model_id_legacy_bonsai_8b_unsloth_substitution() {
-        let resolved = resolve_model_id(None, None, None, true, "bonsai-8b");
+        let resolved = resolve_model_id(None, None, None, None, true, "bonsai-8b");
         assert_eq!(resolved, "Aratako/Qwen3-8B-ERP-v0.1-GGUF");
     }
 
@@ -335,6 +376,7 @@ mod tests {
         let resolved = resolve_model_id(
             Some(""),
             Some("   "),
+            Some(""),
             Some("env-unsloth-model"),
             false,
             DEFAULT_MODEL_ID,
@@ -344,7 +386,14 @@ mod tests {
 
     #[test]
     fn test_resolve_model_id_all_blank_falls_back_to_config() {
-        let resolved = resolve_model_id(Some("  "), Some(""), Some(""), false, "custom-model-id");
+        let resolved = resolve_model_id(
+            Some("  "),
+            Some(""),
+            Some(""),
+            Some(""),
+            false,
+            "custom-model-id",
+        );
         assert_eq!(resolved, "custom-model-id");
     }
 

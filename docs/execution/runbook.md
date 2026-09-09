@@ -134,22 +134,24 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_MLX_AUTO_CLAMP` | OFF | bool | B-3: 起動時 MLX `/props` の n_ctx で context_length を `min(configured, n_ctx)` にクランプ。server 未応答時 no-op。LocalAI fit_params 思想 |
 | `BONSAI_EMBED_URL` | None | url | `HttpEmbedder` 有効化。設定時 `create_embedder()` が `{url}/v1/embeddings` (OpenAI 互換) 経由でローカル埋め込みを取得 (MLX sidecar 等)。**`embeddings` feature 非依存** = ort バイナリDLなしのオフライン/Linux ビルドでも実埋め込み。例: `http://localhost:8888`。未設定で従来挙動 (fastembed→SimpleEmbedder) |
 | `BONSAI_EMBED_MODEL` | `bonsai-embed` | str | `HttpEmbedder` が送る model 名。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持) |
-| `BONSAI_MODEL` | None | str | `resolve_model_id()` 経由の model_id override。優先順位は `--model` CLI > `BONSAI_MODEL` > `UNSLOTH_MODEL` (後方互換) > config の `model_id` (ADR-013) |
+| `BONSAI_MODEL` | None | str | `resolve_model_id()` 経由の model_id override。優先順位は `--model` CLI > `BONSAI_MODEL` > `BONSAI_MODEL_ID` (fallback alias (BONSAI_MODEL 優先)) > `UNSLOTH_MODEL` (後方互換) > config の `model_id` (ADR-013)。Unsloth backend への旧既定 `bonsai-8b` 置換特例は現行既定 `minicpm5-2b` には適用されない |
 
 ### モデル選択 (scripts、`scripts/model.env`)
 
 Rust 側の env (`BONSAI_MODEL`) とは別に、shell スクリプト (`start-server.sh` 等) はこちらを読む。
 `BONSAI_MODEL_ID` を変えると、`scripts/model.env` の `case` 節が repo/file/context/推論パラメータを
-まとめて preset に切り替える（Rust 側 `ModelProfile` レジストリと 1:1 対応）。個々の値は
-env で個別上書きもできる。詳細は [docs/execution/model-switching.md](model-switching.md)。
+まとめて preset に切り替える（Rust 側 `ModelProfile` レジストリと 1:1 対応。drift は
+`tests/model_env_sync.rs` が検出する）。`BONSAI_MODEL_ID` 未設定時は `BONSAI_MODEL` (Rust 側 env) を
+フォールバック既定値として読む。個々の値は env で個別上書きもできる。
+詳細は [docs/execution/model-switching.md](model-switching.md)。
 
 | Env | Default (`minicpm5-2b`) | 効果 |
 |---|---|---|
-| `BONSAI_MODEL_ID` | `minicpm5-2b` | config.toml `model_id` に対応する短縮名。`model.env` の preset 選択キー |
+| `BONSAI_MODEL_ID` | `${BONSAI_MODEL:-minicpm5-2b}` | config.toml `model_id` に対応する短縮名。`model.env` の preset 選択キー |
 | `BONSAI_MODEL_GGUF_REPO` | `openbmb/MiniCPM5-2B-GGUF` | GGUF 配布元 Hugging Face repo |
 | `BONSAI_MODEL_GGUF_FILE` | `MiniCPM5-2B-Q4_K_M.gguf` | ダウンロードする GGUF ファイル名 |
 | `BONSAI_MODEL_MLX_REPO` | `openbmb/MiniCPM5-2B-MLX` | MLX 配布元 Hugging Face repo |
-| `BONSAI_MODEL_CTX` | `32768` | `start-server.sh` が `-c` に渡す context 長 |
+| `BONSAI_MODEL_CTX` | `16384` | `start-server.sh` が `-c` に渡す context 長。M2 16GB 向け保守的既定。32k 以上は env で opt-in |
 | `BONSAI_MODEL_DIR` | `$HOME/.cache/bonsai-agent/models` | GGUF ファイルの保存先ディレクトリ |
 | `BONSAI_MODEL_TEMP` | `0.6` | `start-server.sh` が `--temp` に渡す推論温度 |
 | `BONSAI_MODEL_TOP_P` | `0.95` | `start-server.sh` が `--top-p` に渡す値 |

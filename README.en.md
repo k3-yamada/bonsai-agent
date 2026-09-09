@@ -99,7 +99,7 @@ Switch the backend in `config.toml` (match the port to the script you use):
 backend = "mlx-lm"
 server_url = "http://localhost:8888"  # when using the sidecar; cubist is 8000
 model_id = "minicpm5-2b"
-context_length = 32768
+context_length = 16384
 ```
 
 To switch to the legacy ternary-bonsai-8b (requires the PrismML MLX fork), use `model_id = "ternary-bonsai-8b"` / `context_length = 65536`.
@@ -252,7 +252,7 @@ Generate a template with `cargo run -- --init`.
 [model]
 server_url = "http://localhost:8080"
 model_id = "minicpm5-2b"
-context_length = 32768
+context_length = 16384  # conservative default for M2 16GB; opt in to 32k+ via BONSAI_MODEL_CTX etc.
 # backend = "mlx-lm"  # when using the MLX backend
 
 [model.inference]
@@ -401,6 +401,7 @@ For development-flow details (Lab startup, env list, smoke procedure) see [docs/
 - Rust 1.80+ (edition 2024)
 - llama-server (`brew install llama.cpp`; the legacy Bonsai-8B needs the bundled binary from [PrismML Bonsai-demo](https://github.com/PrismML-Eng/Bonsai-demo) instead)
 - or mlx-lm + mlx-openai-server (set up via `./scripts/setup_mlx_ternary.sh`)
+- RAM estimate: MiniCPM5-2B Q4_K_M weights 1.56GB + KV cache (q8_0, default context_length=16384) ≈0.35GB
 
 ## License
 

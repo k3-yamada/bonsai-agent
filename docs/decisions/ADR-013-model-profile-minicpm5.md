@@ -30,9 +30,17 @@ shell 側 (`scripts/model.env`) の2箇所に集約する。
   制御する。`ModelProfile` に `enable_thinking` フィールドは持たせない。
 - 登録プロファイルは4件: `minicpm5-2b`（既定）、`minicpm5-1b`、`bonsai-8b`（legacy）、
   `ternary-bonsai-8b`（legacy）。legacy 2件は削除せず、後方互換の切替先として残す。
-- 既定モデルを MiniCPM5-2B に変更する。GGUF は Q4_K_M、context_length は 32768、
+- 既定モデルを MiniCPM5-2B に変更する。GGUF は Q4_K_M、context_length は 16384、
   推論パラメータは temperature 0.6 / top_p 0.95 / top_k 20 / min_p 0.05 / max_tokens 2048 /
-  repeat_penalty 1.05 を初期値とする。
+  repeat_penalty 1.05 を初期値とする。context_length は Mac M2 16GB 向けの保守的既定であり、
+  32k 以上へ増やす場合は config.toml の `context_length` または `BONSAI_MODEL_CTX` env で
+  明示的に opt-in する（KV cache は q8_0 量子化で ≈21.5 KB/token、16k ≈0.35GB、32k ≈0.7GB）。
+- Rust 側 `resolve_model_id()` は `BONSAI_MODEL_ID` を `BONSAI_MODEL` の alias として追加で読む
+  （優先順位: `--model` > `BONSAI_MODEL` > `BONSAI_MODEL_ID` > `UNSLOTH_MODEL` > config）。
+  Unsloth backend への強制置換特例は旧既定 `bonsai-8b` のみに限定し、現行既定 `minicpm5-2b` には
+  適用しない（`minicpm5-2b` はそのまま Unsloth backend に渡る）。
+- `tests/model_env_sync.rs` に Rust 側 `PROFILES` と `scripts/model.env` の drift テストを追加し、
+  両者の値が食い違ったまま放置されることを CI で検出する。
 - chat template は ADR-011 の方針（backend tokenizer が source of truth）をそのまま維持する。
   MiniCPM5-2B の jinja テンプレートは ChatML + `<think>` + `enable_thinking` kwarg に対応しており、
   既存の `--chat-template-kwargs '{"enable_thinking": false}'` と `src/agent/parse.rs` の
