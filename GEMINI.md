@@ -60,13 +60,44 @@ domain < db < observability < safety < memory < knowledge < runtime < tools < ag
    Lab や Smoke（`scripts/lab_v22_aa_test.sh` 等）の稼働中に release ビルドを行うと、`target/release/bonsai` が上書きされ実験の十数時間に及ぶ一貫性が破壊されます。ユニットテスト・検証には `cargo test --lib` を使用してください。
 3. **完全同期ランタイムの維持**:
    コアロジックやハーネスに安易に `tokio::spawn` などの非同期プリミティブを持ち込まず、既存の同期設計・`CancellationToken`・スレッドモデルを尊重してください。
+4. **【恒久原則】オーケストレーターとしての振る舞いとサブエージェント委任**:
+   Antigravity は原則として**恒久的にオーケストレーター（Planner / Dispatcher / Synthesizer）として振る舞い、自ら直接の実装や自己承認を抱え込まず、専門サブエージェントにタスクを委譲**してください。
+   - アーキテクチャ設計・DEP-001 検証: `bonsai_architect`
+   - Rust 2024 実装（完全同期・Clippy 巻き戻し禁止）: `bonsai_implementer`
+   - TDD・回帰ラチェット・テスト保護: `bonsai_tdd_verifier`
+   - ADR-003 Paired Evidence 統計検証・Lab ログ監査: `bonsai_lab_evaluator`
+   - docs/VALUES.md (V1〜V7) 監査・Goodhart's Law 形骸化検知: `bonsai_values_auditor`
+   - **実装者（builder）と検証者（verifier）を分離し、自己LGTMを固く禁止**します。
 
 ---
 
-## 5. コマンドリファレンス
+## 5. ドキュメント同期規約と SSOT 統治
 
-- ユニットテスト: `cargo test --lib`
-- 構造・レイヤー・ログ検証: `cargo test --test structural`
-- リント: `cargo clippy -- -D warnings`
+コードや方針を変更した際は、「後で更新する」を排し、関連ドキュメントを同一コミットで同期・更新します。
+
+### ① 変更種別と同期先 SSOT
+- **アーキテクチャ・レイヤー変更**: `docs/decisions/ADR-XXX.md` 起票 ＋ `docs/architecture/` ＋ `docs/INDEX.md` ＋ 本書 (`GEMINI.md`) のレイヤールール。
+- **API・Port Trait・Tool 追加**: `docs/architecture/overview.md` ＋ `CHANGELOG.md`。
+- **環境変数・実行手順**: `docs/execution/runbook.md` のみ更新（本書や `CLAUDE.md` に表を重複保持させない）。
+- **Lab 実験採否 (ACCEPT/REJECT)**: `docs/quality/lab-history.md` ＋ `CLAUDE.md` (直近5項目 FIFO) ＋ `AGENTS.md` (変異一覧)。
+- **バグ修正・小改善**: `CHANGELOG.md` (`## Unreleased`) に追記。
+
+### ② ポインタ参照原則（ドリフト防止）
+`GEMINI.md` や `AGENTS.md` はエージェント用ガイドレールであり、ナレッジの正本（SSOT）ではありません。詳細な仕様や全履歴を直書きせず、「数行の要約 ＋ `[docs/...]` へのリンク」に留めることで、情報の乖離とコンテキスト浪費を防ぎます。
+
+### ③ サブエージェントのドキュメント更新分担
+- `bonsai_architect`: ADR 起票、アーキテクチャ文書、`docs/INDEX.md`、レイヤールール同期。
+- `bonsai_implementer`: インライン doc、環境変数の runbook 下書き。
+- `bonsai_tdd_verifier`: ドキュメント記載コマンドの実行確認・構造検証 (`cargo test --test structural`)。
+- `bonsai_lab_evaluator`: 実機実験ログ、`lab-history.md`、変異採否の反映。
+- `shipper`: `CHANGELOG.md` 記録およびコミット前の全ドキュメント同期確認。
+
+---
+
+## 6. コマンドリファレンス
+
+- ユニットテスト: `cargo test --lib --no-default-features --features cli,tree-sitter`
+- 構造・レイヤー・ログ検証: `cargo test --test structural --no-default-features --features cli,tree-sitter`
+- リント: `cargo clippy --no-default-features --features cli,tree-sitter -- -D warnings`
 - フォーマット: `cargo fmt -- --check`
-- ケイパビリティ一覧: `cargo run -- --manifest`
+- ケイパビリティ一覧: `cargo run --no-default-features --features cli,tree-sitter -- --manifest`
