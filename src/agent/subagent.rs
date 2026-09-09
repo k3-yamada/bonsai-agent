@@ -46,6 +46,65 @@ impl DelegationResult {
     }
 }
 
+/// サブエージェントの専門化ロール
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubAgentRole {
+    /// 汎用サブエージェント（従来動作）
+    #[default]
+    General,
+    /// 探索・調査特化（読み取りツール優先、コンテキスト消費最小化）
+    Explorer,
+    /// 実装・編集特化（変更・ファイル生成）
+    Builder,
+    /// 品質・検証特化（テスト・リント・構文検査）
+    Verifier,
+}
+
+impl SubAgentRole {
+    /// ロールに応じたデフォルトの許可ツール一覧
+    ///
+    /// ツール名は `src/tools/*.rs` の `TypedTool::NAME`（本番 `setup_tools()` で
+    /// 実際に登録される名前）とのみ一致させること。H-1: 過去に Antigravity/Windsurf
+    /// 系の語彙（`find_by_name` 等）が誤って混入したため、回帰防止テスト
+    /// `test_default_tools_only_reference_registered_tools` で検証している。
+    pub fn default_tools(&self) -> Option<Vec<String>> {
+        match self {
+            SubAgentRole::General => None,
+            SubAgentRole::Explorer => {
+                Some(vec!["file_read".into(), "repo_map".into(), "recall".into()])
+            }
+            SubAgentRole::Builder => Some(vec![
+                "file_read".into(),
+                "file_write".into(),
+                "multi_edit".into(),
+            ]),
+            SubAgentRole::Verifier => Some(vec!["file_read".into(), "shell".into()]),
+        }
+    }
+
+    /// ロールに応じたシステムプロンプトの指示文
+    pub fn prompt_instruction(&self) -> &'static str {
+        match self {
+            SubAgentRole::General => {
+                "あなたはサブエージェントです。以下のタスクを完了してください。\n\
+                 簡潔に作業し、完了したら結果を報告してください。"
+            }
+            SubAgentRole::Explorer => {
+                "あなたは探索特化サブエージェントです。ファイルやコードの調査に専念してください。\n\
+                 コードの修正は行わず、発見した情報と結論を3行以内で簡潔に報告してください。"
+            }
+            SubAgentRole::Builder => {
+                "あなたは実装特化サブエージェントです。最小限の差分で的確に変更を行ってください。\n\
+                 変更したファイルと理由を明確に報告してください。"
+            }
+            SubAgentRole::Verifier => {
+                "あなたは検証特化サブエージェントです。テストや構文・リントの確認を行ってください。\n\
+                 合否判定とエラー原因をピンポイントで報告してください。"
+            }
+        }
+    }
+}
+
 /// サブエージェント設定
 #[derive(Debug, Clone)]
 pub struct SubAgentConfig {
@@ -59,6 +118,8 @@ pub struct SubAgentConfig {
     /// `None` なら legacy compaction 動作。サブエージェントが同じ backend を使う場合の
     /// silent fallback (max_context_tokens=14000) を防ぐため親から伝播必須。
     pub n_ctx_budget: Option<u32>,
+    /// サブエージェントの専門化ロール
+    pub role: SubAgentRole,
 }
 
 impl SubAgentConfig {
@@ -69,12 +130,22 @@ impl SubAgentConfig {
             max_iterations: (parent_config.max_iterations / 2).max(3),
             allowed_tools: None,
             n_ctx_budget: parent_config.n_ctx_budget,
+            role: SubAgentRole::General,
         }
     }
 
     /// ツール制限付き設定
     pub fn with_tools(mut self, tools: Vec<String>) -> Self {
         self.allowed_tools = Some(tools);
+        self
+    }
+
+    /// ロール指定設定（ロールに応じたデフォルトツールも自動適用）
+    pub fn with_role(mut self, role: SubAgentRole) -> Self {
+        self.role = role;
+        if self.allowed_tools.is_none() {
+            self.allowed_tools = role.default_tools();
+        }
         self
     }
 
@@ -323,14 +394,11 @@ impl<'a> SubAgentExecutor<'a> {
 
     /// サブエージェント用のAgentConfigを構築
     fn build_sub_config(&self, goal: &str) -> AgentConfig {
+        let instruction = self.sub_config.role.prompt_instruction();
         AgentConfig {
             max_iterations: self.sub_config.max_iterations,
             auto_checkpoint: false,
-            system_prompt: format!(
-                "あなたはサブエージェントです。以下のタスクを完了してください。\n\
-                 簡潔に作業し、完了したら結果を報告してください。\n\n\
-                 タスク: {goal}"
-            ),
+            system_prompt: format!("{instruction}\n\nタスク: {goal}"),
             // 項目 187 F2: 親から引き継いだ n_ctx_budget をサブエージェント実行にも適用
             n_ctx_budget: self.sub_config.n_ctx_budget,
             ..Default::default()
@@ -507,6 +575,34 @@ mod tests {
     use crate::cancel::CancellationToken;
     use crate::domain::llm::MockLlmBackend;
     use crate::tools::ToolRegistry;
+    use crate::tools::arxiv::ArxivTool;
+    use crate::tools::file::{FileReadTool, FileWriteTool, MultiEditTool};
+    use crate::tools::git::GitTool;
+    use crate::tools::memory::{RecallTool, RememberTool};
+    use crate::tools::repomap::RepoMapTool;
+    use crate::tools::shell::ShellTool;
+    use crate::tools::typed::TypedTool;
+    use crate::tools::web::{WebFetchTool, WebSearchTool};
+
+    /// 本番 `setup_tools`（`src/main.rs`）で実際にレジストリへ登録される
+    /// ツール名の一覧。H-1 回帰防止: `SubAgentRole::default_tools()` が
+    /// 実在しないツール名（Antigravity/Windsurf系語彙の混入等）を返さないことを
+    /// 検証するための一次情報として使う。
+    fn known_tool_names() -> Vec<&'static str> {
+        vec![
+            <ShellTool as TypedTool>::NAME,
+            <FileReadTool as TypedTool>::NAME,
+            <FileWriteTool as TypedTool>::NAME,
+            <MultiEditTool as TypedTool>::NAME,
+            <GitTool as TypedTool>::NAME,
+            <WebSearchTool as TypedTool>::NAME,
+            <WebFetchTool as TypedTool>::NAME,
+            <ArxivTool as TypedTool>::NAME,
+            <RepoMapTool as TypedTool>::NAME,
+            <RememberTool as TypedTool>::NAME,
+            <RecallTool as TypedTool>::NAME,
+        ]
+    }
 
     fn test_store() -> MemoryStore {
         MemoryStore::in_memory().unwrap()
@@ -613,6 +709,7 @@ mod tests {
             max_iterations: 5,
             allowed_tools: None,
             n_ctx_budget: None,
+            role: SubAgentRole::General,
         };
 
         let executor = SubAgentExecutor::new(
@@ -938,5 +1035,116 @@ mod tests {
 
         let subs = mgr.subtasks(&parent_id).unwrap();
         assert_eq!(subs.len(), 2);
+    }
+
+    /// H-1 回帰防止テスト: 全ロールの `default_tools()` が返す名前は、
+    /// 本番 `setup_tools()` で実際に登録されるツール名の集合の部分集合であること。
+    /// Antigravity/Windsurf系の実在しないツール名（`find_by_name` 等）の
+    /// 再混入を検出する。
+    #[test]
+    fn test_default_tools_only_reference_registered_tools() {
+        let known = known_tool_names();
+        for role in [
+            SubAgentRole::General,
+            SubAgentRole::Explorer,
+            SubAgentRole::Builder,
+            SubAgentRole::Verifier,
+        ] {
+            if let Some(tools) = role.default_tools() {
+                for tool_name in &tools {
+                    assert!(
+                        known.contains(&tool_name.as_str()),
+                        "{role:?}.default_tools() に実在しないツール名 '{tool_name}' が含まれている"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sub_agent_role_default() {
+        let parent = AgentConfig::default();
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert_eq!(sub.role, SubAgentRole::General);
+        assert!(sub.allowed_tools.is_none());
+        assert_eq!(sub.role.default_tools(), None);
+    }
+
+    #[test]
+    fn test_sub_agent_role_explorer() {
+        let parent = AgentConfig::default();
+        let sub = SubAgentConfig::from_parent(&parent, 0).with_role(SubAgentRole::Explorer);
+        assert_eq!(sub.role, SubAgentRole::Explorer);
+        let tools = sub.allowed_tools.as_ref().unwrap();
+        assert!(tools.contains(&"file_read".to_string()));
+        assert!(tools.contains(&"repo_map".to_string()));
+        assert!(tools.contains(&"recall".to_string()));
+        assert!(!tools.contains(&"file_write".to_string()));
+
+        let prompt = sub.role.prompt_instruction();
+        assert!(prompt.contains("探索特化サブエージェント"));
+    }
+
+    #[test]
+    fn test_sub_agent_role_builder() {
+        let parent = AgentConfig::default();
+        let sub = SubAgentConfig::from_parent(&parent, 0).with_role(SubAgentRole::Builder);
+        assert_eq!(sub.role, SubAgentRole::Builder);
+        let tools = sub.allowed_tools.as_ref().unwrap();
+        assert!(tools.contains(&"file_write".to_string()));
+        assert!(tools.contains(&"multi_edit".to_string()));
+        assert!(!tools.contains(&"shell".to_string()));
+
+        let prompt = sub.role.prompt_instruction();
+        assert!(prompt.contains("実装特化サブエージェント"));
+    }
+
+    #[test]
+    fn test_sub_agent_role_verifier() {
+        let parent = AgentConfig::default();
+        let sub = SubAgentConfig::from_parent(&parent, 0).with_role(SubAgentRole::Verifier);
+        assert_eq!(sub.role, SubAgentRole::Verifier);
+        let tools = sub.allowed_tools.as_ref().unwrap();
+        assert!(tools.contains(&"shell".to_string()));
+        assert!(tools.contains(&"file_read".to_string()));
+        assert!(!tools.contains(&"multi_edit".to_string()));
+
+        let prompt = sub.role.prompt_instruction();
+        assert!(prompt.contains("検証特化サブエージェント"));
+    }
+
+    #[test]
+    fn test_sub_agent_role_custom_tools_override() {
+        let parent = AgentConfig::default();
+        let sub = SubAgentConfig::from_parent(&parent, 0)
+            .with_tools(vec!["custom_tool".to_string()])
+            .with_role(SubAgentRole::Explorer);
+        assert_eq!(sub.role, SubAgentRole::Explorer);
+        let tools = sub.allowed_tools.as_ref().unwrap();
+        assert_eq!(tools, &vec!["custom_tool".to_string()]);
+    }
+
+    #[test]
+    fn test_build_sub_config_role_prompt_injection() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+        let sub_config = SubAgentConfig::from_parent(&AgentConfig::default(), 0)
+            .with_role(SubAgentRole::Explorer);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+
+        let config = executor.build_sub_config("コード探索タスク");
+        assert!(config.system_prompt.contains("探索特化サブエージェント"));
+        assert!(config.system_prompt.contains("タスク: コード探索タスク"));
     }
 }

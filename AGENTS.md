@@ -121,10 +121,18 @@ cargo run --no-default-features --features cli,tree-sitter -- --manifest
 
 ## 7. Subagent Orchestration & Delegation
 
-When orchestrating subagents:
-1. **Orchestrator Role**: The main agent acts as planner, dispatcher, and synthesizer.
+### Permanent Orchestrator Directive (恒久運用原則)
+The primary agent acts **permanently and strictly as an Orchestrator** (Planner, Dispatcher, and Synthesizer). Do not directly perform monolithic implementation or self-approval; always delegate specialized tasks to dedicated subagents:
+- **Architecture & DEP-001**: `bonsai_architect` (`bonsai-architect`)
+- **Rust 2024 Implementation (Sync / No-Rewind)**: `bonsai_implementer` (`bonsai-rust-implementer`)
+- **TDD & Quality Ratchet (1,480+ Tests)**: `bonsai_tdd_verifier` (`bonsai-tdd-verifier`)
+- **ADR-003 Paired Evidence & Lab Protection**: `bonsai_lab_evaluator` (`bonsai-lab-evaluator`)
+- **docs/VALUES.md & Goodhart Audit**: `bonsai_values_auditor` (`bonsai-values-auditor`)
+
+### Orchestration Rules:
+1. **Orchestrator Role**: The main agent plans the breakdown, assigns subtasks to specialized agents, monitors results, and synthesizes the outcome.
 2. **Explicit Models & Skills**: Always declare the target model tier and relevant skill set when delegating.
-3. **Separation of Concerns**: The implementing agent (`builder`) must never self-approve. Verification must be performed by a distinct verifier (`qa_verifier` / `code_reviewer`).
+3. **Separation of Concerns**: The implementing agent (`builder`) must never self-approve. Verification must be performed by a distinct verifier (`bonsai_tdd_verifier` / `code_reviewer`).
 4. **Primary Review Optimization**:
    - Standard code and security reviews are first evaluated using lightweight review passes (`agy` / `gemini-3.8-flash-high`) to optimize turnaround and token costs.
    - High-risk changes (cryptography, auth, database schema, breaking architecture changes) escalate to deep reviews.
@@ -152,3 +160,30 @@ The repository contains multi-graph analysis capabilities:
 - Historical Lab Results: [`docs/quality/lab-history.md`](docs/quality/lab-history.md)
 - Architecture Decision Records: [`docs/decisions/README.md`](docs/decisions/README.md)
 - Master Index: [`docs/INDEX.md`](docs/INDEX.md)
+
+---
+
+## 10. Documentation Synchronization & SSOT Governance
+
+To prevent documentation drift, any code or policy changes must update their corresponding Single Source of Truth (SSOT) documents in the same atomic commit.
+
+### ① Change-to-Document Synchronization Matrix
+
+| Change Category | Primary SSOT (Detailed Authority) | Secondary Pointer / Index |
+| :--- | :--- | :--- |
+| **Architecture / Layers** | `docs/decisions/ADR-XXX.md`<br>`docs/architecture/overview.md`<br>`docs/architecture/module-layer-rules.md` | `docs/INDEX.md`<br>`AGENTS.md` (Sec 4)<br>`GEMINI.md` (Sec 3)<br>`CHANGELOG.md` |
+| **API / Trait / Tools** | `docs/architecture/overview.md`<br>`docs/DESIGN_SPEC.md` | `CHANGELOG.md`<br>`AGENTS.md` (Sec 8 if tool impacted) |
+| **Env Vars / Config** | `docs/execution/runbook.md` | `CHANGELOG.md` (Never duplicate full tables in prompt files) |
+| **Lab Mutations (ACCEPT/REJECT)** | `docs/quality/lab-history.md`<br>`docs/decisions/ADR-004-defaulted-mutations.md` | `CLAUDE.md` (FIFO top 5)<br>`AGENTS.md` (Sec 6)<br>`CHANGELOG.md` |
+| **Policy / Subagents** | `docs/architecture/subagents-guide.md`<br>`docs/VALUES.md` | `AGENTS.md` (Sec 2, 7)<br>`GEMINI.md` (Sec 2, 4) |
+| **Bug Fixes / Refactoring** | Inline code comments & regression tests | `CHANGELOG.md` |
+
+### ② Subagent Documentation Responsibilities
+- **`bonsai_architect`**: Drafts ADRs, updates architecture specs, maintains `docs/INDEX.md`, ensures DEP-001 alignment.
+- **`bonsai_implementer`**: Updates inline doc comments, drafts new env vars in `runbook.md`. (Never self-approves architecture docs).
+- **`bonsai_tdd_verifier`**: Validates all test/build commands listed in docs via `cargo test --test structural`.
+- **`bonsai_lab_evaluator`**: Updates `lab-history.md`, `scores.md`, and default mutations under ADR-003 paired evidence discipline.
+- **`shipper` / `orchestrator`**: Maintains `CHANGELOG.md` (`## Unreleased`) and verifies complete doc-sync prior to final commit.
+
+### ③ Pointer Principle (No Full Duplication)
+`AGENTS.md`, `GEMINI.md`, and `CLAUDE.md` must only maintain summary pointers with markdown links (`[docs/...]`). Do not duplicate detailed tables or narrative records into root prompt files.

@@ -24,6 +24,7 @@ color: #10B981
 </responsibilities>
 
 <check_commands>
-- `cargo test --lib`: コア単体テスト
-- `cargo test --test structural`: 構造・レイヤールールテスト
+- `cargo test --lib --no-default-features --features cli,tree-sitter`: コア単体テスト
+- `cargo test --test structural --no-default-features --features cli,tree-sitter`: 構造・レイヤールールテスト
+- `cargo clippy --no-default-features --features cli,tree-sitter -- -D warnings`: リントゼロチェック
 </check_commands>

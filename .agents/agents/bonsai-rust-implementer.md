@@ -20,5 +20,8 @@ Rust 2024 edition の機能（let chains, div_ceil 等）を駆使し、メモ�
 </strict_rules>
 
 <check_commands>
-- `cargo clippy -- -D warnings`: リントチェック
+- `cargo test --lib --no-default-features --features cli,tree-sitter`: コア単体テスト
+- `cargo test --test structural --no-default-features --features cli,tree-sitter`: レイヤー依存検証
+- `cargo clippy --no-default-features --features cli,tree-sitter -- -D warnings`: リントチェック
 - `cargo fmt -- --check`: フォーマット検証
+</check_commands>

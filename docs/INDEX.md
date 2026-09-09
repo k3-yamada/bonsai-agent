@@ -8,6 +8,7 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
 ### アーキテクチャ
 - [docs/architecture/overview.md](architecture/overview.md) — module 階層 + 主要 trait + 設計原則 (Z-1 Phase 2 で CLAUDE.md から分離)
 - [docs/architecture/module-layer-rules.md](architecture/module-layer-rules.md) — module layer 順 (Z-4 layer linter の rule source)
+- [docs/architecture/subagents-guide.md](architecture/subagents-guide.md) — サブエージェント運用ガイドライン（Track A 開発支援 & Track B ランタイム Scaffolding）
 
 ### 品質
 - [docs/quality/lab-history.md](quality/lab-history.md) — Lab 実機テスト結果 (v1-v22 履歴、Z-1 Phase 3 で CLAUDE.md から分離)
