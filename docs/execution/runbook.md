@@ -115,7 +115,8 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_VAULT_LINT_STALE_DAYS` | 90 | 1..=365 | Vault stale 軸閾値 |
 | `BONSAI_VAULT_UNREVIEWED_DAYS` | 14 | 1..=90 | Vault unreviewed_aged 5 軸目閾値 (項目 254) |
 | `BONSAI_LAB_LONG_SSE` | OFF | bool | SSE chunk timeout 60→180s (項目 249 F1) |
-| `BONSAI_LAB_MLX_ONLY` | OFF | bool | primary backend を MLX 切替 (項目 249 F2)。MLX ビルドなし profile (例 `bonsai-8b`) 指定時はエラーで停止 (#14-2) |
+| `BONSAI_LAB_MLX_ONLY` | OFF | bool | primary backend を MLX 切替 (項目 249 F2)。既知 profile で MLX ビルドなし (例 `bonsai-8b`) → エラー、未知 model_id (Unsloth 置換後の `Aratako/...` や独自 repo) → エラー、`BONSAI_LAB_MLX_ALLOW_UNKNOWN=1` で opt-in 許容 (#14-2, #17) |
+| `BONSAI_LAB_MLX_ALLOW_UNKNOWN` | OFF | bool | `BONSAI_LAB_MLX_ONLY=1` で未知 model_id (独自 MLX repo) を許容。未設定なら既知 profile 以外は起動時エラー (#17) |
 | `BONSAI_LAB_TASK_LIMIT` | None | int | task pool 削減 (項目 249 F3) |
 | `BONSAI_LAB_MLX_WARMUP` | OFF | bool | MLX server pre-warm 有効化 (項目 252 F4 案 A) |
 | `BONSAI_LAB_MLX_WARMUP_COUNT` | 3 | 1..=10 | pre-warm 回数 (項目 252) |

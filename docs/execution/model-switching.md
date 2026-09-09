@@ -41,8 +41,16 @@ Unsloth backend でもそのまま `minicpm5-2b` が渡る。
 以前は既定 profile 側の `mlx_repo` へ黙って置換していたが、operator が意図しないモデル
 （config.toml で指定した profile とは無関係な既定 profile）に混成してしまうため、
 `apply_lab_overrides()` が `anyhow::Error` に変換して `?` で即座にエラー終了するよう変更した。
+`model_id` が既知 profile に一致しない場合（`find_profile()` が `None` を返す場合）も同様に
+エラーで停止する。独自ホスティングの MLX repo をそのまま渡したい場合は、
+`BONSAI_LAB_MLX_ALLOW_UNKNOWN=1` を明示的に付けない限り通らない（#17）。
 `BONSAI_LAB_MLX_ONLY=1` を使う場合は `BONSAI_MODEL_ID=minicpm5-2b` 等、`mlx_repo` を持つ
 profile を明示する必要がある。
+
+Unsloth backend で `model_id = "bonsai-8b"` のまま `BONSAI_LAB_MLX_ONLY=1` を付けると、
+`resolve_model_id()` が既に `Aratako/Qwen3-8B-ERP-v0.1-GGUF` へ置換した後の id を
+`mlx_only_model_id()` が受け取り、これは既知 MLX profile に一致しないため
+`BONSAI_LAB_MLX_ALLOW_UNKNOWN=1` を付けない限り拒否される。
 
 profile 既定値の適用は `AppConfig::load()` 内でキー単位に行われる。つまり `config.toml` で
 明示していないキー（`context_length` や `[model.inference]` の各値）だけが profile 値で埋まり、
