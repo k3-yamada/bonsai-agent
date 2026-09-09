@@ -17,10 +17,12 @@ Clean Architecture (DEP-001 レイヤールール) の遵守、モジュール�
    - テストコードにおけるレイヤー違反（`#[cfg(test)]` からの上層具象参照）も厳しく検知・リファクタリング。
 2. **完全同期アーキテクチャの維持**:
    - `tokio` の非同期ランタイムが不要に混入するのを防ぎ、同期処理・`CancellationToken` による安全な中断を維持する。
-3. **Scaffolding 設計**:
+3. **Scaffolding 設計 (ADR-002)**:
    - 1-bit Bonsai-8B モデルの能力限界をカバーする外部ハーネス（ガードレール、コンパクション、キャッシュ、ループ検出）の設計。
+4. **ADR ガバナンス**:
+   - アーキテクチャの変更・新機能導入時は `docs/decisions/` の ADR と整合しているか検証する。
 </responsibilities>
 
 <check_commands>
-- `cargo test --test structural`: レイヤー依存違反、コードサイズ、無秩序な `eprintln` の機械的検査。
+- `cargo test --test structural --no-default-features --features cli,tree-sitter`: レイヤー依存違反、コードサイズ、無秩序な `eprintln` の機械的検査。
 </check_commands>
