@@ -370,4 +370,107 @@ mod tests {
         assert_eq!(result.tool_calls[0].name, "get_weather");
         assert_eq!(result.tool_calls[0].arguments["city"], "Osaka");
     }
+
+    // --- P2-1: `<function` の前方一致が長いタグ名に誤マッチする不具合の回帰テスト ---
+
+    #[test]
+    fn test_xml_function_tag_boundary_ignores_functional_tag() {
+        let _g = XML_TOOLCALL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_xml_toolcall_env();
+        enable_xml_toolcall_fallback();
+        let input = "<functional>これはfunction callではない</functional>";
+        let result = parse_assistant_output(input);
+        reset_xml_toolcall_env();
+        let result = result.unwrap();
+        assert!(
+            result.tool_calls.is_empty(),
+            "<functional>は<function>タグの境界（直後が空白または'>'）に一致しないためfallbackが発動してはならない"
+        );
+        assert_eq!(
+            result.text.unwrap(),
+            "<functional>これはfunction callではない</functional>"
+        );
+    }
+
+    #[test]
+    fn test_xml_function_tag_boundary_ignores_function_call_tag() {
+        let _g = XML_TOOLCALL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_xml_toolcall_env();
+        enable_xml_toolcall_fallback();
+        let input = "<function_call>foo</function_call>";
+        let result = parse_assistant_output(input);
+        reset_xml_toolcall_env();
+        let result = result.unwrap();
+        assert!(
+            result.tool_calls.is_empty(),
+            "<function_call>は<function>タグの境界に一致しないためfallbackが発動してはならない"
+        );
+        assert_eq!(result.text.unwrap(), "<function_call>foo</function_call>");
+    }
+
+    #[test]
+    fn test_xml_function_tag_boundary_still_matches_real_function_tag() {
+        // 境界判定を追加しても、正規の<function name="...">は引き続き検出されること
+        let _g = XML_TOOLCALL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_xml_toolcall_env();
+        enable_xml_toolcall_fallback();
+        let input = r#"<function name="get_weather"><param name="city">Tokyo</param></function>"#;
+        let result = parse_assistant_output(input);
+        reset_xml_toolcall_env();
+        let result = result.unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+    }
+
+    // --- P2-2: CDATA内の`</param>`/`</function>`で抽出が壊れる不具合の回帰テスト ---
+
+    #[test]
+    fn test_xml_function_call_cdata_containing_closing_tag_substrings() {
+        let _g = XML_TOOLCALL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_xml_toolcall_env();
+        enable_xml_toolcall_fallback();
+        let input = "<function name=\"file_write\"><param name=\"content\">\
+            <![CDATA[before </param> middle </function> after]]>\
+            </param></function>";
+        let result = parse_assistant_output(input);
+        reset_xml_toolcall_env();
+        let result = result.unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "file_write");
+        assert_eq!(
+            result.tool_calls[0].arguments["content"],
+            "before </param> middle </function> after"
+        );
+    }
+
+    #[test]
+    fn test_xml_function_call_cdata_closing_tag_substring_with_trailing_param() {
+        // CDATA内の</param>で誤って区切られていた場合、後続のparamが誤解釈されないこと
+        let _g = XML_TOOLCALL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        reset_xml_toolcall_env();
+        enable_xml_toolcall_fallback();
+        let input = "<function name=\"shell\">\
+            <param name=\"command\"><![CDATA[echo </param>fake]]></param>\
+            <param name=\"timeout\">30</param>\
+            </function>";
+        let result = parse_assistant_output(input);
+        reset_xml_toolcall_env();
+        let result = result.unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(
+            result.tool_calls[0].arguments["command"],
+            "echo </param>fake"
+        );
+        assert_eq!(result.tool_calls[0].arguments["timeout"], "30");
+    }
 }
