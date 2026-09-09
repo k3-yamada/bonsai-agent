@@ -24,6 +24,17 @@ pub struct AgentConfig {
     pub max_tools_in_context: usize,
     /// MCPツールの追加枠（ビルトインとは別枠）
     pub max_mcp_tools_in_context: usize,
+    /// 許可ツール allowlist（Issue #25 enforcement）。
+    ///
+    /// - `None`: allowlist 未設定 = 全ツール許可（既定。既存挙動と完全に同一）
+    /// - `Some(vec![...])`: 列挙されたツール名のみ許可（判定は完全一致のみ）
+    /// - `Some(vec![])`: 全ツール禁止。`ToolRegistry::apply_whitelist` の
+    ///   「空 slice = no-op」とは意図的に非対称（`None` が「未設定」を担うため、
+    ///   空リストは「設定した上で 0 個」＝明示的な意思表示として扱う）。
+    ///
+    /// `SubAgentConfig.allowed_tools` から `SubAgentExecutor::build_sub_config()` 経由で伝播。
+    /// 強制点は `agent_loop::step::execute_step` の 2 箇所（提示フィルタ / dispatch ガード）。
+    pub allowed_tools: Option<Vec<String>>,
     /// ベース推論パラメータ（TaskTypeで動的調整）
     pub base_inference: InferenceParams,
     /// タスク単位のウォールクロックタイムアウト（None=無制限）
@@ -61,6 +72,7 @@ impl Default for AgentConfig {
             max_tool_output_chars: 4000,
             max_tools_in_context: 8,
             max_mcp_tools_in_context: 3,
+            allowed_tools: None,
             base_inference: InferenceParams::default(),
             task_timeout: None,
             soul_path: None,
@@ -71,6 +83,31 @@ impl Default for AgentConfig {
             daemon_policy: crate::tools::permission::DaemonPolicy::AutoOnly,
             confirm_callback: None,
         }
+    }
+}
+
+impl AgentConfig {
+    /// 設定上、指定ツールの実行が許可されているか（Tell-Don't-Ask）。
+    /// 判定本体は純関数 [`is_tool_allowed`] に委譲する。
+    pub fn is_tool_allowed(&self, name: &str) -> bool {
+        is_tool_allowed(self.allowed_tools.as_deref(), name)
+    }
+}
+
+/// ツール名が allowlist で許可されているかを判定する純関数（Issue #25）。
+///
+/// 判定は完全一致のみ。prefix / glob / MCP `server:*` ワイルドカードは非対応（非ゴール）。
+///
+/// | `allowed` | 結果 |
+/// |---|---|
+/// | `None` | 常に `true`（allowlist 未設定 = 全許可） |
+/// | `Some(&[])` | 常に `false`（空リスト = 全禁止） |
+/// | `Some(&[..])` | 完全一致した要素があるときのみ `true` |
+pub fn is_tool_allowed(allowed: Option<&[String]>, name: &str) -> bool {
+    match allowed {
+        None => true,
+        // 空 slice のときは any() が false を返す＝全禁止。分岐を足さないこと。
+        Some(list) => list.iter().any(|t| t.as_str() == name),
     }
 }
 
@@ -133,3 +170,47 @@ Gitの状態を確認する:
 15. 回答を出す前にファイルの内容を確認する。未読のファイルについて断定しない
 16. <think> 内には JSON 文字列で tool_call を書かない。実行は必ず <think> の外で <tool_call>...</tool_call> タグを使う
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_tool_allowed_none_allows_everything() {
+        assert!(is_tool_allowed(None, "shell"));
+        assert!(is_tool_allowed(None, "anything_at_all"));
+    }
+
+    #[test]
+    fn test_is_tool_allowed_exact_match_only() {
+        let allowed = vec!["file_read".to_string()];
+        assert!(is_tool_allowed(Some(&allowed), "file_read"));
+        // 前方一致では通らない（完全一致のみ）
+        assert!(!is_tool_allowed(Some(&allowed), "file_read_extra"));
+        assert!(!is_tool_allowed(Some(&allowed), "file"));
+        assert!(!is_tool_allowed(Some(&allowed), "shell"));
+    }
+
+    #[test]
+    fn test_is_tool_allowed_empty_list_denies_everything() {
+        let allowed: Vec<String> = Vec::new();
+        assert!(!is_tool_allowed(Some(&allowed), "shell"));
+        assert!(!is_tool_allowed(Some(&allowed), "file_read"));
+    }
+
+    #[test]
+    fn test_agent_config_default_allowed_tools_is_none() {
+        let config = AgentConfig::default();
+        assert!(config.allowed_tools.is_none());
+    }
+
+    #[test]
+    fn test_agent_config_is_tool_allowed_delegates() {
+        let config = AgentConfig {
+            allowed_tools: Some(vec!["shell".to_string()]),
+            ..Default::default()
+        };
+        assert!(config.is_tool_allowed("shell"));
+        assert!(!config.is_tool_allowed("file_read"));
+    }
+}

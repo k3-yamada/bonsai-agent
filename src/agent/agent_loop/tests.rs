@@ -10,7 +10,9 @@ use super::support::{check_invariants, compute_output_hash};
 use super::*;
 
 use crate::agent::context_inject::inject_experience_context;
-use crate::agent::error_recovery::{CircuitBreaker, FileStuckGuard, TrialSummary};
+use crate::agent::error_recovery::{
+    CircuitBreaker, FileStuckGuard, LoopDetector, MultiFileEditCycleDetector, TrialSummary,
+};
 use crate::agent::middleware::MiddlewareChain;
 use crate::agent::tool_exec::{ToolExecResult, apply_tool_result, execute_validated_calls};
 use crate::agent::validate::PathGuard;
@@ -79,6 +81,273 @@ fn test_registry() -> ToolRegistry {
     reg.register(Box::new(EchoTool));
     reg.register(Box::new(FailTool));
     reg
+}
+
+// ===== Issue #25: SubAgentConfig.allowed_tools enforcement =====
+
+/// Issue #25 enforcement証明用: `Tool::call` の到達回数を数えるテスト専用ツール。
+/// - 名前は本番の危険ツールと同じ "shell" を指定できる（受入条件7）。
+/// - `is_read_only() == true` にして step.rs の `!tool.is_read_only()` MAGI intercept を
+///   回避し、カウンタが allowed_tools enforcement のみを反映するようにしている。
+struct CountingTool {
+    name: &'static str,
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Tool for CountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "呼び出し回数を数えるテスト専用ツール"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}})
+    }
+    fn permission(&self) -> Permission {
+        Permission::Auto
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    fn call(&self, _args: serde_json::Value) -> Result<ToolResult> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ToolResult {
+            output: "ok".to_string(),
+            success: true,
+        })
+    }
+}
+
+/// Issue #25 提示フィルタ検証用: LLMへ渡されたToolSchema名を記録するbackend。
+/// MockLlmBackendはtools引数を捨てるため、AC5/11の検証にはこちらを使う。
+struct SchemaRecordingBackend {
+    answer: String,
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl crate::domain::llm::LlmBackend for SchemaRecordingBackend {
+    fn model_id(&self) -> &str {
+        "schema-recorder"
+    }
+    fn generate(
+        &self,
+        _messages: &[Message],
+        tools: &[crate::domain::tool_schema::ToolSchema],
+        _on_token: &mut dyn FnMut(&str),
+        _cancel: &CancellationToken,
+    ) -> Result<crate::domain::llm::GenerateResult> {
+        *self.seen.lock().unwrap() = tools.iter().map(|t| t.name.clone()).collect();
+        Ok(crate::domain::llm::GenerateResult {
+            text: self.answer.clone(),
+            usage: crate::domain::llm::TokenUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                duration: std::time::Duration::from_millis(0),
+            },
+            model_id: "schema-recorder".into(),
+        })
+    }
+}
+
+/// T1-T6 共通ヘルパー: registryに `CountingTool{name:"shell"}` + `EchoTool` を登録し、
+/// LLMに `shell` ツール呼び出しを返させ、`allowed` の下で execute_step を実行する。
+/// 戻り値は (shellの呼び出し回数, セッション, ステップ結果)。
+fn run_step_with_allowed(
+    allowed: Option<Vec<String>>,
+) -> (usize, Session, crate::agent::agent_loop::StepOutcome) {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingTool {
+        name: "shell",
+        calls: calls.clone(),
+    }));
+    tools.register(Box::new(EchoTool));
+
+    let backend = MockLlmBackend::single(
+        r#"<tool_call>{"name": "shell", "arguments": {"command": "echo hi"}}</tool_call>"#,
+    );
+    let path_guard = PathGuard::default_deny_list();
+    let config = AgentConfig {
+        allowed_tools: allowed,
+        ..Default::default()
+    };
+    let secrets_filter = SecretsFilter::new(&[]);
+    let cancel = CancellationToken::new();
+
+    let ctx = StepContext {
+        backend: &backend,
+        tools: &tools,
+        path_guard: &path_guard,
+        config: &config,
+        cancel: &cancel,
+        secrets_filter: &secrets_filter,
+        store: None,
+    };
+
+    let mut session = Session::new();
+    session.add_message(Message::user("実行して"));
+    let mut circuit_breaker = CircuitBreaker::default();
+    let mut loop_detector = LoopDetector::default();
+    let mut tool_cache = ToolResultCache::new();
+    let mut cycle_detector = MultiFileEditCycleDetector::default();
+    let mut trial_summary = TrialSummary::default();
+    let mut file_stuck_guard = FileStuckGuard::default();
+
+    let outcome = execute_step(
+        &mut session,
+        &ctx,
+        &mut circuit_breaker,
+        &mut loop_detector,
+        0,
+        &mut tool_cache,
+        &mut cycle_detector,
+        &mut trial_summary,
+        &mut file_stuck_guard,
+    )
+    .unwrap();
+
+    let n = calls.load(std::sync::atomic::Ordering::SeqCst);
+    (n, session, outcome)
+}
+
+/// T7/T8 共通ヘルパー: `SchemaRecordingBackend` でLLMに提示されたスキーマ名一覧を取得する。
+fn run_step_for_schema_check(allowed: Option<Vec<String>>) -> Vec<String> {
+    let mut tools = ToolRegistry::new();
+    tools.register(Box::new(CountingTool {
+        name: "shell",
+        calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    tools.register(Box::new(EchoTool));
+
+    let backend = SchemaRecordingBackend {
+        answer: "了解しました。".to_string(),
+        seen: std::sync::Mutex::new(Vec::new()),
+    };
+    let path_guard = PathGuard::default_deny_list();
+    let config = AgentConfig {
+        allowed_tools: allowed,
+        ..Default::default()
+    };
+    let secrets_filter = SecretsFilter::new(&[]);
+    let cancel = CancellationToken::new();
+
+    let ctx = StepContext {
+        backend: &backend,
+        tools: &tools,
+        path_guard: &path_guard,
+        config: &config,
+        cancel: &cancel,
+        secrets_filter: &secrets_filter,
+        store: None,
+    };
+
+    let mut session = Session::new();
+    session.add_message(Message::user("実行して"));
+    let mut circuit_breaker = CircuitBreaker::default();
+    let mut loop_detector = LoopDetector::default();
+    let mut tool_cache = ToolResultCache::new();
+    let mut cycle_detector = MultiFileEditCycleDetector::default();
+    let mut trial_summary = TrialSummary::default();
+    let mut file_stuck_guard = FileStuckGuard::default();
+
+    let _outcome = execute_step(
+        &mut session,
+        &ctx,
+        &mut circuit_breaker,
+        &mut loop_detector,
+        0,
+        &mut tool_cache,
+        &mut cycle_detector,
+        &mut trial_summary,
+        &mut file_stuck_guard,
+    )
+    .unwrap();
+
+    backend.seen.lock().unwrap().clone()
+}
+
+#[test]
+fn test_allowed_tools_blocks_disallowed_tool_call() {
+    let (calls, session, outcome) = run_step_with_allowed(Some(vec!["file_read".to_string()]));
+    assert_eq!(calls, 0, "許可外ツールの Tool::call は呼ばれない");
+    let rejected = session
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool && m.content.contains("許可されていません"));
+    assert!(
+        rejected.is_some(),
+        "拒否理由を含む Message::tool が追加されるべき: {:?}",
+        session.messages
+    );
+    assert!(
+        !matches!(outcome, crate::agent::agent_loop::StepOutcome::Aborted(_)),
+        "拒否してもループは abort しない"
+    );
+}
+
+#[test]
+fn test_allowed_tools_none_preserves_existing_behavior() {
+    let (calls, session, _outcome) = run_step_with_allowed(None);
+    assert_eq!(calls, 1, "allowed_tools=None では従来どおり実行される");
+    let rejected = session
+        .messages
+        .iter()
+        .any(|m| m.content.contains("許可されていません"));
+    assert!(!rejected, "None では拒否メッセージは存在しない");
+}
+
+#[test]
+fn test_allowed_tools_allows_listed_tool() {
+    let (calls, _session, _outcome) = run_step_with_allowed(Some(vec!["shell".to_string()]));
+    assert_eq!(calls, 1, "allowlist に含まれるツールは実行される");
+}
+
+#[test]
+fn test_allowed_tools_empty_list_blocks_all() {
+    let (calls, session, _outcome) = run_step_with_allowed(Some(vec![]));
+    assert_eq!(calls, 0, "空リストは全禁止");
+    let rejected = session
+        .messages
+        .iter()
+        .any(|m| m.content.contains("ツールを使用できません"));
+    assert!(rejected, "空リスト時は専用の拒否文言が使われるべき");
+}
+
+#[test]
+fn test_role_verifier_can_use_shell() {
+    let (calls, _session, _outcome) =
+        run_step_with_allowed(crate::agent::subagent::SubAgentRole::Verifier.default_tools());
+    assert_eq!(calls, 1, "Verifier ロールは shell を実行できる");
+}
+
+#[test]
+fn test_role_explorer_cannot_use_shell() {
+    let (calls, session, _outcome) =
+        run_step_with_allowed(crate::agent::subagent::SubAgentRole::Explorer.default_tools());
+    assert_eq!(calls, 0, "Explorer ロールは shell を実行できない");
+    let rejected = session
+        .messages
+        .iter()
+        .any(|m| m.content.contains("許可されていません"));
+    assert!(rejected);
+}
+
+#[test]
+fn test_allowed_tools_filters_presented_schemas() {
+    let seen = run_step_for_schema_check(Some(vec!["shell".to_string()]));
+    assert_eq!(
+        seen,
+        vec!["shell".to_string()],
+        "許可外の echo は提示されない"
+    );
+}
+
+#[test]
+fn test_none_presents_all_schemas() {
+    let seen = run_step_for_schema_check(None);
+    assert!(seen.contains(&"shell".to_string()));
+    assert!(seen.contains(&"echo".to_string()));
 }
 
 // テスト1: ツール不要 → 直接回答
