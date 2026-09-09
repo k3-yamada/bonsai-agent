@@ -4,7 +4,9 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use regex::Regex;
 
-use crate::agent::xml_toolcall::{is_xml_toolcall_fallback_enabled, parse_xml_function_output};
+use crate::agent::xml_toolcall::{
+    contains_function_tag, is_xml_toolcall_fallback_enabled, parse_xml_function_output,
+};
 use crate::domain::conversation::{ParsedOutput, ToolCall};
 
 static RE_TAG_NORMALIZE: LazyLock<Regex> = LazyLock::new(|| {
@@ -97,7 +99,7 @@ pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
 
     if is_xml_toolcall_fallback_enabled()
         && !normalized.contains("<tool_call>")
-        && normalized.contains("<function")
+        && contains_function_tag(&normalized)
     {
         return parse_xml_function_output(&normalized);
     }

@@ -47,6 +47,59 @@ fn strip_cdata(value: &str) -> String {
         .to_string()
 }
 
+/// `<function` タグの開始位置を、直後の文字が空白（属性が続く）または `>`
+/// （属性なし）であることを確認したうえで探す。`<functional>` や
+/// `<function_call>` のような紛らわしい文字列に誤マッチしないための境界判定
+/// （Issue #13 P2-1）。
+pub(crate) fn find_function_tag_start(haystack: &str) -> Option<usize> {
+    const TAG: &str = "<function";
+    let mut search_from = 0;
+    while let Some(rel_idx) = haystack[search_from..].find(TAG) {
+        let idx = search_from + rel_idx;
+        let boundary_char = haystack[idx + TAG.len()..].chars().next();
+        if matches!(boundary_char, Some(' ') | Some('>')) {
+            return Some(idx);
+        }
+        // 境界不一致（<functional> 等）: この出現をスキップして次を探す
+        search_from = idx + TAG.len();
+    }
+    None
+}
+
+/// `haystack` に境界判定込みの `<function` タグが含まれるかどうか。
+pub(crate) fn contains_function_tag(haystack: &str) -> bool {
+    find_function_tag_start(haystack).is_some()
+}
+
+/// CDATA区間（`<![CDATA[` ～ `]]>`）をスキップしながら、`haystack` 内で
+/// `needle` の最初の出現位置を探す。CDATA区間内に出現する `needle` は
+/// 候補として扱わない（Issue #13 P2-2: CDATA内の `</param>` / `</function>`
+/// 文字列で抽出が壊れる不具合への対応）。
+fn find_outside_cdata(haystack: &str, needle: &str) -> Option<usize> {
+    const CDATA_START: &str = "<![CDATA[";
+    const CDATA_END: &str = "]]>";
+
+    let mut pos = 0;
+    loop {
+        let next_needle = haystack[pos..].find(needle).map(|i| pos + i);
+        let next_cdata_start = haystack[pos..].find(CDATA_START).map(|i| pos + i);
+
+        match (next_needle, next_cdata_start) {
+            (Some(needle_idx), Some(cdata_idx)) if cdata_idx < needle_idx => {
+                // needleより先にCDATA区間が始まる場合は区間全体を読み飛ばす
+                let content_start = cdata_idx + CDATA_START.len();
+                let after_cdata = haystack[content_start..]
+                    .find(CDATA_END)
+                    .map(|i| content_start + i + CDATA_END.len())
+                    .unwrap_or(haystack.len());
+                pos = after_cdata;
+            }
+            (Some(needle_idx), _) => return Some(needle_idx),
+            (None, _) => return None,
+        }
+    }
+}
+
 /// `<function name="...">...</function>` ブロック単体をToolCallに変換する。
 fn parse_xml_function_call(block: &str) -> Result<ToolCall> {
     let tag_end = block
@@ -59,8 +112,7 @@ fn parse_xml_function_call(block: &str) -> Result<ToolCall> {
 
     let close_tag = "</function>";
     let body_start = tag_end + 1;
-    let body_end = block
-        .rfind(close_tag)
+    let body_end = find_outside_cdata(block, close_tag)
         .ok_or_else(|| anyhow::anyhow!("</function> 閉じタグが見つかりません"))?;
     let body = &block[body_start..body_end];
 
@@ -78,9 +130,10 @@ fn parse_xml_function_call(block: &str) -> Result<ToolCall> {
 
         let p_close_tag = "</param>";
         let p_body_start = p_tag_end + 1;
-        let p_body_end_rel = remaining[p_body_start..].find(p_close_tag).ok_or_else(|| {
-            anyhow::anyhow!("</param> 閉じタグが見つかりません（param: {p_name}）")
-        })?;
+        let p_body_end_rel = find_outside_cdata(&remaining[p_body_start..], p_close_tag)
+            .ok_or_else(|| {
+                anyhow::anyhow!("</param> 閉じタグが見つかりません（param: {p_name}）")
+            })?;
         let p_body_end = p_body_start + p_body_end_rel;
 
         let raw_value = remaining[p_body_start..p_body_end].trim();
@@ -125,14 +178,14 @@ pub(crate) fn parse_xml_function_output(normalized: &str) -> Result<ParsedOutput
                 thinking = Some(think_content.trim().to_string());
                 remaining = "";
             }
-        } else if let Some(fn_start) = remaining.find("<function") {
+        } else if let Some(fn_start) = find_function_tag_start(remaining) {
             let before = remaining[..fn_start].trim();
             if !before.is_empty() {
                 text_parts.push(before.to_string());
             }
 
             let close_tag = "</function>";
-            if let Some(fn_end_rel) = remaining[fn_start..].find(close_tag) {
+            if let Some(fn_end_rel) = find_outside_cdata(&remaining[fn_start..], close_tag) {
                 let fn_end = fn_start + fn_end_rel + close_tag.len();
                 let fn_block = &remaining[fn_start..fn_end];
                 tool_calls.push(parse_xml_function_call(fn_block)?);
