@@ -4,6 +4,9 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use regex::Regex;
 
+use crate::agent::xml_toolcall::{
+    contains_function_tag, is_xml_toolcall_fallback_enabled, parse_xml_function_output,
+};
 use crate::domain::conversation::{ParsedOutput, ToolCall};
 
 static RE_TAG_NORMALIZE: LazyLock<Regex> = LazyLock::new(|| {
@@ -86,12 +89,25 @@ pub fn sanitize_tool_call_json(raw: &str) -> String {
 /// LLMの生出力をパースする。
 /// `<think>` ブロックから思考テキスト、`<tool_call>` ブロックからツール呼び出し、
 /// 残りのテキストを最終回答として抽出する。
+///
+/// `BONSAI_XML_TOOLCALL_FALLBACK=1` の場合、入力に `<tool_call>` が存在せず
+/// `<function name=...>` (MiniCPM5 native XML tool-call形式) が存在するときのみ
+/// フォールバック抽出を行う（Issue #13）。`<tool_call>` が存在する場合は常に
+/// 既存のJSON抽出を優先する。
 pub fn parse_assistant_output(raw: &str) -> Result<ParsedOutput> {
+    let normalized = normalize_special_tags(raw);
+
+    if is_xml_toolcall_fallback_enabled()
+        && !normalized.contains("<tool_call>")
+        && contains_function_tag(&normalized)
+    {
+        return parse_xml_function_output(&normalized);
+    }
+
     let mut thinking = None;
     let mut tool_calls = Vec::new();
     let mut text_parts = Vec::new();
 
-    let normalized = normalize_special_tags(raw);
     let mut remaining = normalized.as_ref();
 
     while !remaining.is_empty() {

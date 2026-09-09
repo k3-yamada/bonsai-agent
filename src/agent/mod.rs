@@ -10,6 +10,7 @@ pub mod judge;
 pub mod parse;
 pub mod task;
 pub mod validate;
+pub mod xml_toolcall;
 
 pub mod event_store;
 pub mod middleware;
