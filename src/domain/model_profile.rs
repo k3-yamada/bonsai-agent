@@ -197,17 +197,25 @@ fn non_blank(value: Option<&str>) -> Option<&str> {
 ///
 /// main.rs から純粋関数として抽出 (テスト可能に、SIZE-001 800 行制約対応)。
 ///
-/// - `current` が未知 model_id (`find_profile` が `None`) → `current` を **そのまま保持**
-///   (書き換えない)。未知の自由文字列 model_id を無関係な既定 profile の mlx_repo で
-///   上書きしないため。
+/// - `current` が未知 model_id (`find_profile` が `None`):
+///   - `allow_unknown == true` → `current` を **そのまま保持** (書き換えない)。
+///     独自の MLX repo を model_id に直接指定する opt-in 運用向け (#17-1)。
+///   - `allow_unknown == false` → `Err`。未知の自由文字列 model_id (例: Unsloth
+///     backend が `resolve_model_id` で置換した GGUF 専用 repo) を無関係な既定
+///     profile の mlx_repo で上書きしないための既定挙動。
 /// - ヒットしたが `mlx_repo` が空文字列 (例 "bonsai-8b") → `Err` (#14-2)。
 ///   クロスモデル混成 (例: bonsai-8b 指定のまま無関係な既定 profile の MLX 実装へ
 ///   黙って差し替わる) を防ぐため、legacy profile は明示的な hard error とし、
 ///   呼び出し側 (operator) に MLX 対応 profile を明示させる。
 /// - ヒットして `mlx_repo` が非空 → `Ok` でその `mlx_repo`。
-pub fn mlx_only_model_id(current: &str) -> Result<String, String> {
+pub fn mlx_only_model_id(current: &str, allow_unknown: bool) -> Result<String, String> {
     match find_profile(current) {
-        None => Ok(current.to_string()),
+        None if allow_unknown => Ok(current.to_string()),
+        None => Err(format!(
+            "model_id '{current}' は既知 profile に一致しません。BONSAI_LAB_MLX_ONLY=1 では \
+             MLX 対応 profile (minicpm5-2b 等) を BONSAI_MODEL_ID で明示するか、独自 MLX repo \
+             を使う場合は BONSAI_LAB_MLX_ALLOW_UNKNOWN=1 を付けてください"
+        )),
         Some(p) if p.mlx_repo.is_empty() => Err(format!(
             "profile '{}' には MLX ビルドがありません。BONSAI_LAB_MLX_ONLY=1 では \
              BONSAI_MODEL_ID=minicpm5-2b 等の MLX 対応 profile を明示してください",
@@ -406,10 +414,24 @@ mod tests {
     // --- L-6: mlx_only_model_id ---
 
     #[test]
-    fn test_mlx_only_model_id_unknown_model_id_kept() {
+    fn test_mlx_only_model_id_unknown_model_id_kept_when_allowed() {
         assert_eq!(
-            mlx_only_model_id("totally-unknown-model-xyz").expect("未知 id は Ok で保持"),
+            mlx_only_model_id("totally-unknown-model-xyz", true)
+                .expect("allow_unknown=true では未知 id は Ok で保持"),
             "totally-unknown-model-xyz"
+        );
+    }
+
+    // #17-1: allow_unknown=false (既定) では未知 model_id は opt-in なしに黙って
+    // 素通りさせず Err にする (Unsloth backend が置換した GGUF 専用 repo が MLX
+    // backend にそのまま渡ってしまう事故を防ぐため)。
+    #[test]
+    fn test_mlx_only_model_id_unknown_model_id_rejected_without_opt_in() {
+        let err = mlx_only_model_id("totally-unknown-model-xyz", false)
+            .expect_err("allow_unknown=false では未知 id は Err");
+        assert!(
+            err.contains("BONSAI_LAB_MLX_ALLOW_UNKNOWN"),
+            "エラーメッセージに opt-in env 名が含まれること: {err}"
         );
     }
 
@@ -418,7 +440,7 @@ mod tests {
     // モデル混在を招くため撤廃)。
     #[test]
     fn test_mlx_only_model_id_empty_mlx_repo_is_error() {
-        let err = mlx_only_model_id("bonsai-8b").expect_err("MLX ビルドなし profile は Err");
+        let err = mlx_only_model_id("bonsai-8b", false).expect_err("MLX ビルドなし profile は Err");
         assert!(
             err.contains("MLX ビルドがありません"),
             "エラーメッセージに理由が含まれること: {err}"
@@ -428,7 +450,7 @@ mod tests {
     #[test]
     fn test_mlx_only_model_id_uses_matched_profile_mlx_repo() {
         assert_eq!(
-            mlx_only_model_id("ternary-bonsai-8b").expect("mlx_repo 非空は Ok"),
+            mlx_only_model_id("ternary-bonsai-8b", false).expect("mlx_repo 非空は Ok"),
             "prism-ml/Ternary-Bonsai-8B-mlx-2bit"
         );
     }

@@ -49,8 +49,9 @@ pip install --quiet mlx-lm
 # PrismML fork の MLX（legacy Ternary-Bonsai 系列専用の ternary カーネル対応。既定モデルでは未使用）
 # 判定は解決後の MLX repo (MLX_MODEL) 基準。BONSAI_MODEL_ID は見ない
 # (未知の BONSAI_MODEL_ID でも MLX_MODEL を直接 Ternary-Bonsai 系列に指定すれば fork が入る)。
-case "$MLX_MODEL" in
-    prism-ml/Ternary-Bonsai-*|*/Ternary-Bonsai-*)
+_mlx_lower=$(printf '%s' "$MLX_MODEL" | tr '[:upper:]' '[:lower:]')
+case "$_mlx_lower" in
+    *ternary-bonsai-*)
         echo "3. PrismML MLX fork インストール..."
         pip install --quiet "mlx @ git+https://github.com/PrismML-Eng/mlx.git@prism"
         ;;
@@ -58,6 +59,7 @@ case "$MLX_MODEL" in
         echo "  (MLX_MODEL=$MLX_MODEL は ternary ではないため PrismML fork を skip)"
         ;;
 esac
+unset _mlx_lower
 
 # mlx-openai-server インストール
 echo "4. mlx-openai-server インストール..."

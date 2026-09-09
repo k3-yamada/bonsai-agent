@@ -435,6 +435,17 @@ pub fn is_lab_mlx_only() -> bool {
     )
 }
 
+/// `BONSAI_LAB_MLX_ALLOW_UNKNOWN=1` で `BONSAI_LAB_MLX_ONLY=1` 適用時に未知 model_id
+/// (既知 profile に一致しない、独自 MLX repo 指定等) を opt-in で許容する (#17-1)。
+///
+/// 既定 OFF: 未知 model_id は `apply_lab_overrides` が `Err` を返す (クロスモデル混成防止)。
+pub fn is_lab_mlx_allow_unknown() -> bool {
+    matches!(
+        std::env::var("BONSAI_LAB_MLX_ALLOW_UNKNOWN").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
 /// `BONSAI_LAB_TASK_LIMIT=N` で Lab cycle 内 task pool 縮小 (smoke triage 用).
 ///
 /// 戻り値: 1..=15 で `Some(N)`、それ以外 (parse 失敗 / 範囲外) で `None` → smoke 既定 15 維持。
@@ -863,8 +874,11 @@ pub fn apply_lab_overrides(app_config: &mut AppConfig) -> Result<LabOverrideRepo
         // 書き換え (backend / server_url / fallback_chain / model_id) より前に検証し、この
         // ブロックの部分適用を残さない。temp / SSE override は先に適用済みだが、呼び出し元
         // (main) は Err で即終了する。
-        let new_model_id = model_profile::mlx_only_model_id(&app_config.model.model_id)
-            .map_err(|msg| anyhow::anyhow!(msg))?;
+        let new_model_id = model_profile::mlx_only_model_id(
+            &app_config.model.model_id,
+            is_lab_mlx_allow_unknown(),
+        )
+        .map_err(|msg| anyhow::anyhow!(msg))?;
         let prev_entries = app_config.fallback_chain.entries.len();
         app_config.fallback_chain.entries.clear();
         let prev_backend = format!("{:?}", app_config.model.backend);
@@ -1046,6 +1060,32 @@ pub fn resolve_db_path(env_override: Option<&str>, data_dir: Option<PathBuf>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テスト用 env var RAII ガード (#17-4)。生成時に env を書き換え、`Drop` で
+    /// 無条件に `remove_var` する。assert がスコープ途中で panic しても env が
+    /// 確実に外れ、隣接テストへ残留しない (lock はテスト側で別途取得すること)。
+    struct EnvGuard(&'static str);
+
+    impl EnvGuard {
+        /// env に `value` を設定して guard を返す。
+        fn set(key: &'static str, value: &str) -> Self {
+            unsafe { std::env::set_var(key, value) };
+            Self(key)
+        }
+
+        /// env を未設定にしてから guard を返す (Drop 時の cleanup を保証するだけの
+        /// no-op 起点、env unset を検証するテスト向け)。
+        fn unset(key: &'static str) -> Self {
+            unsafe { std::env::remove_var(key) };
+            Self(key)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var(self.0) };
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -1897,7 +1937,7 @@ max_iterations = 20
         let _g = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
+        let _env = EnvGuard::unset("BONSAI_LAB_TEMP");
         let mut p = InferenceParams::default();
         let original = p.temperature;
         let r = p.apply_lab_temp_override();
@@ -1910,7 +1950,7 @@ max_iterations = 20
         let _g = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "0") };
+        let _env = EnvGuard::set("BONSAI_LAB_TEMP", "0");
         let default_temp = model_profile::default_profile().inference.temperature;
         let mut p = InferenceParams::default();
         let r = p.apply_lab_temp_override();
@@ -1923,7 +1963,6 @@ max_iterations = 20
             p.temperature, 0.0,
             "env=\"0\" で temperature=0.0 に override"
         );
-        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
     }
 
     #[test]
@@ -1931,7 +1970,7 @@ max_iterations = 20
         let _g = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "0.3") };
+        let _env = EnvGuard::set("BONSAI_LAB_TEMP", "0.3");
         let default_temp = model_profile::default_profile().inference.temperature;
         let mut p = InferenceParams::default();
         let r = p.apply_lab_temp_override();
@@ -1940,7 +1979,6 @@ max_iterations = 20
             (p.temperature - 0.3).abs() < f64::EPSILON,
             "env=\"0.3\" で temperature=0.3 に override"
         );
-        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
     }
 
     #[test]
@@ -1948,13 +1986,12 @@ max_iterations = 20
         let _g = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "not_a_number") };
+        let _env = EnvGuard::set("BONSAI_LAB_TEMP", "not_a_number");
         let mut p = InferenceParams::default();
         let original = p.temperature;
         let r = p.apply_lab_temp_override();
         assert!(r.is_none(), "parse 失敗で None");
         assert_eq!(p.temperature, original, "parse 失敗時は temperature 不変");
-        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
     }
 
     #[test]
@@ -1962,13 +1999,12 @@ max_iterations = 20
         let _g = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "-1") };
+        let _env = EnvGuard::set("BONSAI_LAB_TEMP", "-1");
         let mut p = InferenceParams::default();
         let original = p.temperature;
         let r = p.apply_lab_temp_override();
         assert!(r.is_none(), "範囲外負値で None");
         assert_eq!(p.temperature, original);
-        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
     }
 
     #[test]
@@ -1976,13 +2012,12 @@ max_iterations = 20
         let _g = LAB_TEMP_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_TEMP", "3.5") };
+        let _env = EnvGuard::set("BONSAI_LAB_TEMP", "3.5");
         let mut p = InferenceParams::default();
         let original = p.temperature;
         let r = p.apply_lab_temp_override();
         assert!(r.is_none(), "範囲外 (>2.0) で None");
         assert_eq!(p.temperature, original);
-        unsafe { std::env::remove_var("BONSAI_LAB_TEMP") };
     }
 
     // ─── Lab Runtime Stabilization (項目 249) env getter tests ─────────────────────
@@ -1995,7 +2030,7 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("BONSAI_LAB_LONG_SSE") };
+        let _env = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
         assert!(!is_lab_long_sse_timeout(), "env unset で long sse OFF");
     }
 
@@ -2004,7 +2039,7 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_MLX_ONLY", "1") };
+        let _env = EnvGuard::set("BONSAI_LAB_MLX_ONLY", "1");
         assert!(is_lab_mlx_only(), "env=\"1\" で mlx-only ON");
         unsafe { std::env::remove_var("BONSAI_LAB_MLX_ONLY") };
         assert!(!is_lab_mlx_only(), "env unset で mlx-only OFF");
@@ -2017,11 +2052,10 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_MLX_ONLY", "1") };
+        let _env = EnvGuard::set("BONSAI_LAB_MLX_ONLY", "1");
         let mut app_config = AppConfig::default();
         app_config.model.model_id = "bonsai-8b".to_string();
         let result = apply_lab_overrides(&mut app_config);
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_ONLY") };
         let err = result.expect_err("MLX ビルドなし profile 指定は Err");
         assert!(
             err.to_string().contains("MLX ビルドがありません"),
@@ -2029,14 +2063,245 @@ max_iterations = 20
         );
     }
 
+    // ─── #17-3: apply_lab_overrides の Ok 経路 / Err 非変更 テスト ─────────────────
+
+    #[test]
+    fn t_apply_lab_overrides_noop_without_env() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // apply_lab_overrides は BONSAI_LAB_TEMP も読むため LAB_TEMP_ENV_TEST_LOCK も
+        // 併せて保持する (直接系 t_apply_lab_temp_override_* との race 防止)。
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
+        let _env_mlx = EnvGuard::unset("BONSAI_LAB_MLX_ONLY");
+        let _env_allow = EnvGuard::unset("BONSAI_LAB_MLX_ALLOW_UNKNOWN");
+
+        let mut app_config = AppConfig::default();
+        let prev_backend = format!("{:?}", app_config.model.backend);
+        let prev_url = app_config.model.server_url.clone();
+        let prev_model_id = app_config.model.model_id.clone();
+
+        let report = apply_lab_overrides(&mut app_config).expect("env 未設定は Ok");
+
+        assert!(
+            report.temp_override.is_none(),
+            "no-op で temp_override None"
+        );
+        assert!(
+            report.long_sse_applied.is_none(),
+            "no-op で long_sse_applied None"
+        );
+        assert!(
+            report.mlx_only_applied.is_none(),
+            "no-op で mlx_only_applied None"
+        );
+        assert_eq!(
+            format!("{:?}", app_config.model.backend),
+            prev_backend,
+            "no-op で backend 不変"
+        );
+        assert_eq!(
+            app_config.model.server_url, prev_url,
+            "no-op で server_url 不変"
+        );
+        assert_eq!(
+            app_config.model.model_id, prev_model_id,
+            "no-op で model_id 不変"
+        );
+    }
+
+    #[test]
+    fn t_apply_lab_overrides_long_sse_sets_180() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_mlx = EnvGuard::unset("BONSAI_LAB_MLX_ONLY");
+        let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_sse = EnvGuard::set("BONSAI_LAB_LONG_SSE", "1");
+
+        let mut app_config = AppConfig::default();
+        let prev_backend = format!("{:?}", app_config.model.backend);
+        let prev_model_id = app_config.model.model_id.clone();
+
+        let report = apply_lab_overrides(&mut app_config).expect("BONSAI_LAB_LONG_SSE=1 は Ok");
+
+        assert_eq!(
+            app_config.model.sse_chunk_timeout_secs, 180,
+            "BONSAI_LAB_LONG_SSE=1 で sse_chunk_timeout_secs=180"
+        );
+        assert!(
+            report.long_sse_applied.is_some(),
+            "report.long_sse_applied が Some"
+        );
+        assert_eq!(
+            format!("{:?}", app_config.model.backend),
+            prev_backend,
+            "long sse のみでは backend 不変"
+        );
+        assert_eq!(
+            app_config.model.model_id, prev_model_id,
+            "long sse のみでは model_id 不変"
+        );
+    }
+
+    #[test]
+    fn t_apply_lab_overrides_mlx_only_switches_known_profile() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
+        let _env_allow = EnvGuard::unset("BONSAI_LAB_MLX_ALLOW_UNKNOWN");
+        let _env_mlx = EnvGuard::set("BONSAI_LAB_MLX_ONLY", "1");
+
+        let mut app_config = AppConfig::default();
+        app_config.model.model_id = "minicpm5-2b".to_string();
+
+        let report = apply_lab_overrides(&mut app_config).expect("既知 profile は Ok");
+
+        assert_eq!(format!("{:?}", app_config.model.backend), "MlxLm");
+        assert_eq!(app_config.model.server_url, "http://127.0.0.1:8000");
+        assert!(
+            app_config.fallback_chain.entries.is_empty(),
+            "MLX_ONLY で fallback_chain.entries は空"
+        );
+        assert_eq!(
+            app_config.model.model_id,
+            model_profile::default_profile().mlx_repo,
+            "minicpm5-2b は default_profile().mlx_repo に一致"
+        );
+        let switch = report
+            .mlx_only_applied
+            .expect("report.mlx_only_applied が Some");
+        assert_eq!(switch.prev_model_id, "minicpm5-2b");
+        assert_eq!(switch.new_model_id, app_config.model.model_id);
+    }
+
+    #[test]
+    fn t_apply_lab_overrides_temp_override() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
+        let _env_mlx = EnvGuard::unset("BONSAI_LAB_MLX_ONLY");
+        let _env_temp = EnvGuard::set("BONSAI_LAB_TEMP", "0");
+
+        let mut app_config = AppConfig::default();
+        let report = apply_lab_overrides(&mut app_config).expect("BONSAI_LAB_TEMP=0 は Ok");
+
+        assert_eq!(app_config.model.inference.temperature, 0.0);
+        let (prev, new) = report.temp_override.expect("report.temp_override が Some");
+        assert_eq!(new, 0.0);
+        assert_ne!(prev, new, "prev は override 前の値");
+    }
+
+    #[test]
+    fn t_apply_lab_overrides_err_leaves_mlx_block_untouched() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
+        let _env_allow = EnvGuard::unset("BONSAI_LAB_MLX_ALLOW_UNKNOWN");
+        let _env_mlx = EnvGuard::set("BONSAI_LAB_MLX_ONLY", "1");
+
+        let mut app_config = AppConfig::default();
+        app_config.model.model_id = "bonsai-8b".to_string();
+        app_config
+            .fallback_chain
+            .entries
+            .push(crate::runtime::model_router::FallbackEntry {
+                backend: ServerBackend::Unsloth,
+                server_url: "http://127.0.0.1:9000".to_string(),
+                model_id: "bonsai-8b".to_string(),
+            });
+        let prev_backend = format!("{:?}", app_config.model.backend);
+        let prev_url = app_config.model.server_url.clone();
+        let prev_model_id = app_config.model.model_id.clone();
+        let prev_entries = app_config.fallback_chain.entries.len();
+
+        let result = apply_lab_overrides(&mut app_config);
+
+        assert!(result.is_err(), "MLX ビルドなし profile は Err");
+        assert_eq!(
+            format!("{:?}", app_config.model.backend),
+            prev_backend,
+            "Err 時は backend 不変"
+        );
+        assert_eq!(
+            app_config.model.server_url, prev_url,
+            "Err 時は server_url 不変"
+        );
+        assert_eq!(
+            app_config.model.model_id, prev_model_id,
+            "Err 時は model_id 不変"
+        );
+        assert_eq!(
+            app_config.fallback_chain.entries.len(),
+            prev_entries,
+            "Err 時は fallback_chain.entries 不変"
+        );
+    }
+
+    // #17-1: 未知 model_id は既定で opt-in 必須。BONSAI_LAB_MLX_ALLOW_UNKNOWN=1 で許容。
+    #[test]
+    fn t_apply_lab_overrides_unknown_id_requires_opt_in() {
+        let _g = LAB_RUNTIME_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _t = LAB_TEMP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env_temp = EnvGuard::unset("BONSAI_LAB_TEMP");
+        let _env_sse = EnvGuard::unset("BONSAI_LAB_LONG_SSE");
+        let _env_mlx = EnvGuard::set("BONSAI_LAB_MLX_ONLY", "1");
+        let _env_allow = EnvGuard::unset("BONSAI_LAB_MLX_ALLOW_UNKNOWN");
+
+        let unknown_id = "Aratako/Qwen3-8B-ERP-v0.1-GGUF";
+        let mut app_config = AppConfig::default();
+        app_config.model.model_id = unknown_id.to_string();
+        let result = apply_lab_overrides(&mut app_config);
+        let err = result.expect_err("未知 model_id は opt-in なしで Err");
+        assert!(
+            err.to_string().contains("BONSAI_LAB_MLX_ALLOW_UNKNOWN"),
+            "エラーメッセージに opt-in env 名が含まれること: {err}"
+        );
+
+        let _env_allow_opt_in = EnvGuard::set("BONSAI_LAB_MLX_ALLOW_UNKNOWN", "1");
+        let mut app_config2 = AppConfig::default();
+        app_config2.model.model_id = unknown_id.to_string();
+        let report = apply_lab_overrides(&mut app_config2)
+            .expect("BONSAI_LAB_MLX_ALLOW_UNKNOWN=1 で未知 id も Ok");
+        assert_eq!(
+            app_config2.model.model_id, unknown_id,
+            "opt-in 時は未知 model_id をそのまま保持"
+        );
+        assert!(report.mlx_only_applied.is_some());
+    }
+
     #[test]
     fn t_lab_task_limit_env_parse() {
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "5") };
+        let _env = EnvGuard::set("BONSAI_LAB_TASK_LIMIT", "5");
         assert_eq!(lab_task_limit(), Some(5), "env=\"5\" で Some(5)");
-        unsafe { std::env::remove_var("BONSAI_LAB_TASK_LIMIT") };
     }
 
     #[test]
@@ -2045,7 +2310,7 @@ max_iterations = 20
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         // 0 (下限外)
-        unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "0") };
+        let _env = EnvGuard::set("BONSAI_LAB_TASK_LIMIT", "0");
         assert_eq!(lab_task_limit(), None, "env=0 で None");
         // 16 (上限外)
         unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "16") };
@@ -2053,7 +2318,6 @@ max_iterations = 20
         // parse 失敗
         unsafe { std::env::set_var("BONSAI_LAB_TASK_LIMIT", "abc") };
         assert_eq!(lab_task_limit(), None, "parse 失敗で None");
-        unsafe { std::env::remove_var("BONSAI_LAB_TASK_LIMIT") };
     }
 
     // ── 項目 252 候補: F4 案 A MLX pre-warm env getter test (Phase 1 Red、stub で 2 FAIL) ──
@@ -2069,7 +2333,7 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP") };
+        let _env = EnvGuard::unset("BONSAI_LAB_MLX_WARMUP");
         assert!(
             !is_lab_mlx_warmup(),
             "env unset で MLX pre-warm OFF (default backward compat)"
@@ -2079,7 +2343,6 @@ max_iterations = 20
             is_lab_mlx_warmup(),
             "env=\"1\" で MLX pre-warm ON (Phase 2 Green PASS 期待)"
         );
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP") };
     }
 
     /// Phase 1 Red sanity: env unset で None (stub は常に None、PASS).
@@ -2088,7 +2351,7 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
+        let _env = EnvGuard::unset("BONSAI_LAB_MLX_WARMUP_COUNT");
         assert_eq!(
             lab_mlx_warmup_count(),
             None,
@@ -2102,13 +2365,12 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "5") };
+        let _env = EnvGuard::set("BONSAI_LAB_MLX_WARMUP_COUNT", "5");
         assert_eq!(
             lab_mlx_warmup_count(),
             Some(5),
             "env=\"5\" で Some(5) (Phase 2 Green PASS 期待)"
         );
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
     }
 
     /// Phase 1 Red sanity: range 外で None (stub は常に None、PASS).
@@ -2118,7 +2380,7 @@ max_iterations = 20
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         // 0 (下限外)
-        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "0") };
+        let _env = EnvGuard::set("BONSAI_LAB_MLX_WARMUP_COUNT", "0");
         assert_eq!(lab_mlx_warmup_count(), None, "env=0 で None");
         // 11 (上限外、1..=10)
         unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "11") };
@@ -2126,7 +2388,6 @@ max_iterations = 20
         // parse 失敗
         unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_COUNT", "abc") };
         assert_eq!(lab_mlx_warmup_count(), None, "parse 失敗で None");
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_COUNT") };
     }
 
     // ── 項目 252 M2 Phase 1 Red: lab_mlx_warmup_timeout_secs env getter 3 test ──
@@ -2140,7 +2401,7 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") };
+        let _env = EnvGuard::unset("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS");
         assert_eq!(
             lab_mlx_warmup_timeout_secs(),
             180,
@@ -2154,9 +2415,8 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "60") };
+        let _env = EnvGuard::set("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "60");
         let result = lab_mlx_warmup_timeout_secs();
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") };
         assert_eq!(
             result, 60,
             "env=60 で 60 を return (Phase 1 Red FAIL = stub は 0)"
@@ -2172,7 +2432,7 @@ max_iterations = 20
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         // env=0 = sentinel disable (Phase 2 Green で 0 を return、Phase 1 Red stub も 0 で trivial PASS)
-        unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "0") };
+        let _env = EnvGuard::set("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "0");
         assert_eq!(
             lab_mlx_warmup_timeout_secs(),
             0,
@@ -2181,7 +2441,6 @@ max_iterations = 20
         // env=601 = range out → Phase 2 Green で default 180 fallback
         unsafe { std::env::set_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS", "601") };
         let result_out = lab_mlx_warmup_timeout_secs();
-        unsafe { std::env::remove_var("BONSAI_LAB_MLX_WARMUP_TIMEOUT_SECS") };
         assert_eq!(
             result_out, 180,
             "env=601 (range out) で default 180 fallback (Phase 1 Red FAIL = stub は 0)"
@@ -2196,13 +2455,12 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::remove_var("BONSAI_MLX_IDLE_TIMEOUT_SEC") };
+        let _env = EnvGuard::unset("BONSAI_MLX_IDLE_TIMEOUT_SEC");
         assert_eq!(mlx_idle_timeout_sec(), 0, "unset で 0 (feature OFF)");
         unsafe { std::env::set_var("BONSAI_MLX_IDLE_TIMEOUT_SEC", "300") };
         assert_eq!(mlx_idle_timeout_sec(), 300, "env=300 で 300");
         unsafe { std::env::set_var("BONSAI_MLX_IDLE_TIMEOUT_SEC", "abc") };
         assert_eq!(mlx_idle_timeout_sec(), 0, "parse 失敗で 0");
-        unsafe { std::env::remove_var("BONSAI_MLX_IDLE_TIMEOUT_SEC") };
     }
 
     /// env 指定で env 値、未指定で mlx-openai-server を含むパス。
@@ -2211,7 +2469,7 @@ max_iterations = 20
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("BONSAI_MLX_SPAWN_PROGRAM", "/custom/mlx-bin") };
+        let _env = EnvGuard::set("BONSAI_MLX_SPAWN_PROGRAM", "/custom/mlx-bin");
         assert_eq!(
             mlx_spawn_program(),
             "/custom/mlx-bin",
@@ -2276,7 +2534,7 @@ max_iterations = 20
             .lock()
             .unwrap_or_else(|p| p.into_inner());
 
-        unsafe { std::env::set_var("BONSAI_SENSOR_WINDOW", "1") };
+        let _env = EnvGuard::set("BONSAI_SENSOR_WINDOW", "1");
         assert_eq!(is_window_sensor_enabled_env(), Some(true));
 
         unsafe { std::env::set_var("BONSAI_SENSOR_WINDOW", "0") };
@@ -2327,7 +2585,7 @@ api_key = "sk-advisor-from-config-toml"
         let _g = LAB_RUNTIME_ENV_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        unsafe { std::env::set_var("UNSLOTH_API_KEY", "sk-test-should-not-leak") };
+        let _env = EnvGuard::set("UNSLOTH_API_KEY", "sk-test-should-not-leak");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -2346,7 +2604,5 @@ api_key = "sk-advisor-from-config-toml"
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "config.toml は 0600 で作成されること");
         }
-
-        unsafe { std::env::remove_var("UNSLOTH_API_KEY") };
     }
 }
