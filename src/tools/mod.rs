@@ -35,6 +35,12 @@ pub struct ToolResult {
     /// `apply_tool_result` が circuit_breaker / trial_summary / KnowledgeGraph への
     /// 学習記録をスキップする（ユーザーの取消操作をツール品質シグナルとして
     /// 永続学習しないため、docs/VALUES.md V1/V4 準拠）。
+    /// FileStuckGuard の失敗記録もスキップされ、ToolCallStart/End event payload に
+    /// `"cancelled": true` が刻まれる（Issue #34、`agent::tool_exec::apply_tool_result`）。
+    /// cancelled な tool call を 1 件でも含むセッションは
+    /// `domain::event::build_trajectory_from_events` の trajectory 抽出、および
+    /// `classify_session_for_verification` の検証サンプル集計の双方から
+    /// 対象外になる（Issue #34 follow-up、ADR-016）。
     pub cancelled: bool,
 }
 

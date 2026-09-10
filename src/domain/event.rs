@@ -74,11 +74,50 @@ pub(crate) fn compute_duration_ms(start: &str, end: &str) -> u64 {
     }
 }
 
+/// ToolCall{Start,End} event payloadが「ユーザー取消 (Ctrl+C)」由来かを判定 (Issue #34)。
+/// payload例: {"tool":"shell","success":false,"cancelled":true}。
+/// - cancelledフィールド不在 → false (後方互換)
+/// - parse不能なpayload → false (従来どおり失敗として集計、分母を変えない)
+pub(crate) fn is_tool_call_cancelled(event_data: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(event_data)
+        .ok()
+        .and_then(|v| v.get("cancelled").and_then(|c| c.as_bool()))
+        .unwrap_or(false)
+}
+
+/// session 内に「ユーザー取消 (Ctrl+C) 由来の tool call」が 1 件でも存在するか (Issue #34 follow-up)。
+///
+/// `tool_call_start` / `tool_call_end` の双方を対象にする
+/// (`agent::tool_exec::apply_tool_result` は両 payload に `"cancelled": true` を刻む)。
+///
+/// # 用途
+/// session を「エージェント能力のラベル付き標本」として使えるかの適格性判定。
+/// 中断された session では「タスクが完遂したか」が観測不能になるため、
+/// 成功・失敗いずれの学習信号にも使わない (docs/VALUES.md V1/V4、ADR-016)。
+pub(crate) fn has_user_cancelled_tool_call(events: &[Event]) -> bool {
+    events.iter().any(|e| {
+        matches!(e.event_type.as_str(), "tool_call_start" | "tool_call_end")
+            && is_tool_call_cancelled(&e.event_data)
+    })
+}
+
 /// `&[Event]` から TrajectoryCandidate を構築する pure helper (項目 209)。
 ///
 /// `EventStore::build_trajectory` (SQLite) と `MockEventRepository` (in-memory) の
-/// 両方から共有される。SessionEnd 不在時は `None`、tool_call_start/end の JSON
-/// payload から `tool_sequence` と `tool_success_rate` を計算する。
+/// 両方から共有される。SessionEnd 不在時は `None`。
+/// `cancelled: true` な tool_call_start/end を 1 件でも含む session は、
+/// 「タスクが完遂したか」が観測不能になるため trajectory 候補にしない (`None`、
+/// Issue #34 follow-up、ADR-016)。この gate は構築点の単一箇所で強制されるため
+/// `min_steps=0` の caller (項目 235 `BONSAI_FACTCHECK_ALL_TRAJECTORIES`) でも
+/// 不変条件が保たれる。
+///
+/// gate を通過した session については tool_call_start/end の JSON payload から
+/// `tool_sequence` と `tool_success_rate` を計算する。
+///
+/// **注意**: 上記 gate を緩める(部分キャンセル session を候補化する)変更を行う
+/// 場合は、`tool_sequence` / `total_steps` / `tool_success_rate` から cancelled
+/// tool call を除外する per-call フィルタを**同時に再導入**すること。gate と
+/// per-call フィルタは一方だけでは信号純度を保てない。
 pub(crate) fn build_trajectory_from_events(
     session_id: &str,
     events: &[Event],
@@ -89,6 +128,12 @@ pub(crate) fn build_trajectory_from_events(
 
     let has_session_end = events.iter().any(|e| e.event_type == "session_end");
     if !has_session_end {
+        return None;
+    }
+
+    // Issue #34 follow-up: 部分キャンセルを含む session は「完遂したか」が観測
+    // 不能なため、成功・失敗いずれの trajectory 候補にもしない (ADR-016)。
+    if has_user_cancelled_tool_call(events) {
         return None;
     }
 
@@ -178,7 +223,10 @@ pub(crate) fn classify_task_type(task_context: &str) -> &'static str {
 /// - `Some(true)`  — task_type 一致 + SessionEnd 済 + AssistantMessage[last] に
 ///   `[検証済]` 含有 + 全 ToolCallEnd success → 成功 sample
 /// - `Some(false)` — task_type 一致 + SessionEnd 済 だが上記成功条件不満足 → 失敗 sample
-/// - `None` — task_type 不一致 / SessionEnd 不在 → sample 対象外
+/// - `None` — task_type 不一致 / SessionEnd 不在 / cancelled な tool call (ユーザー
+///   Ctrl+C 中断) を 1 件でも含む → sample 対象外 (Issue #34 follow-up、ADR-016)。
+///   `build_trajectory_from_events` の gate と対称なポリシー
+///   (`has_user_cancelled_tool_call` を共有)。
 pub(crate) fn classify_session_for_verification(
     events: &[Event],
     target_task_type: &str,
@@ -193,6 +241,12 @@ pub(crate) fn classify_session_for_verification(
         .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
         .unwrap_or_default();
     if classify_task_type(&task_ctx) != target_task_type {
+        return None;
+    }
+    // Issue #34 follow-up: cancelled な tool call を 1 件でも含む session は、
+    // 「完遂したか」が観測不能なため検証サンプル対象外とする
+    // (`build_trajectory_from_events` と対称、ADR-016)。
+    if has_user_cancelled_tool_call(events) {
         return None;
     }
     let last_assistant_marker = events
@@ -298,4 +352,298 @@ pub trait EventRepository {
     /// `inject_verification_step` の skip 判断に使用。
     fn verification_success_rate(&self, task_type: &str, min_samples: usize)
     -> Result<Option<f64>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テスト用 `Event` を構築する (id/step_index/created_at は固定値、比較に不要)。
+    fn ev(session_id: &str, event_type: &str, event_data: &str) -> Event {
+        Event {
+            id: 0,
+            session_id: session_id.to_string(),
+            event_type: event_type.to_string(),
+            event_data: event_data.to_string(),
+            step_index: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn t_is_tool_call_cancelled_detects_flag() {
+        assert!(is_tool_call_cancelled(
+            r#"{"tool":"shell","success":false,"cancelled":true}"#
+        ));
+    }
+
+    #[test]
+    fn t_is_tool_call_cancelled_absent_field_is_false() {
+        assert!(!is_tool_call_cancelled(
+            r#"{"tool":"shell","success":false}"#
+        ));
+    }
+
+    #[test]
+    fn t_is_tool_call_cancelled_malformed_json_is_false() {
+        assert!(!is_tool_call_cancelled(""));
+        assert!(!is_tool_call_cancelled("{"));
+        assert!(!is_tool_call_cancelled("not json at all"));
+    }
+
+    #[test]
+    fn t_build_trajectory_partial_cancel_is_not_a_candidate() {
+        // Issue #34 follow-up: cancelled な tool call を 1 件でも含む session は
+        // 分子・分母双方から除外するのではなく、trajectory 候補そのものから除外する
+        // (部分キャンセルが「完遂」に反転する qa-reviewer 指摘への対応)。
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":true}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"b"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"b","success":false}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"c","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"c","success":false,"cancelled":true}"#,
+            ),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert!(build_trajectory_from_events("s1", &events).is_none());
+    }
+
+    #[test]
+    fn t_build_trajectory_all_cancelled_is_not_a_candidate() {
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"a","success":false,"cancelled":true}"#,
+            ),
+            ev("s1", "tool_call_start", r#"{"tool":"b","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"b","success":false,"cancelled":true}"#,
+            ),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert!(build_trajectory_from_events("s1", &events).is_none());
+    }
+
+    #[test]
+    fn t_build_trajectory_legacy_payload_unchanged() {
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":true}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"b"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"b","success":true}"#),
+            ev("s1", "session_end", "{}"),
+        ];
+        let traj = build_trajectory_from_events("s1", &events).expect("session_end present");
+        assert_eq!(traj.total_steps, 2);
+        assert_eq!(traj.tool_success_rate, 1.0);
+        assert_eq!(traj.tool_sequence, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn t_has_user_cancelled_tool_call_detects_start_only() {
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a","cancelled":true}"#),
+        ];
+        assert!(has_user_cancelled_tool_call(&events));
+    }
+
+    #[test]
+    fn t_has_user_cancelled_tool_call_false_on_clean_session() {
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":true}"#),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert!(!has_user_cancelled_tool_call(&events));
+    }
+
+    #[test]
+    fn t_build_trajectory_real_failure_without_cancel_still_candidate() {
+        // 過剰除外していないことの回帰防止: cancelled 無しの実失敗は
+        // 引き続き failed バケット経路 (Some) が生きている。
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":true}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"b"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"b","success":false}"#),
+            ev("s1", "session_end", "{}"),
+        ];
+        let traj = build_trajectory_from_events("s1", &events).expect("no cancelled call");
+        assert_eq!(traj.tool_success_rate, 0.5);
+        assert_eq!(traj.total_steps, 2);
+    }
+
+    #[test]
+    fn t_build_trajectory_malformed_payload_is_not_treated_as_cancelled() {
+        // 後方互換: tool_call_end の payload が parse 不能でも `cancelled` 扱いにせず
+        // 候補構築は継続する (`is_tool_call_cancelled` の malformed→false 方針と整合)。
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", "{"),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert!(build_trajectory_from_events("s1", &events).is_some());
+    }
+
+    #[test]
+    fn t_build_trajectory_cancel_on_start_only_excludes_session() {
+        // 防御的 parse 頑健性: cancelled フラグが tool_call_start にしか無くても
+        // (tool_call_end 側に無くても) session を除外する。
+        let events = vec![
+            ev("s1", "session_start", "{}"),
+            ev("s1", "tool_call_start", r#"{"tool":"a","cancelled":true}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":false}"#),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert!(build_trajectory_from_events("s1", &events).is_none());
+    }
+
+    #[test]
+    fn t_classify_session_partial_cancel_is_not_a_sample() {
+        // この test の前提が今回の修正対象: 部分キャンセルは `Some(true)` ではなく
+        // `None` (標本対象外) を返す (Issue #34 follow-up)。
+        let events = vec![
+            ev("s1", "user_message", r#"{"content":"コマンドを実行して"}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":true}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"b","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"b","success":false,"cancelled":true}"#,
+            ),
+            ev(
+                "s1",
+                "assistant_message",
+                r#"{"content":"完了しました[検証済]"}"#,
+            ),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert_eq!(
+            classify_session_for_verification(&events, "shell_exec"),
+            None
+        );
+    }
+
+    #[test]
+    fn t_classify_session_partial_cancel_without_marker_is_not_a_sample() {
+        // 全 cancel 版 (`t_classify_session_all_cancelled_without_marker_is_not_a_sample`)
+        // と対になる部分キャンセル版。
+        let events = vec![
+            ev("s1", "user_message", r#"{"content":"コマンドを実行して"}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":true}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"b","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"b","success":false,"cancelled":true}"#,
+            ),
+            ev("s1", "assistant_message", r#"{"content":"中断しました"}"#),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert_eq!(
+            classify_session_for_verification(&events, "shell_exec"),
+            None
+        );
+    }
+
+    #[test]
+    fn t_classify_session_for_verification_still_false_on_real_failure() {
+        let events = vec![
+            ev("s1", "user_message", r#"{"content":"コマンドを実行して"}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"a"}"#),
+            ev("s1", "tool_call_end", r#"{"tool":"a","success":false}"#),
+            ev(
+                "s1",
+                "assistant_message",
+                r#"{"content":"完了しました[検証済]"}"#,
+            ),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert_eq!(
+            classify_session_for_verification(&events, "shell_exec"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn t_classify_session_all_cancelled_is_not_a_sample() {
+        let events = vec![
+            ev("s1", "user_message", r#"{"content":"コマンドを実行して"}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"a","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"a","success":false,"cancelled":true}"#,
+            ),
+            ev("s1", "tool_call_start", r#"{"tool":"b","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"b","success":false,"cancelled":true}"#,
+            ),
+            ev(
+                "s1",
+                "assistant_message",
+                r#"{"content":"完了しました[検証済]"}"#,
+            ),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert_eq!(
+            classify_session_for_verification(&events, "shell_exec"),
+            None
+        );
+    }
+
+    #[test]
+    fn t_classify_session_all_cancelled_without_marker_is_not_a_sample() {
+        let events = vec![
+            ev("s1", "user_message", r#"{"content":"コマンドを実行して"}"#),
+            ev("s1", "tool_call_start", r#"{"tool":"a","cancelled":true}"#),
+            ev(
+                "s1",
+                "tool_call_end",
+                r#"{"tool":"a","success":false,"cancelled":true}"#,
+            ),
+            ev("s1", "assistant_message", r#"{"content":"中断しました"}"#),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert_eq!(
+            classify_session_for_verification(&events, "shell_exec"),
+            None
+        );
+    }
+
+    #[test]
+    fn t_classify_session_no_tool_calls_unchanged() {
+        let events = vec![
+            ev("s1", "user_message", r#"{"content":"コマンドを実行して"}"#),
+            ev(
+                "s1",
+                "assistant_message",
+                r#"{"content":"完了しました[検証済]"}"#,
+            ),
+            ev("s1", "session_end", "{}"),
+        ];
+        assert_eq!(
+            classify_session_for_verification(&events, "shell_exec"),
+            Some(true)
+        );
+    }
 }

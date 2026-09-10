@@ -214,3 +214,67 @@ impl MockEventRepository {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #34 follow-up Phase 3 (#8): `min_steps=0` の caller でも部分キャンセル
+    /// session が trajectory 候補にならない不変条件を Mock 側で固定する
+    /// (qa-reviewer 指摘「将来 `min_steps=0` で不変条件が壊れる」への直接の回帰防止、
+    /// `src/agent/event_store.rs::t_event_store_partial_cancel_excluded_from_both_directions`
+    /// と同一 assertion で SQLite/Mock parity を確認する)。
+    #[test]
+    fn t_mock_partial_cancel_excluded_even_with_min_steps_zero() {
+        let mock = MockEventRepository::new();
+        mock.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        mock.append(
+            "s1",
+            &EventType::UserMessage,
+            r#"{"content":"ファイル一覧を取得して"}"#,
+            Some(0),
+        )
+        .unwrap();
+        mock.append("s1", &EventType::ToolCallStart, r#"{"tool":"a"}"#, Some(0))
+            .unwrap();
+        mock.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"a","success":true}"#,
+            Some(0),
+        )
+        .unwrap();
+        mock.append(
+            "s1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"b","cancelled":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        mock.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"b","success":false,"cancelled":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        mock.append("s1", &EventType::SessionEnd, "{}", None)
+            .unwrap();
+
+        let successful = mock
+            .extract_successful_trajectories_since_id(0, 0.0, 0)
+            .unwrap();
+        assert!(
+            successful.is_empty(),
+            "min_steps=0 でも部分キャンセル session は成功候補にならない"
+        );
+        let failed = mock
+            .extract_failed_trajectories_since_id(0, 1.0, 0)
+            .unwrap();
+        assert!(
+            failed.is_empty(),
+            "min_steps=0 でも部分キャンセル session は失敗候補にならない"
+        );
+    }
+}
