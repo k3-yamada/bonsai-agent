@@ -33,7 +33,12 @@ pub struct AgentConfig {
     ///   空リストは「設定した上で 0 個」＝明示的な意思表示として扱う）。
     ///
     /// `SubAgentConfig.allowed_tools` から `SubAgentExecutor::build_sub_config()` 経由で伝播。
-    /// 強制点は `agent_loop::step::execute_step` の 2 箇所（提示フィルタ / dispatch ガード）。
+    /// 強制点は 2 箇所:
+    /// 1. 提示フィルタ: `ToolRegistry::select_relevant_split_semantic` /
+    ///    `select_relevant_split`（`src/tools/mod.rs`）内、top-k 切り詰め**前**に
+    ///    `allowed` 引数として適用（Issue #29 で `agent_loop::step::execute_step` から移動）。
+    /// 2. dispatch ガード: `agent_loop::step::execute_step` 内、`ToolRegistry::get()`
+    ///    到達前に許可外呼び出しを遮断。
     pub allowed_tools: Option<Vec<String>>,
     /// ベース推論パラメータ（TaskTypeで動的調整）
     pub base_inference: InferenceParams,

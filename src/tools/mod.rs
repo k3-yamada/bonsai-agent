@@ -257,6 +257,18 @@ struct SemanticCache {
     tool_embeddings: HashMap<String, Vec<f32>>,
 }
 
+/// allowlist によるツール名フィルタ判定（Issue #29）。
+///
+/// `agent_loop::config::is_tool_allowed()` と判定ロジックが重複するが、
+/// `tools` 層は Clean Architecture (DEP-001) により `agent` 層へ依存できないため、
+/// 意図的に独立実装している。完全一致判定のみ（prefix/glob 非対応）。
+fn is_name_in_allowlist(allowed: Option<&[String]>, name: &str) -> bool {
+    match allowed {
+        None => true,
+        Some(names) => names.iter().any(|n| n == name),
+    }
+}
+
 /// ツールレジストリ — 登録・検索・動的選択を管理
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
@@ -392,11 +404,15 @@ impl ToolRegistry {
 
     /// ビルトイン/MCP分離選択: ビルトインは上位builtin_max件、MCPは別枠mcp_max件
     /// MCPツールは名前に':'を含む（"server:tool"形式）
+    ///
+    /// `allowed`: Some の場合、top-k 切り詰め **前** に候補集合を allowlist で絞る
+    /// (Issue #29: allowlist ツールが top-k 選択から溢れるのを防止)。
     pub fn select_relevant_split(
         &self,
         query: &str,
         builtin_max: usize,
         mcp_max: usize,
+        allowed: Option<&[String]>,
     ) -> Vec<&dyn Tool> {
         let query_lower = query.to_lowercase();
         let query_words: Vec<&str> = query_lower.split_whitespace().collect();
@@ -418,6 +434,9 @@ impl ToolRegistry {
         let mut builtin: Vec<(&dyn Tool, usize)> = Vec::new();
         let mut mcp: Vec<(&dyn Tool, usize)> = Vec::new();
         for tool in self.tools.values() {
+            if !is_name_in_allowlist(allowed, tool.name()) {
+                continue;
+            }
             let s = score_tool(tool.as_ref());
             if tool.name().contains(':') {
                 mcp.push((tool.as_ref(), s));
@@ -448,11 +467,15 @@ impl ToolRegistry {
     /// embedder初期化失敗時は`select_relevant_split`（キーワードマッチ）にフォールバック。
     ///
     /// キャッシュ: 初回呼び出しで embedder + ツール embedding行列を構築し、register時のみ無効化。
+    ///
+    /// `allowed`: Some の場合、top-k 切り詰め **前** に候補集合を allowlist で絞る
+    /// (Issue #29: allowlist ツールが top-k 選択から溢れるのを防止)。
     pub fn select_relevant_split_semantic(
         &self,
         query: &str,
         builtin_max: usize,
         mcp_max: usize,
+        allowed: Option<&[String]>,
     ) -> Vec<&dyn Tool> {
         // 1. キャッシュを初期化または検証
         let query_embedding = {
@@ -460,7 +483,7 @@ impl ToolRegistry {
                 Ok(g) => g,
                 Err(_) => {
                     // Mutex poisoned → キーワードフォールバック
-                    return self.select_relevant_split(query, builtin_max, mcp_max);
+                    return self.select_relevant_split(query, builtin_max, mcp_max, allowed);
                 }
             };
 
@@ -485,7 +508,7 @@ impl ToolRegistry {
                     }
                     _ => {
                         // embedding失敗 → キーワードフォールバック
-                        return self.select_relevant_split(query, builtin_max, mcp_max);
+                        return self.select_relevant_split(query, builtin_max, mcp_max, allowed);
                     }
                 }
             }
@@ -493,11 +516,11 @@ impl ToolRegistry {
             // クエリをembedding（Mutex内でembedder借用）
             let cache = match cache_guard.as_ref() {
                 Some(c) => c,
-                None => return self.select_relevant_split(query, builtin_max, mcp_max),
+                None => return self.select_relevant_split(query, builtin_max, mcp_max, allowed),
             };
             match cache.embedder.embed(&[query]) {
                 Ok(mut vs) if !vs.is_empty() => vs.swap_remove(0),
-                _ => return self.select_relevant_split(query, builtin_max, mcp_max),
+                _ => return self.select_relevant_split(query, builtin_max, mcp_max, allowed),
             }
         };
 
@@ -509,11 +532,11 @@ impl ToolRegistry {
         // 3. ハイブリッドスコアリング: 0.7 * cosine + 0.3 * 正規化キーワードスコア
         let cache_guard = match self.semantic_cache.lock() {
             Ok(g) => g,
-            Err(_) => return self.select_relevant_split(query, builtin_max, mcp_max),
+            Err(_) => return self.select_relevant_split(query, builtin_max, mcp_max, allowed),
         };
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
-            None => return self.select_relevant_split(query, builtin_max, mcp_max),
+            None => return self.select_relevant_split(query, builtin_max, mcp_max, allowed),
         };
 
         let max_keyword_score = query_words.len().max(1) as f32 + 2.0; // task_boost最大+2
@@ -521,6 +544,9 @@ impl ToolRegistry {
         let mut mcp: Vec<(&dyn Tool, f32)> = Vec::new();
 
         for (name, tool) in &self.tools {
+            if !is_name_in_allowlist(allowed, name) {
+                continue;
+            }
             let sem_score = cache
                 .tool_embeddings
                 .get(name)
@@ -1583,7 +1609,7 @@ mod tests {
     fn test_select_relevant_split_separates_builtin_and_mcp() {
         let reg = build_registry_with_mcp();
         // ビルトイン最大8、MCP最大3
-        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3);
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3, None);
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
         // ビルトイン6ツール全部入る（8枠）
         assert!(names.contains(&"shell"));
@@ -1598,7 +1624,7 @@ mod tests {
     fn test_select_relevant_split_mcp_limit() {
         let reg = build_registry_with_mcp();
         // MCP枠を1に制限
-        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 1);
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 1, None);
         let mcp_count = selected.iter().filter(|t| t.name().contains(':')).count();
         assert_eq!(mcp_count, 1);
     }
@@ -1606,7 +1632,7 @@ mod tests {
     #[test]
     fn test_select_relevant_split_no_mcp() {
         let reg = build_registry(); // MCPなし
-        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3);
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3, None);
         // ビルトインのみ
         assert_eq!(selected.len(), 6);
         assert!(selected.iter().all(|t| !t.name().contains(':')));
@@ -1616,7 +1642,7 @@ mod tests {
     fn test_select_relevant_split_zero_mcp() {
         let reg = build_registry_with_mcp();
         // MCP枠を0にすればMCPは選ばれない
-        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 0);
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 0, None);
         assert!(selected.iter().all(|t| !t.name().contains(':')));
     }
 
@@ -1624,5 +1650,74 @@ mod tests {
     fn test_max_mcp_tools_in_context_default() {
         let settings = crate::config::AgentSettings::default();
         assert_eq!(settings.max_mcp_tools_in_context, 3);
+    }
+
+    // ===== Issue #29: allowlist は top-k 切り詰めの前段で適用される =====
+    //
+    // 検証対象は `select_relevant_split`（キーワードマッチのみ、embedder/環境変数に
+    // 一切依存しない決定的な版）。「候補収集ループ先頭でallowlist継続判定→その後
+    // sort+take」というメカニズムは `select_relevant_split_semantic` と同一パターン
+    // なので、この決定的な版で検証すればメカニズムを保証できる
+    // (qa-reviewer指摘 [MEDIUM]: semantic版は `create_embedder()` 経由で
+    // `BONSAI_EMBED_URL` 等の運用環境変数を見て実HTTP接続を試みるため非ヘルメティック)。
+
+    /// builtin_max（既定8）を超える件数のツールを登録し、キーワード/task_boost
+    /// スコアで下位に沈むよう細工したツール ("obscure_widget") をallowlistに
+    /// 指定して select_relevant_split を呼ぶ。
+    ///
+    /// decoy 10件はツール名に "file" を含むため、query「ファイルを読みたい」の
+    /// task_boost（"ファイル"/"読" 検出 → "file" ブースト+2点）で score=2 を得る。
+    /// obscure_widget は名前・説明のいずれにも一致語を含まないため score=0 のまま
+    /// であり、修正前（top-k切り詰め後にretain）ではbuiltin_max=8の上位8件に
+    /// 入れず必ず溢れる。修正後は候補集合をallowlistで先に絞ってからtop-kを取る
+    /// ため、必ず結果に含まれる。
+    fn build_registry_for_topk_overflow() -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        // 「ファイル」「読」を含み query と強くマッチする decoy を10件登録
+        // (query_words の直接一致は無いが detect_task_boost の "file" ブーストが効く)
+        for i in 0..10 {
+            reg.register(Box::new(DummyTool::new(
+                &format!("file_tool_{i}"),
+                &format!("ファイルの操作その{i}"),
+            )));
+        }
+        // query/task_boost と一切関連しない語彙の低スコアツール（allowlist対象）
+        reg.register(Box::new(DummyTool::new(
+            "obscure_widget",
+            "特殊な内部処理を行う道具",
+        )));
+        reg
+    }
+
+    #[test]
+    fn test_select_relevant_split_without_allowlist_overflows_low_score_tool() {
+        // 前提確認: allowlist なしでは builtin_max=8 の上位に obscure_widget は入らない
+        // (decoy 10件がtask_boostでscore=2を得てtop-8を占有し、score=0の
+        // obscure_widgetが溢れるため)。select_relevant_splitはキーワードマッチのみで
+        // embedder/環境変数に依存しないため、どの実行環境でも決定的にこの結果になる。
+        let reg = build_registry_for_topk_overflow();
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3, None);
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"obscure_widget"),
+            "前提: allowlistなしでは低スコアツールがtop-kから溢れる: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_select_relevant_split_allowlist_survives_topk_overflow() {
+        // Issue #29 の核心: allowlist に低スコアツールのみを指定すると、
+        // top-k 切り詰めに関わらず必ず提示結果に含まれる。
+        // select_relevant_split はキーワードマッチのみで動作するため
+        // (embedder/HTTP接続なし)、環境変数の有無に関わらず決定的にpassする。
+        let reg = build_registry_for_topk_overflow();
+        let allowed = vec!["obscure_widget".to_string()];
+        let selected = reg.select_relevant_split("ファイルを読みたい", 8, 3, Some(&allowed));
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            vec!["obscure_widget"],
+            "allowlist で候補集合を先に絞るためtop-k溢れが起きない: {names:?}"
+        );
     }
 }

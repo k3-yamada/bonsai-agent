@@ -123,8 +123,10 @@ pub struct SubAgentConfig {
     pub max_iterations: usize,
     /// 許可するツール名（`None` なら全ツール、`Some(vec![])` なら全禁止）。
     /// Issue #25 以降、これは設定値ではなく実効的な強制ポリシーであり、
-    /// `build_sub_config()` で `AgentConfig.allowed_tools` へ伝播し、
-    /// `agent_loop::step::execute_step` の提示フィルタと dispatch ガードで強制される。
+    /// `build_sub_config()` で `AgentConfig.allowed_tools` へ伝播し、提示フィルタ
+    /// (`src/tools/mod.rs` の `ToolRegistry::select_relevant_split_semantic` /
+    /// `select_relevant_split`、top-k切り詰め前) と、`agent_loop::step::execute_step`
+    /// の dispatch ガードの2箇所で強制される。
     pub allowed_tools: Option<Vec<String>>,
     /// 親エージェントから引き継ぐ LLM context 予算 (項目 187 F2 ContextOverflowGuard)
     /// `None` なら legacy compaction 動作。サブエージェントが同じ backend を使う場合の
