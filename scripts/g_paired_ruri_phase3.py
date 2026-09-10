@@ -134,6 +134,7 @@ def mean(xs: list[float]) -> float:
 
 
 def run(args: argparse.Namespace) -> int:
+    args.ruri_url = args.ruri_url.rstrip("/")
     fixture_path = Path(args.fixture)
     with fixture_path.open(encoding="utf-8") as f:
         fixture = json.load(f)

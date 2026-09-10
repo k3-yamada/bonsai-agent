@@ -14,6 +14,7 @@ fi
   "${PY}" -m pip install -q "sentence-transformers>=3,<7"
 
 RURI_URL="${BONSAI_EMBED_URL:-http://127.0.0.1:8787}"
+RURI_URL="${RURI_URL%/}"
 if ! curl -sf "${RURI_URL}/health" >/dev/null; then
   echo "Ruri sidecar not healthy at ${RURI_URL}. Start: scripts/start-ruri-embed.sh" >&2
   exit 1
