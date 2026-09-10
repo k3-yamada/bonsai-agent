@@ -50,17 +50,17 @@ pub fn execute_step(
         .unwrap_or("");
 
     // セマンティックツール選択（ローカルONNX埋め込み、失敗時は自動でキーワード版にフォールバック）
-    let mut selected_tools = ctx.tools.select_relevant_split_semantic(
+    // Issue #25 提示フィルタ（1段目防御）→ Issue #29 で top-k 切り詰め前段に変更:
+    // allowed_tools を候補集合の絞り込みとして直接渡すため、許可外ツールのスキーマは
+    // そもそも top-k スコアリング対象に入らない。これにより allowlist ツールが
+    // 上位N件のスコアリングから漏れて提示スキーマがゼロになる問題（top-k溢れ）を解消する。
+    // allowed_tools == None ではフィルタなし（既存挙動と 100% 同一、受入条件6）。
+    let selected_tools = ctx.tools.select_relevant_split_semantic(
         last_user_msg,
         ctx.config.max_tools_in_context,
         ctx.config.max_mcp_tools_in_context,
+        ctx.config.allowed_tools.as_deref(),
     );
-    // Issue #25 提示フィルタ（1段目防御）: allowed_tools が Some のとき、
-    // 許可外ツールのスキーマをそもそも LLM へ提示しない。allowed_tools == None では
-    // retain 自体を実行しないため、既存挙動と 100% 同一（受入条件6）。
-    if ctx.config.allowed_tools.is_some() {
-        selected_tools.retain(|t| ctx.config.is_tool_allowed(t.name()));
-    }
     let tool_schemas: Vec<_> = selected_tools.iter().map(|t| t.schema()).collect();
 
     // 2. タスク種別に応じた推論パラメータ導出

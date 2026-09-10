@@ -69,15 +69,25 @@
    - `Verifier`: コンパイル・テスト・リント検証専用。
 5. **ツール allowlist の enforcement（Issue #25）**:
    - `SubAgentConfig.allowed_tools` は `SubAgentExecutor::build_sub_config()` で
-     `AgentConfig.allowed_tools` へ伝播し、`agent_loop::step::execute_step` の2段で強制される。
-     1. 提示フィルタ: 許可外ツールのスキーマをLLMに提示しない（プロンプト汚染の抑制）。
-     2. dispatchガード: `ToolRegistry::get()` 到達前に許可外呼び出しを遮断し、拒否理由と
-        「使用可能なツール一覧」を `Message::tool` でセッションへ返す（ループは継続）。
+     `AgentConfig.allowed_tools` へ伝播し、2箇所で強制される。
+     1. 提示フィルタ: `ToolRegistry::select_relevant_split_semantic` /
+        `select_relevant_split`（`src/tools/mod.rs`）で、許可外ツールのスキーマを
+        top-k切り詰め前に除外しLLMへ提示しない（プロンプト汚染の抑制）。
+     2. dispatchガード: `agent_loop::step::execute_step` で `ToolRegistry::get()`
+        到達前に許可外呼び出しを遮断し、拒否理由と「使用可能なツール一覧」を
+        `Message::tool` でセッションへ返す（ループは継続）。
    - 意味論: `None` = 全許可（既定・既存挙動不変） / `Some([..])` = 完全一致のみ許可 / `Some([])` = 全禁止。
      `ToolRegistry::apply_whitelist` の「空slice=no-op」とは意図的に非対称。
    - 判定は設定名の完全一致。prefix / glob / MCP `server:*` ワイルドカードは非対応。
-   - 既知の制約: 提示フィルタはtop-k選択の後段で働くため、許可ツールが選択枠から溢れると
-     提示数が減りうる（部分集合性は常に成立）。
+   - Issue #29 で解消済み: 提示フィルタは `ToolRegistry::select_relevant_split_semantic`
+     / `select_relevant_split` の候補収集段階（top-k切り詰めの**前段**）で `allowed`
+     引数として適用される。これにより許可ツール群の中でのtop-k選択となり、
+     許可ツールがセマンティックスコア下位に落ちても非許可ツールに押し出されて
+     提示から漏れることはない（ただし allowlist 自体が `max_tools_in_context`
+     既定8 / `max_mcp_tools_in_context` 既定3 を超える件数を含む場合は、
+     依然として超過分がtop-k切り詰めで落ちる）。判定ロジックは
+     （DEP-001 により `tools` 層が `agent` 層の `is_tool_allowed` を参照できないため）
+     `tools::mod` 内に独立実装した `is_name_in_allowlist`（完全一致のみ）を使用する。
 
 ### ロール別権限方針
 
