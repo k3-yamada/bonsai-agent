@@ -54,6 +54,7 @@ src/
 ├── tools/
 │   ├── mod.rs                     # Tool トレイト + ToolRegistry（動的選択）
 │   │                              # format_schemas_compact — Deferred Schema (トークン80%節約)
+│   ├── builtin.rs                 # BUILTIN_TOOL_NAMES / register_builtin_tools — builtin tool 登録の SSOT (Issue #28)
 │   ├── shell.rs / git.rs / web.rs / repomap.rs
 │   ├── file.rs                    # FileReadTool / FileWriteTool (fuzzy SEARCH/REPLACE)
 │   ├── plugin.rs                  # TOML定義カスタムツール

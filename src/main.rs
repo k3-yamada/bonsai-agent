@@ -15,13 +15,6 @@ use bonsai_agent::memory::store::MemoryStore;
 use bonsai_agent::runtime::inference::FallbackBackend;
 use bonsai_agent::runtime::llama_server::LlamaServerBackend;
 use bonsai_agent::tools::ToolRegistry;
-use bonsai_agent::tools::arxiv::ArxivTool;
-use bonsai_agent::tools::file::{FileReadTool, FileWriteTool, MultiEditTool};
-use bonsai_agent::tools::git::GitTool;
-use bonsai_agent::tools::memory::{RecallTool, RememberTool};
-use bonsai_agent::tools::repomap::RepoMapTool;
-use bonsai_agent::tools::shell::ShellTool;
-use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
 
 mod cli_admin;
 mod cli_args;
@@ -301,23 +294,15 @@ fn main() -> Result<()> {
 
 fn setup_tools(app_config: &AppConfig, cancel: &CancellationToken) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
-    tools.register(Box::new(
-        ShellTool::new()
-            .with_timeout(app_config.agent.shell_timeout_secs)
-            .with_cancel(cancel.clone())
-            .with_path_guard(PathGuard::new(app_config.safety.deny_paths.clone())),
-    ));
-    tools.register(Box::new(FileReadTool));
-    tools.register(Box::new(FileWriteTool));
-    tools.register(Box::new(MultiEditTool));
-    tools.register(Box::new(GitTool));
-    tools.register(Box::new(WebSearchTool));
-    tools.register(Box::new(WebFetchTool));
-    tools.register(Box::new(ArxivTool));
-    tools.register(Box::new(RepoMapTool));
-    // 能動的記憶ツール (①パーソナル知識デーモン Phase 1)
-    tools.register(Box::new(RememberTool::new(get_db_path())));
-    tools.register(Box::new(RecallTool::new(get_db_path())));
+    bonsai_agent::tools::builtin::register_builtin_tools(
+        &mut tools,
+        &bonsai_agent::tools::builtin::BuiltinToolDeps {
+            shell_timeout_secs: app_config.agent.shell_timeout_secs,
+            cancel: cancel.clone(),
+            path_guard: PathGuard::new(app_config.safety.deny_paths.clone()),
+            db_path: get_db_path(),
+        },
+    );
 
     // MCPサーバー起動・ツール登録
     for server_cfg in &app_config.mcp.servers {

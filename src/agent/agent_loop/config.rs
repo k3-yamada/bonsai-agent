@@ -108,6 +108,10 @@ impl AgentConfig {
 /// | `None` | 常に `true`（allowlist 未設定 = 全許可） |
 /// | `Some(&[])` | 常に `false`（空リスト = 全禁止） |
 /// | `Some(&[..])` | 完全一致した要素があるときのみ `true` |
+///
+/// `crate::tools::is_name_in_allowlist()` と判定ロジックが重複するが、
+/// `tools` 層は DEP-001 により `agent` 層へ依存できないため独立実装している。
+/// 両者の等価性は `tests::allowlist_parity_over_representative_matrix`（Issue #31）で固定。
 pub fn is_tool_allowed(allowed: Option<&[String]>, name: &str) -> bool {
     match allowed {
         None => true,
@@ -217,5 +221,135 @@ mod tests {
         };
         assert!(config.is_tool_allowed("shell"));
         assert!(!config.is_tool_allowed("file_read"));
+    }
+
+    /// Issue #31: `is_tool_allowed`（agent層）と`crate::tools::is_name_in_allowlist`
+    /// （tools層、DEP-001により独立実装）が、代表的な入力の直積110通りで
+    /// 常に等価な結果を返すことを固定する契約テスト。
+    #[test]
+    fn allowlist_parity_over_representative_matrix() {
+        use crate::tools::is_name_in_allowlist;
+
+        let allowed_cases: Vec<(&str, Option<Vec<String>>)> = vec![
+            ("None", None),
+            ("Some([])", Some(vec![])),
+            ("Some([\"file_read\"])", Some(vec!["file_read".to_string()])),
+            (
+                "Some([\"file_read\",\"shell\"])",
+                Some(vec!["file_read".to_string(), "shell".to_string()]),
+            ),
+            (
+                "Some([\"fs:read_file\"])",
+                Some(vec!["fs:read_file".to_string()]),
+            ),
+            ("Some([\"File_Read\"])", Some(vec!["File_Read".to_string()])),
+            ("Some([\"\"])", Some(vec!["".to_string()])),
+            (
+                "Some([\"file_read \"])",
+                Some(vec!["file_read ".to_string()]),
+            ),
+            ("Some([\"file_*\"])", Some(vec!["file_*".to_string()])),
+            (
+                "Some([\"日本語ツール\"])",
+                Some(vec!["日本語ツール".to_string()]),
+            ),
+            (
+                "Some([\"file_read\",\"file_read\"])",
+                Some(vec!["file_read".to_string(), "file_read".to_string()]),
+            ),
+        ];
+
+        let names = [
+            "file_read",
+            "shell",
+            "fs:read_file",
+            "File_Read",
+            "",
+            "file_read ",
+            "file_*",
+            "日本語ツール",
+            "file",
+            "file_read_extra",
+        ];
+
+        for (label, allowed) in &allowed_cases {
+            for &n in &names {
+                let a = allowed.as_deref();
+                assert_eq!(
+                    is_tool_allowed(a, n),
+                    is_name_in_allowlist(a, n),
+                    "allowlist parity drift: allowed={label}, name={n:?}"
+                );
+            }
+        }
+    }
+
+    /// Issue #31: parity テストがトートロジーに陥らないよう、期待される意味論
+    /// （完全一致・大小区別・prefix/glob非対応）を両関数に対してアンカー固定する。
+    #[test]
+    fn allowlist_parity_anchors_expected_semantics() {
+        use crate::tools::is_name_in_allowlist;
+
+        struct Case {
+            allowed: Option<Vec<String>>,
+            name: &'static str,
+            expected: bool,
+            desc: &'static str,
+        }
+
+        let cases = vec![
+            Case {
+                allowed: None,
+                name: "shell",
+                expected: true,
+                desc: "None = 全許可",
+            },
+            Case {
+                allowed: Some(vec![]),
+                name: "shell",
+                expected: false,
+                desc: "空リスト = 全禁止",
+            },
+            Case {
+                allowed: Some(vec!["shell".to_string()]),
+                name: "shell",
+                expected: true,
+                desc: "完全一致",
+            },
+            Case {
+                allowed: Some(vec!["shell".to_string()]),
+                name: "Shell",
+                expected: false,
+                desc: "大小区別",
+            },
+            Case {
+                allowed: Some(vec!["file".to_string()]),
+                name: "file_read",
+                expected: false,
+                desc: "prefix不可",
+            },
+            Case {
+                allowed: Some(vec!["fs:*".to_string()]),
+                name: "fs:read_file",
+                expected: false,
+                desc: "glob不可",
+            },
+        ];
+
+        for c in &cases {
+            let a = c.allowed.as_deref();
+            assert_eq!(
+                is_tool_allowed(a, c.name),
+                c.expected,
+                "is_tool_allowed: {}",
+                c.desc
+            );
+            assert_eq!(
+                is_name_in_allowlist(a, c.name),
+                c.expected,
+                "is_name_in_allowlist: {}",
+                c.desc
+            );
+        }
     }
 }

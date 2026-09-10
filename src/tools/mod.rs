@@ -1,4 +1,5 @@
 pub mod arxiv;
+pub mod builtin;
 pub mod descriptions;
 pub mod file;
 pub mod git;
@@ -169,20 +170,6 @@ pub fn memory_directive(task_type: TaskType) -> Option<&'static str> {
     }
 }
 
-impl TaskType {
-    /// このタスク種別で許可されるツール名プレフィックスを返す
-    /// GeneralはNone（フィルタなし）
-    fn allowed_prefixes(&self) -> Option<&[&str]> {
-        match self {
-            TaskType::FileOperation => Some(&["file_read", "file_write", "multi_edit", "repo_map"]),
-            TaskType::CodeExecution => Some(&["shell", "git"]),
-            TaskType::Research => Some(&["web_search", "web_fetch", "arxiv_search"]),
-            TaskType::Memory => Some(&["remember", "recall"]),
-            TaskType::General => None,
-        }
-    }
-}
-
 /// ツール結果のセッション内キャッシュ — 読取専用ツールの重複I/Oを防止
 /// キー: "tool_name:args_json" でツール名+引数のJSON文字列化
 pub struct ToolResultCache {
@@ -269,7 +256,9 @@ struct SemanticCache {
 /// `agent_loop::config::is_tool_allowed()` と判定ロジックが重複するが、
 /// `tools` 層は Clean Architecture (DEP-001) により `agent` 層へ依存できないため、
 /// 意図的に独立実装している。完全一致判定のみ（prefix/glob 非対応）。
-fn is_name_in_allowlist(allowed: Option<&[String]>, name: &str) -> bool {
+/// 両者の等価性は `agent_loop::config::tests::allowlist_parity_over_representative_matrix`
+/// （Issue #31）で固定している。
+pub(crate) fn is_name_in_allowlist(allowed: Option<&[String]>, name: &str) -> bool {
     match allowed {
         None => true,
         Some(names) => names.iter().any(|n| n == name),
@@ -379,36 +368,6 @@ impl ToolRegistry {
         }
     }
 
-    /// クエリに関連するツールを動的に選択（上位max件）。
-    /// キーワードマッチングでスコアリングし、スコアの高い順に返す。
-    pub fn select_relevant(&self, query: &str, max: usize) -> Vec<&dyn Tool> {
-        let query_lower = query.to_lowercase();
-        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-        let task_boost = Self::detect_task_boost(&query_lower);
-
-        let mut scored: Vec<(&dyn Tool, usize)> = self
-            .tools
-            .values()
-            .map(|tool| {
-                let name = tool.name().to_lowercase();
-                let desc = tool.description().to_lowercase();
-                let mut score = query_words
-                    .iter()
-                    .filter(|w| name.contains(*w) || desc.contains(*w))
-                    .count();
-                if task_boost.iter().any(|b| name.contains(b)) {
-                    score += 2;
-                }
-                (tool.as_ref(), score)
-            })
-            .collect();
-
-        // スコア降順でソート（同スコアはツール名のアルファベット順）
-        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
-
-        scored.into_iter().take(max).map(|(t, _)| t).collect()
-    }
-
     /// ビルトイン/MCP分離選択: ビルトインは上位builtin_max件、MCPは別枠mcp_max件
     /// MCPツールは名前に':'を含む（"server:tool"形式）
     ///
@@ -467,6 +426,50 @@ impl ToolRegistry {
         result
     }
 
+    /// 与えられたembedderで「ツール名→説明文embedding」行列を構築する。
+    /// embedderの出所には依存しない（合成ルート`create_embedder()`は呼び出し側の責務）。
+    /// 埋め込み件数がツール数と一致しない場合は`None`（呼び出し側がキーワード版へフォールバック）。
+    /// # 制約: 本関数は`self.semantic_cache`をロックしない（呼び出し側がguard保持前提）。
+    fn build_semantic_cache(&self, embedder: Box<dyn Embedder>) -> Option<SemanticCache> {
+        let tool_names: Vec<String> = self.tools.keys().cloned().collect();
+        let tool_descs: Vec<&str> = tool_names
+            .iter()
+            .filter_map(|n| self.tools.get(n).map(|t| t.description()))
+            .collect();
+        match embedder.embed(&tool_descs) {
+            Ok(vecs) if vecs.len() == tool_names.len() => {
+                let mut map = HashMap::with_capacity(tool_names.len());
+                for (name, v) in tool_names.into_iter().zip(vecs) {
+                    map.insert(name, v);
+                }
+                Some(SemanticCache {
+                    embedder,
+                    tool_embeddings: map,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// テスト用: semantic cacheを指定embedderで事前構築する（Issue #31）。
+    ///
+    /// 呼んでおくと`select_relevant_split_semantic`は遅延構築に入らず、
+    /// `create_embedder()`（`BONSAI_EMBED_URL`/HTTP/fastembed）に一切触れない。
+    /// 必ず全ツール`register()`後に呼ぶこと（`register()`はキャッシュを無効化する）。
+    #[cfg(test)]
+    fn prime_semantic_cache(&self, embedder: Box<dyn Embedder>) -> bool {
+        let Ok(mut guard) = self.semantic_cache.lock() else {
+            return false;
+        };
+        match self.build_semantic_cache(embedder) {
+            Some(cache) => {
+                *guard = Some(cache);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// セマンティック類似度ベースのビルトイン/MCP分離選択
     ///
     /// ローカルONNX埋め込みモデル（FastEmbedder/AllMiniLML6V2）でツール説明とクエリを
@@ -496,24 +499,9 @@ impl ToolRegistry {
 
             // 初回またはinvalidate後: 遅延構築
             if cache_guard.is_none() {
-                let embedder = create_embedder();
-                let tool_names: Vec<String> = self.tools.keys().cloned().collect();
-                let tool_descs: Vec<&str> = tool_names
-                    .iter()
-                    .filter_map(|n| self.tools.get(n).map(|t| t.description()))
-                    .collect();
-                match embedder.embed(&tool_descs) {
-                    Ok(vecs) if vecs.len() == tool_names.len() => {
-                        let mut map = HashMap::with_capacity(tool_names.len());
-                        for (name, v) in tool_names.into_iter().zip(vecs) {
-                            map.insert(name, v);
-                        }
-                        *cache_guard = Some(SemanticCache {
-                            embedder,
-                            tool_embeddings: map,
-                        });
-                    }
-                    _ => {
+                match self.build_semantic_cache(create_embedder()) {
+                    Some(c) => *cache_guard = Some(c),
+                    None => {
                         // embedding失敗 → キーワードフォールバック
                         return self.select_relevant_split(query, builtin_max, mcp_max, allowed);
                     }
@@ -664,44 +652,6 @@ impl ToolRegistry {
         }
         output
     }
-    /// タスク種別に基づいてツールをフィルタリングしてから選択する
-    /// GeneralはフィルタなしでIALを維持（既存動作と同一）
-    pub fn select_relevant_with_type(&self, query: &str, max: usize) -> Vec<&dyn Tool> {
-        let task_type = detect_task_type(query);
-        let allowed = task_type.allowed_prefixes();
-
-        let query_lower = query.to_lowercase();
-        let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-        let task_boost = Self::detect_task_boost(&query_lower);
-
-        let mut scored: Vec<(&dyn Tool, usize)> = self
-            .tools
-            .values()
-            .filter(|tool| {
-                // Generalならフィルタなし、それ以外は許可リストでフィルタ
-                match allowed {
-                    None => true,
-                    Some(prefixes) => prefixes.iter().any(|p| tool.name() == *p),
-                }
-            })
-            .map(|tool| {
-                let name = tool.name().to_lowercase();
-                let desc = tool.description().to_lowercase();
-                let mut score = query_words
-                    .iter()
-                    .filter(|w| name.contains(*w) || desc.contains(*w))
-                    .count();
-                if task_boost.iter().any(|b| name.contains(b)) {
-                    score += 2;
-                }
-                (tool.as_ref(), score)
-            })
-            .collect();
-
-        scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name().cmp(b.0.name())));
-        scored.into_iter().take(max).map(|(t, _)| t).collect()
-    }
-
     /// 段階的開示: 第1段階は名前+summaryのみ（超軽量）、第2段階は選択ツールの全スキーマ展開
     ///
     /// compactとの違い: compactは名前+description、progressiveは名前+summary（より短い1行）
@@ -848,21 +798,10 @@ mod tests {
 
     /// 本番 setup_tools 相当の全 tool 名 (DummyTool) を登録した registry.
     /// whitelist filter test 用に readonly/write 双方を含む.
+    /// tool 名の一次情報は `builtin::BUILTIN_TOOL_NAMES`（Issue #28 SSOT化）。
     fn build_full_registry() -> ToolRegistry {
         let mut reg = ToolRegistry::new();
-        for name in [
-            "shell",
-            "file_read",
-            "file_write",
-            "multi_edit",
-            "git",
-            "web_search",
-            "web_fetch",
-            "arxiv_search",
-            "repo_map",
-            "remember",
-            "recall",
-        ] {
+        for name in crate::tools::builtin::BUILTIN_TOOL_NAMES {
             reg.register(Box::new(DummyTool::new(name, "ダミー")));
         }
         reg
@@ -1012,27 +951,27 @@ mod tests {
     }
 
     #[test]
-    fn test_select_relevant_keyword_match() {
+    fn test_select_relevant_split_keyword_match() {
         let reg = build_registry();
         // 「ファイル」で検索 → file_read, file_write がマッチ
-        let selected = reg.select_relevant("ファイルを読みたい", 5);
+        let selected = reg.select_relevant_split("ファイルを読みたい", 5, 0, None);
         assert!(!selected.is_empty());
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"file_read"));
     }
 
     #[test]
-    fn test_select_relevant_max_limit() {
+    fn test_select_relevant_split_max_limit() {
         let reg = build_registry();
-        let selected = reg.select_relevant("操作 実行 検索", 2);
+        let selected = reg.select_relevant_split("操作 実行 検索", 2, 0, None);
         assert!(selected.len() <= 2);
     }
 
     #[test]
-    fn test_select_relevant_no_match() {
+    fn test_select_relevant_split_no_match() {
         let reg = build_registry();
         // マッチしないクエリでも全ツール（スコア0）が返る
-        let selected = reg.select_relevant("xyz123", 3);
+        let selected = reg.select_relevant_split("xyz123", 3, 0, None);
         assert_eq!(selected.len(), 3);
     }
 
@@ -1118,7 +1057,7 @@ mod tests {
     #[test]
     fn test_task_boost_file_query() {
         let reg = build_registry();
-        let selected = reg.select_relevant("ファイルを読みたい", 3);
+        let selected = reg.select_relevant_split("ファイルを読みたい", 3, 0, None);
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
         // file系ツールがブーストされて上位に来る
         assert_eq!(names[0], "file_read");
@@ -1127,7 +1066,7 @@ mod tests {
     #[test]
     fn test_task_boost_git_query() {
         let reg = build_registry();
-        let selected = reg.select_relevant("gitのコミット履歴を見たい", 3);
+        let selected = reg.select_relevant_split("gitのコミット履歴を見たい", 3, 0, None);
         let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"git"));
     }
@@ -1180,7 +1119,7 @@ mod tests {
     fn test_task_boost_no_boost() {
         let reg = build_registry();
         // ブーストキーワードなしのクエリ
-        let selected = reg.select_relevant("天気を教えて", 3);
+        let selected = reg.select_relevant_split("天気を教えて", 3, 0, None);
         assert_eq!(selected.len(), 3);
     }
 
@@ -1330,15 +1269,6 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_allowed_prefixes() {
-        assert_eq!(
-            TaskType::Memory.allowed_prefixes(),
-            Some(&["remember", "recall"][..]),
-            "Memory タスクは remember/recall のみ提示すべき"
-        );
-    }
-
-    #[test]
     fn test_task_boost_memory_surfaces_tools() {
         // live loop (select_relevant_split_semantic) は detect_task_boost の
         // 返り値をツール名に部分一致させてスコア加点する。記憶クエリで
@@ -1361,71 +1291,6 @@ mod tests {
             !b.contains(&"remember") && !b.contains(&"recall"),
             "メモリ(RAM)は記憶ツールを boost しない: {b:?}"
         );
-    }
-
-    #[test]
-    fn test_select_relevant_with_type_file_operation() {
-        let reg = build_registry();
-        // ファイル操作クエリ → file_read, file_writeのみに絞られる
-        let selected = reg.select_relevant_with_type("ファイルを読みたい", 10);
-        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"file_read"));
-        assert!(names.contains(&"file_write"));
-        // shell, git, web_search等は含まれない
-        assert!(!names.contains(&"shell"));
-        assert!(!names.contains(&"git"));
-        assert!(!names.contains(&"web_search"));
-    }
-
-    #[test]
-    fn test_select_relevant_with_type_code_execution() {
-        let reg = build_registry();
-        let selected = reg.select_relevant_with_type("コマンドを実行する", 10);
-        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"shell"));
-        assert!(names.contains(&"git"));
-        assert!(!names.contains(&"file_read"));
-    }
-
-    #[test]
-    fn test_select_relevant_with_type_research() {
-        let reg = build_registry();
-        let selected = reg.select_relevant_with_type("Webで検索して", 10);
-        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"web_search"));
-        assert!(!names.contains(&"shell"));
-    }
-
-    #[test]
-    fn test_select_relevant_with_type_general_no_filter() {
-        let reg = build_registry();
-        // Generalは全ツールが候補（既存動作と同一）
-        let selected = reg.select_relevant_with_type("天気を教えて", 10);
-        assert_eq!(selected.len(), 6); // build_registry()は6ツール登録
-    }
-
-    #[test]
-    fn test_select_relevant_with_type_respects_max() {
-        let reg = build_registry();
-        let selected = reg.select_relevant_with_type("天気を教えて", 2);
-        assert!(selected.len() <= 2);
-    }
-
-    #[test]
-    fn test_select_relevant_unchanged() {
-        // 既存のselect_relevantが変更されていないことを確認
-        let reg = build_registry();
-        let selected = reg.select_relevant("ファイルを読みたい", 5);
-        // select_relevantはフィルタなし → 5件返る
-        assert_eq!(selected.len(), 5);
-    }
-
-    #[test]
-    fn test_task_type_allowed_prefixes() {
-        assert!(TaskType::FileOperation.allowed_prefixes().is_some());
-        assert!(TaskType::CodeExecution.allowed_prefixes().is_some());
-        assert!(TaskType::Research.allowed_prefixes().is_some());
-        assert!(TaskType::General.allowed_prefixes().is_none());
     }
 
     #[test]
@@ -1675,6 +1540,13 @@ mod tests {
     // なので、この決定的な版で検証すればメカニズムを保証できる
     // (qa-reviewer指摘 [MEDIUM]: semantic版は `create_embedder()` 経由で
     // `BONSAI_EMBED_URL` 等の運用環境変数を見て実HTTP接続を試みるため非ヘルメティック)。
+    //
+    // 【Issue #31 追記】上記の非ヘルメティック理由により、上記コメント記載時点では
+    // semantic 版を検証対象から除外していたが、`ToolRegistry::prime_semantic_cache`
+    // （テスト専用 seam）の導入により `create_embedder()` を経由せず決定的な
+    // embedder を注入できるようになった。以下の
+    // `test_semantic_allowlist_survives_topk_overflow_*` / `test_semantic_empty_allowlist_denies_all`
+    // が semantic 版を直接カバーする。
 
     /// builtin_max（既定8）を超える件数のツールを登録し、キーワード/task_boost
     /// スコアで下位に沈むよう細工したツール ("obscure_widget") をallowlistに
@@ -1734,5 +1606,113 @@ mod tests {
             vec!["obscure_widget"],
             "allowlist で候補集合を先に絞るためtop-k溢れが起きない: {names:?}"
         );
+    }
+
+    // ===== Issue #31: semantic 版の top-k 溢れ回帰ガード =====
+    //
+    // `prime_semantic_cache`（テスト専用 seam）で決定的な embedder を注入し、
+    // `create_embedder()`（`BONSAI_EMBED_URL`/HTTP/fastembed）に一切触れずに
+    // `select_relevant_split_semantic` の allowlist 前段適用を直接検証する。
+
+    /// `build_registry_for_topk_overflow` に加え、MCP名（コロン付き）の decoy 5件と
+    /// allowlist対象の `mcp:obscure_widget` を追加したフィクスチャ。
+    fn build_registry_for_topk_overflow_with_mcp() -> ToolRegistry {
+        let mut reg = build_registry_for_topk_overflow();
+        for i in 0..5 {
+            reg.register(Box::new(DummyTool::new(
+                &format!("mcp:file_tool_{i}"),
+                &format!("ファイルの操作その{i}(MCP)"),
+            )));
+        }
+        reg.register(Box::new(DummyTool::new(
+            "mcp:obscure_widget",
+            "特殊な内部処理を行う道具(MCP)",
+        )));
+        reg
+    }
+
+    /// allowlist対象ツールを意味スコア最下位に叩き落とす敵対的embedder（Issue #31）。
+    /// 説明文に「特殊」を含むものだけゼロベクトルを返し、それ以外とクエリには
+    /// 同一の単位ベクトルを返す。→ cosine: decoy=1.0, obscure=0.0
+    struct AdversarialEmbedder;
+
+    impl Embedder for AdversarialEmbedder {
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0.0f32; 8];
+                    if !t.contains("特殊") {
+                        v[0] = 1.0;
+                    }
+                    v
+                })
+                .collect())
+        }
+
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    #[test]
+    fn test_semantic_allowlist_survives_topk_overflow_hash_embedder() {
+        use crate::domain::embedder::SimpleEmbedder;
+
+        let reg = build_registry_for_topk_overflow();
+        assert!(reg.prime_semantic_cache(Box::new(SimpleEmbedder::default())));
+        let allowed = vec!["obscure_widget".to_string()];
+        let selected =
+            reg.select_relevant_split_semantic("ファイルを読みたい", 8, 3, Some(&allowed));
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            vec!["obscure_widget"],
+            "allowlist で候補集合を先に絞るためtop-k溢れが起きない(hash embedder): {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_semantic_allowlist_survives_topk_overflow_adversarial_embedder() {
+        // 項目2の核心: embedder が obscure_widget を意味スコア最下位に叩き落としても
+        // allowlist による候補集合の事前絞り込みが top-k 溢れを防ぐ。
+        let reg = build_registry_for_topk_overflow();
+        assert!(reg.prime_semantic_cache(Box::new(AdversarialEmbedder)));
+        let allowed = vec!["obscure_widget".to_string()];
+        let selected =
+            reg.select_relevant_split_semantic("ファイルを読みたい", 8, 3, Some(&allowed));
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            vec!["obscure_widget"],
+            "embedderが意味スコアを最下位に落としてもallowlistがtop-k溢れを防ぐ: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_semantic_allowlist_survives_topk_overflow_for_mcp_tool() {
+        let reg = build_registry_for_topk_overflow_with_mcp();
+        assert!(reg.prime_semantic_cache(Box::new(AdversarialEmbedder)));
+        let allowed = vec!["mcp:obscure_widget".to_string()];
+        let selected =
+            reg.select_relevant_split_semantic("ファイルを読みたい", 8, 3, Some(&allowed));
+        let names: Vec<&str> = selected.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            vec!["mcp:obscure_widget"],
+            "MCPツールでもallowlistがtop-k溢れを防ぐ: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_semantic_empty_allowlist_denies_all() {
+        use crate::domain::embedder::SimpleEmbedder;
+
+        let reg = build_registry_for_topk_overflow();
+        assert!(reg.prime_semantic_cache(Box::new(SimpleEmbedder::default())));
+        let allowed: Vec<String> = Vec::new();
+        let selected =
+            reg.select_relevant_split_semantic("ファイルを読みたい", 8, 3, Some(&allowed));
+        assert!(selected.is_empty(), "空allowlistは全ツール拒否");
     }
 }
