@@ -162,6 +162,20 @@ curl -s http://127.0.0.1:8787/v1/embeddings \
   -d '{"model":"cl-nagoya/ruri-v3-30m","input":"頭痛で休んだ","input_type":"document"}'
 ```
 
+## Phase 3 — MiniLM 対照（offline paired）
+
+```bash
+# sidecar 起動済み前提
+./scripts/g_paired_ruri_phase3.sh
+# 先頭 N 件のみ: ./scripts/g_paired_ruri_phase3.sh --limit 5
+```
+
+- Fixture: `scripts/ruri_embed_server/fixtures/ja_episodes_phase3.json`
+- A: `sentence-transformers/all-MiniLM-L6-v2`（本番 fastembed と同系）
+- B: 本 sidecar（`input_type=query|document`）
+- 判定: `scripts/lab_v22_metric.py` 相当（mean Δ≥0.010 / Wilcoxon / Cohen's dz）。factcheck ゲートは N/A。
+- **default 切替はしない**（ACCEPT 後も opt-in env）。
+
 ## 非ゴール
 
 - チャット補完 API（`/v1/chat/completions`）の同居

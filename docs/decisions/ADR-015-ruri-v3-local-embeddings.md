@@ -1,6 +1,6 @@
 # ADR-015: ローカル日本語埋め込みに Ruri v3 を採用（内部完結・prefix 規約）
 
-## Status: Proposed (2026-09-10)
+## Status: Proposed — Phase 3 offline ACCEPT（default 切替は未実施）(2026-09-10)
 
 ## Context
 
@@ -83,6 +83,7 @@ Ruri v3（`cl-nagoya/ruri-v3-*`、Apache-2.0、ModernBERT-Ja、最大 8192 tok�
 - Phase 0: 完了（本ドキュメント + `scripts/ruri_embed_server/`）。
 - Phase 1: 参照実装で `cl-nagoya/ruri-v3-30m` preload → `/health` dim=256、query/document embed 疎通、関連文書の cosine が非関連より高いことを確認。
 - Phase 2: `EmbedInputType` + `Embedder::embed_typed` を追加。`HttpEmbedder` が `input_type` を送信。`HybridSearch::search` は Query、文書 index / linear scan / `ensure_vec_table` は Document。ツール選択セマンティックは従来どおり `embed()` = Semantic。
+- Phase 3（offline ranking）: `scripts/g_paired_ruri_phase3.py` + fixture 24 項目。A=`all-MiniLM-L6-v2` / B=`ruri-v3-30m`（query/document prefix）。主指標 margin Δ=B−A。結果: **mean Δ=+0.0835 / Cohen's dz=+0.707 / Wilcoxon p=0.0014 / hit@1 A=0.417 B=1.000** → ADR-003 smoke・full 相当ゲートとも **ACCEPT**。※これは埋め込み品質の offline paired であり、**cargo 既定 embedder の MiniLM→Ruri 切替はまだ行わない**（日本語利用は `BONSAI_EMBED_URL` opt-in。フル Lab / LongMemEval は別ゲート）。
 
 ## Related
 

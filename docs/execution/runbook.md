@@ -189,7 +189,7 @@ cubist `mlx-openai-server` の drop-in 代替 (`scripts/mlx_server/server.py`)�
 
 - **使い方**: `start-mlx-server.sh` (cubist) の代わりに `start-mlx-sidecar.sh` を起動するだけで bonsai は memory-optimized server を使う。
 - **ローカル埋め込み (offline)**: sidecar 起動後、bonsai 側で `BONSAI_EMBED_URL=http://localhost:8888` を設定すると `/v1/embeddings` 経由で埋め込みを取得する。これにより `embeddings` feature (fastembed/ONNX、ort バイナリの build-time DL) なしで実埋め込みが使え、ビルド時 403 と実行時 HF DL の両方を回避できる。`mlx_embeddings` は `scripts/setup_mlx_ternary.sh` で venv に導入する。
-- **Ruri v3 日本語埋め込み (ADR-015, 推奨・内部完結)**: チャット用 MLX とは別プロセス。仕様は [ruri-embed-sidecar.md](ruri-embed-sidecar.md)。起動例: `./scripts/start-ruri-embed.sh` のあと `BONSAI_EMBED_URL=http://127.0.0.1:8787` + `BONSAI_EMBED_MODEL=cl-nagoya/ruri-v3-30m`。`input_type`（`query`/`document`/…）の prefix 規約は sidecar 契約を正とする。
+- **Ruri v3 日本語埋め込み (ADR-015, 推奨・内部完結)**: チャット用 MLX とは別プロセス。仕様は [ruri-embed-sidecar.md](ruri-embed-sidecar.md)。起動例: `./scripts/start-ruri-embed.sh` のあと `BONSAI_EMBED_URL=http://127.0.0.1:8787` + `BONSAI_EMBED_MODEL=cl-nagoya/ruri-v3-30m`。`input_type`（`query`/`document`/…）の prefix 規約は sidecar 契約を正とする。Phase 3 offline paired（MiniLM 対照）は `./scripts/g_paired_ruri_phase3.sh`（ACCEPT 済みでも **cargo 既定は MiniLM のまま**、日本語は本 env opt-in）。
 - **B-1 watchdog 併用**: `BONSAI_MLX_SPAWN_PROGRAM=<repo>/scripts/start-mlx-sidecar.sh` で idle respawn 対象を sidecar に。
 - **注意 (codex)**: KV量子化は長文 recall / tool-call 安定性を劣化させ得る → 長文 paired smoke で確認必須 (短 smoke では見逃す)。`peak_gb` でなく長文 sustained の resident KV で評価する。
 - 計測: `python scripts/mlx_server/measure_kv_memory.py --ctx-words N` で `/mem` の peak/cache を取得。
