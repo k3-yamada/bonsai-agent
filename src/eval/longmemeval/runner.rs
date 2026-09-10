@@ -17,6 +17,7 @@ use crate::eval::longmemeval::dataset::LongMemEvalEntry;
 use crate::eval::longmemeval::metrics::{mrr, ndcg_at_k, recall_any_at_k};
 use crate::knowledge::concept::{ConceptConfig, detect_concept_candidates, member_entries};
 use crate::knowledge::extractor::{StockCategory, StockEntry};
+use crate::domain::embedder::EmbedInputType;
 use crate::memory::search::HybridSearch;
 use crate::memory::store::MemoryStore;
 use crate::runtime::http_embedder::create_embedder;
@@ -178,7 +179,7 @@ pub fn run_benchmark(
         #[cfg(feature = "embeddings")]
         {
             let texts: Vec<&str> = indexed.iter().map(|(_, t)| t.as_str()).collect();
-            let embs = embedder.embed(&texts)?;
+            let embs = embedder.embed_typed(&texts, EmbedInputType::Document)?;
             for ((mid, _), emb) in indexed.iter().zip(embs.iter()) {
                 store.insert_memory_embedding(*mid, emb)?;
             }
@@ -216,7 +217,7 @@ pub fn run_benchmark(
                 // §9.2: 概念 memory の tags = 全 member session_ids (retrieve 時に全件寄与)。
                 let cid = store.save_memory(&body, "concept", &candidate.member_sources)?;
                 #[cfg(feature = "embeddings")]
-                if let Ok(embs) = embedder.embed(&[body.as_str()])
+                if let Ok(embs) = embedder.embed_typed(&[body.as_str()], EmbedInputType::Document)
                     && let Some(emb) = embs.first()
                 {
                     store.insert_memory_embedding(cid, emb)?;

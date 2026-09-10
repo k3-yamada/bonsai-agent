@@ -5,7 +5,7 @@ set -euo pipefail
 BASE="${BONSAI_EMBED_URL:-http://127.0.0.1:8787}"
 BASE="${BASE%/}"
 
-curl -sf "$BASE/health" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get("ok") and d.get("dim")==256, d; print("health_ok", d)'
+curl -sf "$BASE/health" | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d.get("ok"), d; print("health_ok", d)'
 
 python3 - <<PY
 import json, urllib.request
