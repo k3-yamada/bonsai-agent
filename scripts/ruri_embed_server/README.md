@@ -9,7 +9,12 @@ pip install -r scripts/ruri_embed_server/requirements.txt
 ./scripts/start-ruri-embed.sh
 ```
 
-prefix ヘルパのみ検証（モデル不要）:
+Phase 3（MiniLM 対照・sidecar 起動済み）:
+
+```bash
+./scripts/g_paired_ruri_phase3.sh
+```
+
 
 ```bash
 python3 - <<'PY'
