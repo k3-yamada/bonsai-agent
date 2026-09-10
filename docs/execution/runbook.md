@@ -133,8 +133,8 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_MLX_IDLE_TIMEOUT_SEC` | 0 (OFF) | int | B-1: N 秒 idle で MLX server 自動 kill + 次 request で lazy respawn。0 で lifecycle supervisor 全体無効 (既存挙動保持) |
 | `BONSAI_MLX_SPAWN_PROGRAM` | `~/.venvs/bonsai-mlx/bin/mlx-openai-server` | path | B-1: MLX server 起動プログラム (lazy respawn 用)。idle timeout>0 時のみ使用 |
 | `BONSAI_MLX_AUTO_CLAMP` | OFF | bool | B-3: 起動時 MLX `/props` の n_ctx で context_length を `min(configured, n_ctx)` にクランプ。server 未応答時 no-op。LocalAI fit_params 思想 |
-| `BONSAI_EMBED_URL` | None | url | `HttpEmbedder` 有効化。設定時 `create_embedder()` が `{url}/v1/embeddings` (OpenAI 互換) 経由でローカル埋め込みを取得 (MLX sidecar 等)。**`embeddings` feature 非依存** = ort バイナリDLなしのオフライン/Linux ビルドでも実埋め込み。例: `http://localhost:8888`。未設定で従来挙動 (fastembed→SimpleEmbedder) |
-| `BONSAI_EMBED_MODEL` | `bonsai-embed` | str | `HttpEmbedder` が送る model 名。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持) |
+| `BONSAI_EMBED_URL` | None | url | `HttpEmbedder` 有効化。設定時 `create_embedder()` が `{url}/v1/embeddings` (OpenAI 互換) 経由でローカル埋め込みを取得 (MLX sidecar / Ruri sidecar 等)。**`embeddings` feature 非依存** = ort バイナリDLなしのオフライン/Linux ビルドでも実埋め込み。例: MLX `http://localhost:8888`、Ruri `http://127.0.0.1:8787`。未設定で従来挙動 (fastembed→SimpleEmbedder) |
+| `BONSAI_EMBED_MODEL` | `bonsai-embed` | str | `HttpEmbedder` が送る model 名。Ruri 利用時は `cl-nagoya/ruri-v3-30m`（ADR-015）。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持) |
 | `BONSAI_MODEL` | None | str | `resolve_model_id()` 経由の model_id override。優先順位は `--model` CLI > `BONSAI_MODEL` > `BONSAI_MODEL_ID` (fallback alias (BONSAI_MODEL 優先)) > `UNSLOTH_MODEL` (後方互換) > config の `model_id` (ADR-013)。Unsloth backend への旧既定 `bonsai-8b` 置換特例は現行既定 `minicpm5-2b` には適用されない |
 | `BONSAI_TOOL_SPILL` | ON (未設定=有効) | bool | ツール出力スピルオーバー一時ファイル (`{TMPDIR}/bonsai-agent/spill-{pid}/`) の書き出し有効化。`0`/`false`/`no` で完全無効化 (ファイルを1つも作らない、Issue #22 B3-1) |
 | `BONSAI_TOOL_SPILL_MAX_FILES` | 64 | 1..=4096 | spill ディレクトリ内の保持ファイル数上限。超過時は最古 (mtime昇順) から削除。範囲外/非数値は default に巻き戻し |
@@ -189,6 +189,7 @@ cubist `mlx-openai-server` の drop-in 代替 (`scripts/mlx_server/server.py`)�
 
 - **使い方**: `start-mlx-server.sh` (cubist) の代わりに `start-mlx-sidecar.sh` を起動するだけで bonsai は memory-optimized server を使う。
 - **ローカル埋め込み (offline)**: sidecar 起動後、bonsai 側で `BONSAI_EMBED_URL=http://localhost:8888` を設定すると `/v1/embeddings` 経由で埋め込みを取得する。これにより `embeddings` feature (fastembed/ONNX、ort バイナリの build-time DL) なしで実埋め込みが使え、ビルド時 403 と実行時 HF DL の両方を回避できる。`mlx_embeddings` は `scripts/setup_mlx_ternary.sh` で venv に導入する。
+- **Ruri v3 日本語埋め込み (ADR-015, 推奨・内部完結)**: チャット用 MLX とは別プロセス。仕様は [ruri-embed-sidecar.md](ruri-embed-sidecar.md)。起動例: `./scripts/start-ruri-embed.sh` のあと `BONSAI_EMBED_URL=http://127.0.0.1:8787` + `BONSAI_EMBED_MODEL=cl-nagoya/ruri-v3-30m`。`input_type`（`query`/`document`/…）の prefix 規約は sidecar 契約を正とする。
 - **B-1 watchdog 併用**: `BONSAI_MLX_SPAWN_PROGRAM=<repo>/scripts/start-mlx-sidecar.sh` で idle respawn 対象を sidecar に。
 - **注意 (codex)**: KV量子化は長文 recall / tool-call 安定性を劣化させ得る → 長文 paired smoke で確認必須 (短 smoke では見逃す)。`peak_gb` でなく長文 sustained の resident KV で評価する。
 - 計測: `python scripts/mlx_server/measure_kv_memory.py --ctx-words N` で `/mem` の peak/cache を取得。

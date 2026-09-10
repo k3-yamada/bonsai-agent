@@ -1,0 +1,3 @@
+# Ruri v3 embed sidecar (ADR-015 / docs/execution/ruri-embed-sidecar.md)
+sentence-transformers>=3.0.0
+torch>=2.2.0

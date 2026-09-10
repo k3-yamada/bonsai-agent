@@ -17,6 +17,7 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
 
 ### 実行
 - [docs/execution/runbook.md](execution/runbook.md) — ビルド・テストコマンド + Lab 起動手順 (Z-1 Phase 4 で CLAUDE.md から分離)
+- [docs/execution/ruri-embed-sidecar.md](execution/ruri-embed-sidecar.md) — Ruri v3 ローカル `/v1/embeddings` sidecar 契約（ADR-015）
 
 ### 設計判断 (ADR)
 - [docs/decisions/README.md](decisions/README.md) — ADR (Architecture Decision Records) template + 起票方針。Z-1 Phase 6 で 30-40 件 ADR 化予定。
@@ -32,6 +33,9 @@ Single Source of Truth として CLAUDE.md (Claude Code エントリ) + memory/ 
   - [ADR-010](decisions/ADR-010-clean-architecture-domain-layer.md) — domain 層新設と DEP-001 違反ゼロ化 (Accepted 2026-06-04)
   - [ADR-011](decisions/ADR-011-chat-template-backend-source-of-truth.md) — Chat Template Backend SSOT (Accepted 2026-06-15)
   - [ADR-012](decisions/ADR-012-dmn-magi-fastpath-extension.md) — 自律知能拡張: FastPath / DMN思考ループ / MAGI三重監視 (Accepted 2026-09-07)
+  - [ADR-013](decisions/ADR-013-model-profile-minicpm5.md) — ModelProfile と既定 MiniCPM5-2B (Accepted 2026-09-08)
+  - [ADR-014](decisions/ADR-014-single-session-execution-model.md) — 単一プロセス=単一セッション (Accepted 2026-09-10)
+  - [ADR-015](decisions/ADR-015-ruri-v3-local-embeddings.md) — Ruri v3 ローカル埋め込み・prefix 規約 (Proposed 2026-09-10)
 
 ### 運用 / メンテナンス
 - [docs/maintenance/claudemd-curation.md](maintenance/claudemd-curation.md) — CLAUDE.md 運用ルール (FIFO 直近 N 項目 / 1 行サマリー template / Section header 同期 / Z-3 enforcement、Item 255 規模再現 plan 由来)
