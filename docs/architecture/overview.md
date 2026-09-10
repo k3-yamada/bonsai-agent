@@ -119,6 +119,15 @@ p^n 問題 (ステップ蓄積による失敗確率指数的増大) への対策
 - MAGI 三重監視合議 (Safety / Consistency / Goodhart・VALUES.md監視 + Reflexion自己反省) (ADR-012)
 - 非侵入型 REPL UX (dmn_inbox バッファリング & プロンプト直前インサイト提示) (ADR-012)
 
+## 実行モデル
+
+bonsai-agent は「1プロセス = 1ユーザーセッション」を原則とする（詳細は
+[ADR-014](../decisions/ADR-014-single-session-execution-model.md)）。プロセス内で
+複数 `Session` が並存するのは `SubAgentExecutor::execute_parallel`
+（`src/agent/subagent.rs`）ただ1箇所であり、これは意図的な設計上の例外である。
+A-MEM/KnowledgeGraph/KnowledgeVault はセッション横断（グローバル）であることも
+意図的（`messages`/`events`/`audit_log`/`checkpoints` のみ `session_id` を保持）。
+
 ## Module layer 順
 
 詳細は [module-layer-rules.md](module-layer-rules.md) (Z-4 layer linter rule source) を参照。

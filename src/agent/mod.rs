@@ -25,4 +25,5 @@ pub mod subagent;
 pub mod t6_prompt_augment;
 pub mod tool_exec;
 pub mod tool_selection_bench;
+pub mod tool_spill;
 pub mod working_memory;

@@ -34,6 +34,13 @@ impl ShellTool {
         self
     }
 
+    /// キャンセルトークンを注入する。Tool traitのシグネチャは変えず、
+    /// 構築時にResourceLimitsへ載せる（Issue #22 AC-2-5）。
+    pub fn with_cancel(mut self, cancel: crate::cancel::CancellationToken) -> Self {
+        self.limits.cancel = Some(cancel);
+        self
+    }
+
     pub fn with_path_guard(mut self, guard: PathGuard) -> Self {
         self.sandbox = Box::new(NativeSandbox::new(guard.deny_paths()));
         self.path_guard = Some(guard);
@@ -76,6 +83,7 @@ impl TypedTool for ShellTool {
                         denied.join(", ")
                     ),
                     success: false,
+                    ..Default::default()
                 });
             }
         }
@@ -93,6 +101,9 @@ impl TypedTool for ShellTool {
         Ok(ToolResult {
             output,
             success: result.success(),
+            // ユーザー取消 (Ctrl+C) を後段 (apply_tool_result) に伝える (Issue #22 qa MEDIUM-2)。
+            // success は維持したまま (result.success() が既に !cancelled を含む)。
+            cancelled: result.cancelled,
         })
     }
 }
@@ -145,6 +156,48 @@ mod tests {
         let result = tool.call(serde_json::json!({"command": "pwd"})).unwrap();
         assert!(result.success);
         assert!(result.output.starts_with('/'));
+    }
+
+    #[test]
+    fn t_shell_cancel_marks_result_failed() {
+        let cancel = crate::cancel::CancellationToken::new();
+        cancel.cancel();
+        let tool = ShellTool::new().with_cancel(cancel);
+        let result = tool
+            .call(serde_json::json!({"command": "echo test123"}))
+            .unwrap();
+        assert!(!result.success);
+    }
+
+    /// Issue #22 qa-reviewer MEDIUM-2: 取消は `success: false` を維持しつつ、
+    /// `ToolResult.cancelled` に伝わること（`apply_tool_result` が学習信号記録を
+    /// スキップする判断材料になる）。
+    #[test]
+    fn t_shell_cancel_propagates_cancelled_flag() {
+        let cancel = crate::cancel::CancellationToken::new();
+        cancel.cancel();
+        let tool = ShellTool::new().with_cancel(cancel);
+        let result = tool
+            .call(serde_json::json!({"command": "echo test123"}))
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.cancelled, "取消時はcancelled=trueが伝わるべき");
+    }
+
+    /// path_guard による拒否は「取消」ではなく通常の失敗であり、
+    /// `cancelled` は false のままであるべき（取消と権限拒否の混同防止）。
+    #[test]
+    fn t_shell_path_guard_denial_is_not_cancelled() {
+        let guard = PathGuard::new(vec![".env".to_string()]);
+        let tool = ShellTool::new().with_path_guard(guard);
+        let result = tool
+            .call(serde_json::json!({"command": "cat .env"}))
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            !result.cancelled,
+            "path_guard拒否はcancelledではなく通常の失敗であるべき"
+        );
     }
 
     #[test]

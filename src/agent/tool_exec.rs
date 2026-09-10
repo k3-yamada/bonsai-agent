@@ -6,6 +6,7 @@
 use crate::agent::error_recovery::{
     CircuitBreaker, FileStuckAction, FileStuckGuard, MultiFileEditCycleDetector, TrialSummary,
 };
+use crate::agent::tool_spill;
 use crate::domain::conversation::{Message, Session};
 use crate::domain::event::EventType;
 use crate::memory::graph::KnowledgeGraph;
@@ -33,10 +34,32 @@ pub(crate) struct ToolExecResult {
     pub output: String,
     pub success: bool,
     pub is_error: bool,
+    /// ユーザー操作（Ctrl+C等）による取消で失敗したか（Issue #22 qa-reviewer MEDIUM-2）。
+    /// `apply_tool_result` はこれが true の場合、circuit_breaker / trial_summary /
+    /// KnowledgeGraph への学習記録をスキップする（ユーザー取消を品質シグナル化しない）。
+    pub cancelled: bool,
 }
 
 /// ツール出力をmax_chars以内に切り詰め（OpenCode知見: スピルオーバー保存）
+///
+/// スピルオーバー保存先は `tool_spill::SpillStore::process_default()`
+/// （プロセス単位ディレクトリ、件数/サイズ上限・ライフサイクル管理付き、Issue #22 B3-1）。
 pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
+    truncate_tool_output_with(
+        output,
+        max_chars,
+        Some(tool_spill::SpillStore::process_default()),
+    )
+}
+
+/// `truncate_tool_output` の本体。`spill` を注入可能にしテストが `/tmp` を汚さないようにする。
+///
+/// 切り詰め位置計算・hash算出ロジックは既存から1文字も変えていない。
+pub(crate) fn truncate_tool_output_with(
+    output: &str,
+    max_chars: usize,
+    spill: Option<&tool_spill::SpillStore>,
+) -> String {
     if max_chars == 0 || output.len() <= max_chars {
         return output.to_string();
     }
@@ -55,15 +78,21 @@ pub(crate) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
         output[..hash_end].hash(&mut h);
         h.finish()
     };
-    let overflow_path = format!("/tmp/bonsai-overflow-{:x}.txt", hash);
-    let _ = std::fs::write(&overflow_path, output);
-    format!(
-        "{}...\n[全文保存: {} ({}文字、表示{}文字)]",
-        truncated,
-        overflow_path,
-        output.len(),
-        safe_end
-    )
+    match spill.and_then(|s| s.write(hash, output)) {
+        Some(path) => format!(
+            "{}...\n[全文保存: {} ({}文字、表示{}文字)]",
+            truncated,
+            path.display(),
+            output.len(),
+            safe_end
+        ),
+        None => format!(
+            "{}...\n[全文省略 ({}文字、表示{}文字)]",
+            truncated,
+            output.len(),
+            safe_end
+        ),
+    }
 }
 
 /// 単一ツール呼び出しを実行（デフォルトポリシー、テスト用）
@@ -97,6 +126,7 @@ pub(crate) fn execute_single_call_with_policy(
             ),
             success: false,
             is_error: true,
+            cancelled: false,
         };
     }
 
@@ -115,6 +145,7 @@ pub(crate) fn execute_single_call_with_policy(
                 ),
                 success: false,
                 is_error: true,
+                cancelled: false,
             };
         }
         crate::tools::permission::PermissionDecision::QueueForLater => {
@@ -127,6 +158,7 @@ pub(crate) fn execute_single_call_with_policy(
                 ),
                 success: false,
                 is_error: true,
+                cancelled: false,
             };
         }
         crate::tools::permission::PermissionDecision::NeedConfirmation => match autonomy {
@@ -143,6 +175,7 @@ pub(crate) fn execute_single_call_with_policy(
                             ),
                             success: false,
                             is_error: true,
+                            cancelled: false,
                         };
                     }
                 } else {
@@ -155,6 +188,7 @@ pub(crate) fn execute_single_call_with_policy(
                         ),
                         success: false,
                         is_error: true,
+                        cancelled: false,
                     };
                 }
             }
@@ -168,6 +202,7 @@ pub(crate) fn execute_single_call_with_policy(
                     ),
                     success: false,
                     is_error: true,
+                    cancelled: false,
                 };
             }
         },
@@ -180,6 +215,7 @@ pub(crate) fn execute_single_call_with_policy(
             output: tool_result.output,
             success: tool_result.success,
             is_error: false,
+            cancelled: tool_result.cancelled,
         },
         Err(e) => ToolExecResult {
             name: call.name.clone(),
@@ -187,6 +223,7 @@ pub(crate) fn execute_single_call_with_policy(
             output: format!("ツール実行エラー: {e}"),
             success: false,
             is_error: true,
+            cancelled: false,
         },
     }
 }
@@ -296,8 +333,16 @@ pub(crate) fn apply_tool_result(
     );
 
     if is_failed {
-        circuit_breaker.record_failure(&r.name);
-        trial_summary.record_failure(&r.name, &redacted_args, &redacted_output, iteration);
+        // Issue #22 qa-reviewer MEDIUM-2: ユーザー取消 (Ctrl+C) はタスク未完了として
+        // is_failed=true を維持する（エージェントループの継続判断に必要）が、
+        // ツール品質の学習信号 (circuit_breaker/trial_summary/KnowledgeGraph) には
+        // 記録しない。ユーザーの取消操作をツール失敗として永続学習するのは
+        // docs/VALUES.md V1/V4 (フィードバックシグナルの純度) に反するため
+        // (オーナー承認済み)。
+        if !r.cancelled {
+            circuit_breaker.record_failure(&r.name);
+            trial_summary.record_failure(&r.name, &redacted_args, &redacted_output, iteration);
+        }
         if let Some(ref fp) = file_path {
             file_stuck_guard.record_file_failure(fp);
             if let Some(action) = file_stuck_guard.check_stuck(fp) {
@@ -319,9 +364,11 @@ pub(crate) fn apply_tool_result(
                     output_preview: redacted_output.chars().take(200).collect(),
                 },
             );
-            let graph = KnowledgeGraph::new(s.conn());
-            let path = file_path.as_deref().unwrap_or("unknown");
-            let _ = graph.record_error_pattern("tool_error", path, &r.name);
+            if !r.cancelled {
+                let graph = KnowledgeGraph::new(s.conn());
+                let path = file_path.as_deref().unwrap_or("unknown");
+                let _ = graph.record_error_pattern("tool_error", path, &r.name);
+            }
         }
         session.add_message(Message::tool(&redacted_output, &r.name));
     } else {
@@ -464,6 +511,7 @@ pub(crate) fn execute_validated_calls(
                         ToolResult {
                             output: secrets_filter.redact(&r.output),
                             success: r.success,
+                            ..Default::default()
                         },
                     );
                 }
@@ -528,6 +576,7 @@ pub(crate) fn execute_validated_calls(
                         ToolResult {
                             output: secrets_filter.redact(&r.output),
                             success: r.success,
+                            ..Default::default()
                         },
                     );
                 }

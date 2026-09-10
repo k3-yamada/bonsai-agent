@@ -24,10 +24,17 @@ use crate::runtime::http_embedder::create_embedder;
 use crate::tools::permission::Permission;
 
 /// ツールの実行結果
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolResult {
     pub output: String,
     pub success: bool,
+    /// ユーザー操作（Ctrl+C等）による取消で失敗したか（Issue #22 qa-reviewer MEDIUM-2）。
+    ///
+    /// `success == false` は維持するが、`cancelled == true` の場合は
+    /// `apply_tool_result` が circuit_breaker / trial_summary / KnowledgeGraph への
+    /// 学習記録をスキップする（ユーザーの取消操作をツール品質シグナルとして
+    /// 永続学習しないため、docs/VALUES.md V1/V4 準拠）。
+    pub cancelled: bool,
 }
 
 /// 全ツールが実装するトレイト
@@ -817,6 +824,7 @@ mod tests {
             Ok(ToolResult {
                 output: "ok".to_string(),
                 success: true,
+                ..Default::default()
             })
         }
     }
@@ -1154,6 +1162,7 @@ mod tests {
             Ok(ToolResult {
                 output: "ok".to_string(),
                 success: true,
+                ..Default::default()
             })
         }
         fn is_read_only(&self) -> bool {
@@ -1483,6 +1492,7 @@ mod tests {
         let result = ToolResult {
             output: "fn main()".to_string(),
             success: true,
+            ..Default::default()
         };
         cache.put("file_read", &args, result);
 
@@ -1501,6 +1511,7 @@ mod tests {
         let result = ToolResult {
             output: "content".to_string(),
             success: true,
+            ..Default::default()
         };
         cache.put("file_read", &args1, result);
 
@@ -1519,6 +1530,7 @@ mod tests {
             ToolResult {
                 output: "old".to_string(),
                 success: true,
+                ..Default::default()
             },
         );
         cache.put(
@@ -1527,6 +1539,7 @@ mod tests {
             ToolResult {
                 output: "map".to_string(),
                 success: true,
+                ..Default::default()
             },
         );
         assert_eq!(cache.len(), 2);
@@ -1552,6 +1565,7 @@ mod tests {
             ToolResult {
                 output: "ok".to_string(),
                 success: true,
+                ..Default::default()
             },
         );
 
@@ -1582,6 +1596,7 @@ mod tests {
             ToolResult {
                 output: "files".to_string(),
                 success: true,
+                ..Default::default()
             },
         );
         assert_eq!(cache.len(), 1);

@@ -52,6 +52,7 @@ impl crate::tools::Tool for MockPolicyTool {
         Ok(crate::tools::ToolResult {
             output: "ok".into(),
             success: true,
+            ..Default::default()
         })
     }
 }
@@ -175,6 +176,7 @@ fn t_apply_tool_result_redacts_error_and_args() {
         output: "error with secret: ghp_123456789012345678901234567890123456".into(),
         success: false,
         is_error: true,
+        cancelled: false,
     };
     apply_tool_result(
         &r,
@@ -206,6 +208,7 @@ fn t_apply_tool_result_success_and_error() {
         output: "success output".into(),
         success: true,
         is_error: false,
+        cancelled: false,
     };
     apply_tool_result(
         &r_ok,
@@ -231,6 +234,7 @@ fn t_apply_tool_result_success_and_error() {
         output: "error occurred".into(),
         success: false,
         is_error: true,
+        cancelled: false,
     };
     apply_tool_result(
         &r_err,
@@ -250,6 +254,88 @@ fn t_apply_tool_result_success_and_error() {
             .any(|m| m.content.contains("error occurred"))
     );
     assert_eq!(ts.len(), 1);
+}
+
+/// Issue #22 qa-reviewer MEDIUM-2: ユーザー取消 (`cancelled: true`) は
+/// `success == false` (タスク未完了) を維持しつつ、circuit_breaker / trial_summary /
+/// KnowledgeGraph への学習信号記録をスキップすること。
+/// (通常のツールエラーとの対比は `t_apply_tool_result_success_and_error` を参照)
+#[test]
+fn t_apply_tool_result_cancelled_skips_learning_signals_but_stays_failed() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+    let store = MemoryStore::in_memory().unwrap();
+
+    let r_cancelled = ToolExecResult {
+        name: "shell".into(),
+        args_json: "{}".into(),
+        output: "ユーザーにより取消されました".into(),
+        success: false,
+        is_error: false,
+        cancelled: true,
+    };
+    apply_tool_result(
+        &r_cancelled,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        Some(&store),
+        4000,
+    );
+
+    // タスク未完了として failed メッセージは session に残る（エージェントループの
+    // 継続判断に必要）。
+    assert!(session.messages.iter().any(|m| m.content.contains("取消")));
+    // しかし品質の学習信号 (circuit_breaker / trial_summary) には一切記録されない。
+    assert_eq!(
+        cb.failure_count("shell"),
+        0,
+        "cancelled時はcircuit_breakerに記録されないべき"
+    );
+    assert_eq!(ts.len(), 0, "cancelled時はtrial_summaryに記録されないべき");
+
+    // KnowledgeGraph にも tool_error パターンが記録されないこと。
+    // record_error_pattern は tool_name ノードから file ノードへ "fixes" edge を張るため、
+    // neighbors("shell", 1) が空であれば未記録と確認できる。
+    let graph = KnowledgeGraph::new(store.conn());
+    let neighbors = graph.neighbors("shell", 1).unwrap_or_default();
+    assert!(
+        neighbors.is_empty(),
+        "cancelled時はKnowledgeGraphにtool_errorが記録されないべき: {neighbors:?}"
+    );
+
+    // 通常の失敗 (cancelled: false) と対比: 同条件では記録される。
+    let r_normal_fail = ToolExecResult {
+        name: "shell".into(),
+        args_json: "{}".into(),
+        output: "通常のエラー".into(),
+        success: false,
+        is_error: true,
+        cancelled: false,
+    };
+    apply_tool_result(
+        &r_normal_fail,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        Some(&store),
+        4000,
+    );
+    assert_eq!(
+        cb.failure_count("shell"),
+        1,
+        "通常失敗はcircuit_breakerに記録されるべき"
+    );
+    assert_eq!(ts.len(), 1, "通常失敗はtrial_summaryに記録されるべき");
 }
 
 #[test]
@@ -286,6 +372,7 @@ fn t_execute_validated_calls_redacts_cache() {
         ToolResult {
             output: format!("leaked secret: {raw_secret}"),
             success: true,
+            ..Default::default()
         },
     );
 
@@ -311,13 +398,27 @@ fn t_execute_validated_calls_redacts_cache() {
 
 #[test]
 fn test_truncate_tool_output() {
-    assert_eq!(truncate_tool_output("hello world", 4000), "hello world");
-    assert_eq!(truncate_tool_output("hello", 0), "hello");
+    use crate::agent::tool_spill::SpillStore;
+
+    let dir = std::env::temp_dir().join(format!(
+        "bonsai_tool_exec_test_truncate_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let spill = SpillStore::new_at(dir.clone(), 64, 64 * 1024 * 1024);
+
+    assert_eq!(
+        truncate_tool_output_with("hello world", 4000, Some(&spill)),
+        "hello world"
+    );
+    assert_eq!(truncate_tool_output_with("hello", 0, Some(&spill)), "hello");
     let large = "a".repeat(5000);
-    let res = truncate_tool_output(&large, 4000);
+    let res = truncate_tool_output_with(&large, 4000, Some(&spill));
     assert!(res.contains("...") && res.contains("全文保存") && res.contains("5000文字"));
     let unicode = "日本語テスト".repeat(1000);
-    assert!(truncate_tool_output(&unicode, 100).contains("..."));
+    assert!(truncate_tool_output_with(&unicode, 100, Some(&spill)).contains("..."));
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

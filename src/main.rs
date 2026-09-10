@@ -45,6 +45,9 @@ struct AppContext {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut app_config = AppConfig::load()?;
+    // Issue #22 B3-1: 過去プロセスのspill残骸を掃除し、正常終了時の後始末ガードを保持する。
+    // 束縛名を`_`にすると即dropされてディレクトリが消えるため、必ず`_spill_guard`とすること。
+    let _spill_guard = bonsai_agent::agent::tool_spill::install_process_spill();
 
     if let Some(ref backend_str) = cli.backend {
         match backend_str.to_lowercase().as_str() {
@@ -139,14 +142,14 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut tools = setup_tools(&app_config);
+    let cancel = CancellationToken::new();
+    ctrlc_handler(cancel.clone());
+
+    let mut tools = setup_tools(&app_config, &cancel);
     // プラグインツールの登録
     for plugin_tool in bonsai_agent::tools::plugin::load_plugin_tools(&app_config.plugins.tools) {
         tools.register(plugin_tool);
     }
-
-    let cancel = CancellationToken::new();
-    ctrlc_handler(cancel.clone());
 
     let autonomy_level = if let Some(ref a) = cli.autonomy {
         a.parse::<bonsai_agent::safety::autonomy::AutonomyLevel>()
@@ -296,11 +299,12 @@ fn main() -> Result<()> {
 
 // --- ツール初期化 ---
 
-fn setup_tools(app_config: &AppConfig) -> ToolRegistry {
+fn setup_tools(app_config: &AppConfig, cancel: &CancellationToken) -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(Box::new(
         ShellTool::new()
             .with_timeout(app_config.agent.shell_timeout_secs)
+            .with_cancel(cancel.clone())
             .with_path_guard(PathGuard::new(app_config.safety.deny_paths.clone())),
     ));
     tools.register(Box::new(FileReadTool));

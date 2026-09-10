@@ -15,7 +15,7 @@ mod state;
 mod step;
 mod support;
 
-pub use config::{AgentConfig, inference_for_task, is_tool_allowed};
+pub use config::{AgentConfig, ConfirmCallback, inference_for_task, is_tool_allowed};
 pub use core::{new_session_with_system, run_agent_loop, run_agent_loop_with_session};
 pub use repl::{ReplIo, run_repl};
 pub use state::{

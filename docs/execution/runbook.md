@@ -136,6 +136,9 @@ cargo test --lib 2>&1 | tail -3
 | `BONSAI_EMBED_URL` | None | url | `HttpEmbedder` 有効化。設定時 `create_embedder()` が `{url}/v1/embeddings` (OpenAI 互換) 経由でローカル埋め込みを取得 (MLX sidecar 等)。**`embeddings` feature 非依存** = ort バイナリDLなしのオフライン/Linux ビルドでも実埋め込み。例: `http://localhost:8888`。未設定で従来挙動 (fastembed→SimpleEmbedder) |
 | `BONSAI_EMBED_MODEL` | `bonsai-embed` | str | `HttpEmbedder` が送る model 名。リモート失敗時は hash 埋め込みに graceful fallback (dim=256 維持) |
 | `BONSAI_MODEL` | None | str | `resolve_model_id()` 経由の model_id override。優先順位は `--model` CLI > `BONSAI_MODEL` > `BONSAI_MODEL_ID` (fallback alias (BONSAI_MODEL 優先)) > `UNSLOTH_MODEL` (後方互換) > config の `model_id` (ADR-013)。Unsloth backend への旧既定 `bonsai-8b` 置換特例は現行既定 `minicpm5-2b` には適用されない |
+| `BONSAI_TOOL_SPILL` | ON (未設定=有効) | bool | ツール出力スピルオーバー一時ファイル (`{TMPDIR}/bonsai-agent/spill-{pid}/`) の書き出し有効化。`0`/`false`/`no` で完全無効化 (ファイルを1つも作らない、Issue #22 B3-1) |
+| `BONSAI_TOOL_SPILL_MAX_FILES` | 64 | 1..=4096 | spill ディレクトリ内の保持ファイル数上限。超過時は最古 (mtime昇順) から削除。範囲外/非数値は default に巻き戻し |
+| `BONSAI_TOOL_SPILL_MAX_BYTES` | 67108864 (64MiB) | 1MiB..=4GiB | spill ディレクトリ内の合計バイト数上限。超過時は最古から削除。範囲外/非数値は default に巻き戻し |
 
 `--init` は API key を config.toml に書き出さない（`ModelConfig.api_key` / `AdvisorSettings.api_key` は
 `#[serde(skip_serializing)]`、ファイルは 0600 で作成、Issue #15）。`UNSLOTH_API_KEY` / `BONSAI_API_KEY` /

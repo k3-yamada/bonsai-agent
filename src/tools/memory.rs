@@ -55,6 +55,7 @@ impl TypedTool for RememberTool {
         Ok(ToolResult {
             output: format!("記憶を保存しました (id={id}, category={category})"),
             success: true,
+            ..Default::default()
         })
     }
 }
@@ -102,6 +103,7 @@ impl TypedTool for RecallTool {
             return Ok(ToolResult {
                 output: format!("「{}」に該当する記憶なし", args.query),
                 success: true,
+                ..Default::default()
             });
         }
         // 長大 content は match 周辺の snippet に短縮 (context 圧迫防止)。
@@ -121,6 +123,7 @@ impl TypedTool for RecallTool {
         Ok(ToolResult {
             output: o,
             success: true,
+            ..Default::default()
         })
     }
 }

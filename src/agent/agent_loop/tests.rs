@@ -52,6 +52,7 @@ impl Tool for EchoTool {
         Ok(ToolResult {
             output: text.to_string(),
             success: true,
+            ..Default::default()
         })
     }
 }
@@ -115,6 +116,7 @@ impl Tool for CountingTool {
         Ok(ToolResult {
             output: "ok".to_string(),
             success: true,
+            ..Default::default()
         })
     }
 }
@@ -1426,6 +1428,7 @@ fn test_apply_tool_result_records_graph_tool_usage() {
         output: "file contents here".to_string(),
         success: true,
         is_error: false,
+        cancelled: false,
     };
     apply_tool_result(
         &r,
@@ -1468,6 +1471,7 @@ fn test_apply_tool_result_records_graph_error_pattern() {
         output: "error: compilation failed".to_string(),
         success: false,
         is_error: true,
+        cancelled: false,
     };
     apply_tool_result(
         &r,
@@ -2250,6 +2254,7 @@ fn test_tool_result_success_false_records_failure_and_stalls() {
         output: "command failed with exit code 1".into(),
         success: false,
         is_error: false,
+        cancelled: false,
     };
     apply_tool_result(
         &r,
@@ -2283,6 +2288,7 @@ fn test_file_stuck_guard_nudges_after_three_failures() {
             output: "write error".into(),
             success: false,
             is_error: true,
+            cancelled: false,
         };
         apply_tool_result(
             &r,
