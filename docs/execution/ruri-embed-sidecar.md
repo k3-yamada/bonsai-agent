@@ -122,8 +122,9 @@ bonsai 側:
 | remember / ingest / エピソード index | `document` |
 | 嗜好クラスタ等 | `topic` |
 
-**Phase 0（本仕様 + 参照実装）**: sidecar のみ。Rust はまだ `input_type` を送らない → 全て `semantic`。  
-**Phase 2**: `HttpEmbedder` または呼び出し元が `input_type` を付与（ADR-015）。
+**Phase 0（本仕様 + 参照実装）**: sidecar のみ。  
+**Phase 1**: sidecar 実モデル疎通（`/health` + query/document embed）。  
+**Phase 2**: `HttpEmbedder` / `HybridSearch` / `ensure_vec_table` が `input_type` を付与（ADR-015）。ツール選択は `semantic` のまま。
 
 ## 次元・モデル昇格
 

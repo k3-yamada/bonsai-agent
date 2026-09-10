@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### 追加
-- **Ruri v3 ローカル埋め込み（ADR-015 Proposed）**: 内部完結の日本語埋め込み経路。`docs/execution/ruri-embed-sidecar.md` + 参照実装 `scripts/ruri_embed_server/`（OpenAI 互換 `/v1/embeddings`、既定 `cl-nagoya/ruri-v3-30m` / 256d / port 8787）。`input_type`（`semantic`/`query`/`document`/`topic`）で Ruri 公式 prefix を付与。外部ベクトル DB は不採用（既存 SQLite + KG + HybridSearch を維持）。
+- **Ruri v3 ローカル埋め込み（ADR-015）**: 内部完結の日本語埋め込み経路。`docs/execution/ruri-embed-sidecar.md` + 参照実装 `scripts/ruri_embed_server/`（OpenAI 互換 `/v1/embeddings`、既定 `cl-nagoya/ruri-v3-30m` / 256d / port 8787）。`input_type`（`semantic`/`query`/`document`/`topic`）で Ruri 公式 prefix を付与。`Embedder::embed_typed` + `HttpEmbedder` 配線、`HybridSearch` クエリは `query`・文書 index は `document`。外部ベクトル DB は不採用。
 - **サブエージェント体制の刷新と最適化（Track A & B）**:
   - **開発支援サブエージェント（Track A）**: `bonsai_architect`（DEP-001/設計）、`bonsai_implementer`（Rust 2024/完全同期/Clippy巻き戻し絶対禁止/Lab releaseビルド保護）、`bonsai_tdd_verifier`（1,480+テスト保護/回帰ラチェット）、`bonsai_lab_evaluator`（ADR-003 Paired Evidence統計検証）、`bonsai_values_auditor`（docs/VALUES.md監査）の5専任ロール体制を確立し、`.claude/agents/` および `.agents/agents/` の不整合（tokio等）を完全解消。
   - **ランタイム・サブエージェント（Track B）**: `src/agent/subagent.rs` に `SubAgentRole`（`General`, `Explorer`, `Builder`, `Verifier`）を導入。ロール別プロンプトの動的注入（`prompt_instruction()`）を TDD で実装。`SubAgentConfig.allowed_tools` のツール allowlist enforcement を実装（Issue #25）。`AgentConfig.allowed_tools`（既定 `None` = 全許可で既存挙動不変）へ `build_sub_config()` が伝播し、`agent_loop::step::execute_step` の提示フィルタ（許可外ツールのスキーマをLLMに提示しない）とdispatchガード（`ToolRegistry::get()` 到達前に遮断し拒否理由をセッションへ返す）の2段で強制する。`Some([])` は全禁止。判定は完全一致のみ（glob/ワイルドカードは非対応）。`Verifier` の `shell` は多層防御側で抑える方針のため維持（`docs/architecture/subagents-guide.md` §3に明文化）。`known_tool_names()` のSSOT化は #28 で追跡。

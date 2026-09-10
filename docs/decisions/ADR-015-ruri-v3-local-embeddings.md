@@ -79,6 +79,11 @@ Ruri v3（`cl-nagoya/ruri-v3-*`、Apache-2.0、ModernBERT-Ja、最大 8192 tok�
 | **2** | recall / HybridSearch / remember 経路に `input_type=query|document` を配線 |
 | **3** | 日本語エピソード fixture で MiniLM 対照。必要なら 130m/310m を **別 dim プロファイル**として評価（default 切替は paired） |
 
+**Progress (2026-09-10)**:
+- Phase 0: 完了（本ドキュメント + `scripts/ruri_embed_server/`）。
+- Phase 1: 参照実装で `cl-nagoya/ruri-v3-30m` preload → `/health` dim=256、query/document embed 疎通、関連文書の cosine が非関連より高いことを確認。
+- Phase 2: `EmbedInputType` + `Embedder::embed_typed` を追加。`HttpEmbedder` が `input_type` を送信。`HybridSearch::search` は Query、文書 index / linear scan / `ensure_vec_table` は Document。ツール選択セマンティックは従来どおり `embed()` = Semantic。
+
 ## Related
 
 - ADR-002（Scaffolding > Model）

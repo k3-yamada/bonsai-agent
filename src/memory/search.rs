@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::domain::embedder::Embedder;
+use crate::domain::embedder::EmbedInputType;
 use crate::memory::graph::KnowledgeGraph;
 use crate::memory::store::{MemoryRecord, MemoryStore};
 
@@ -80,8 +81,10 @@ impl<'a> HybridSearch<'a> {
         // 1. FTS5キーワード検索
         let keyword_results = self.store.search_memories(query, limit * 2)?;
 
-        // 2. ベクトル類似度検索
-        let query_vec = self.embedder.embed(&[query])?;
+        // 2. ベクトル類似度検索（ADR-015: クエリは Ruri `query` 役割）
+        let query_vec = self
+            .embedder
+            .embed_typed(&[query], EmbedInputType::Query)?;
         let query_embedding = &query_vec[0];
         let vector_results = self.vector_search(query_embedding, limit * 2)?;
 
@@ -179,7 +182,10 @@ impl<'a> HybridSearch<'a> {
         let mut scored: Vec<(MemoryRecord, f32)> = all_memories
             .into_iter()
             .map(|m| {
-                let mem_vec = self.embedder.embed(&[&m.content]).unwrap_or_default();
+                let mem_vec = self
+                    .embedder
+                    .embed_typed(&[&m.content], EmbedInputType::Document)
+                    .unwrap_or_default();
                 let sim = if mem_vec.is_empty() {
                     0.0
                 } else {

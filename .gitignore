@@ -49,3 +49,6 @@ wiki/
 
 # Serena memories（独自.gitignoreの対象外）
 .serena/memories/
+
+# Ruri embed sidecar local venv (ADR-015)
+.venv-ruri/

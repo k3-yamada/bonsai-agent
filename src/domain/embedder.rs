@@ -3,11 +3,50 @@ use anyhow::Result;
 /// 埋め込みベクトルの次元数（EmbeddingGemma 768d、Matryoshka MRLで256dに縮小可能）
 pub const DEFAULT_EMBEDDING_DIM: usize = 256;
 
+/// Ruri v3 等の入力役割（ADR-015 / `input_type`）。
+///
+/// HTTP sidecar はこれに応じて日本語 prefix（`検索クエリ:` 等）を付与する。
+/// ローカル SimpleEmbedder / FastEmbedder は役割を無視してよい（default impl）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbedInputType {
+    /// prefix なし（ツール選択など非 retrieval）
+    #[default]
+    Semantic,
+    /// `トピック: `
+    Topic,
+    /// `検索クエリ: `
+    Query,
+    /// `検索文書: `
+    Document,
+}
+
+impl EmbedInputType {
+    /// OpenAI 互換拡張フィールド `input_type` に載せる値。
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::Semantic => "semantic",
+            Self::Topic => "topic",
+            Self::Query => "query",
+            Self::Document => "document",
+        }
+    }
+}
+
 /// 埋め込みモデルの抽象化トレイト。
 /// fastembed有効時はEmbeddingGemma、無効時はSimpleEmbedder（TF-IDFライク）を使用。
 pub trait Embedder: Send + Sync {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
     fn dim(&self) -> usize;
+
+    /// 役割付き埋め込み（ADR-015）。既定は `embed` に委譲し `input_type` を無視する。
+    /// `HttpEmbedder` は `input_type` を sidecar に渡し、Ruri prefix を適用させる。
+    fn embed_typed(
+        &self,
+        texts: &[&str],
+        _input_type: EmbedInputType,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts)
+    }
 }
 
 /// 簡易埋め込み（fastembed無しでも動作するフォールバック）。
@@ -125,6 +164,24 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_embed_input_type_api_strings() {
+        assert_eq!(EmbedInputType::Semantic.as_api_str(), "semantic");
+        assert_eq!(EmbedInputType::Topic.as_api_str(), "topic");
+        assert_eq!(EmbedInputType::Query.as_api_str(), "query");
+        assert_eq!(EmbedInputType::Document.as_api_str(), "document");
+    }
+
+    #[test]
+    fn test_simple_embedder_embed_typed_matches_embed() {
+        let e = SimpleEmbedder::default();
+        let a = e.embed(&["hello"]).unwrap();
+        let b = e
+            .embed_typed(&["hello"], EmbedInputType::Query)
+            .unwrap();
+        assert_eq!(a, b, "SimpleEmbedder は input_type を無視する");
+    }
 
     #[test]
     fn test_simple_embedder() {

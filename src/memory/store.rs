@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 use crate::db::migrate;
 
 #[cfg(feature = "embeddings")]
-use crate::domain::embedder::{DEFAULT_EMBEDDING_DIM, Embedder};
+use crate::domain::embedder::{DEFAULT_EMBEDDING_DIM, EmbedInputType, Embedder};
 #[cfg(feature = "embeddings")]
 use anyhow::bail;
 
@@ -456,7 +456,7 @@ impl MemoryStore {
             return Ok(());
         }
         let texts: Vec<&str> = memories.iter().map(|m| m.content.as_str()).collect();
-        let embeddings = embedder.embed(&texts)?;
+        let embeddings = embedder.embed_typed(&texts, EmbedInputType::Document)?;
         let total = memories.len();
         for (i, (mem, emb)) in memories.iter().zip(embeddings.iter()).enumerate() {
             self.insert_memory_embedding(mem.id, emb)?;
