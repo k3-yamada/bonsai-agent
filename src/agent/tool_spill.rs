@@ -126,7 +126,7 @@ pub(crate) fn select_evictions(
         .collect();
     // 新しい順 (mtime 降順) に処理し、上限に収まる分だけ保持対象とする。
     // 収まらなくなった時点以降 (=より古いもの) は削除対象になる。
-    candidates.sort_by(|a, b| b.modified.cmp(&a.modified));
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.modified));
 
     let mut count: usize = usize::from(keep.is_some());
     let mut total_bytes: u64 = entries
