@@ -62,6 +62,125 @@ pub struct McpConnection {
     config: McpServerConfig,
 }
 
+/// stdio transport用の子プロセスCommandを構築する（Issue #33）。
+/// `process_group(0)` で子プロセス自身をグループリーダーにし、`Drop for McpConnection` の
+/// `libc::kill(-pid, ..)` でグループ全体（`npx` → `node` 等の孫プロセス含む）を殺せるようにする。
+///
+/// 既知の制約（F-2、本Issueのスコープ外）: `process_group(0)` により子プロセスは親の
+/// 制御端末の前景プロセスグループから外れる。そのため端末クローズ等でのSIGHUP配送や
+/// tty由来のシグナル伝播の挙動が親プロセスと異なり、bonsai-agentプロセス自体が
+/// シグナル等で強制終了しDropを経由しなかった場合、子プロセスグループが孤児化しうる。
+/// フル対応（前景グループ管理・シグナルハンドラでの明示cleanup等）は別Issueで検討する。
+///
+/// 追記（Issue #33 Q-5）: `process_group(0)` 導入以前は子プロセスが親と同じ
+/// プロセスグループに属していたため、tty由来のSIGHUP等は子（とその孫）にも
+/// カーネルが自動配送していた。`process_group(0)` 導入後は子が独立グループの
+/// リーダーになるため、この自動配送経路が失われ、Drop非経由の終了（親プロセスの
+/// SIGKILL/SIGSEGV等でDropが走らないケースやtty切断）では #33 以前より孤児化
+/// リスクが悪化している。グループ化によるkillpgの確実性向上（Q-1参照）とのトレード
+/// オフであり、フル対応は上記の別Issue検討事項に含まれる。
+fn build_stdio_command(config: &McpServerConfig) -> Command {
+    let mut cmd = Command::new(&config.command);
+    cmd.args(&config.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    cmd
+}
+
+/// stdio子プロセスのpeek結果（Issue #33 Q-1）。reapを一切伴わずに終了状態を判定する。
+///
+/// `Alive` / `ExitedNotReaped` の2つは「pidがまだOSに存在しreapされていない」
+/// という点で共通しており、これが killpg の安全性（pid再利用が起きていないこと）
+/// を担保する条件そのものである。両者を区別しているのは `is_alive()`（再接続要否の
+/// 判定にはプロセスが実際に動いているかが必要）のためであり、`Drop` 側の
+/// killpg 可否判定では両方とも「安全」として扱う（実測確認済み: ゾンビ化した
+/// グループリーダーに対する `kill(-pgid, ..)` も孫プロセスへ正しく伝播する）。
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum ChildPeekState {
+    /// まだ生存中（終了しておらず、当然reapもされていない）。
+    Alive,
+    /// 終了済みだが未reap（ゾンビ）。pidはまだOS上でこのプロセス専用に予約されており
+    /// 再利用されていないため、この状態からの killpg は安全。
+    ExitedNotReaped,
+    /// 既にreap済み（`waitid` が `ECHILD` を返した）。pidがOSに再利用されている
+    /// 可能性があるため killpg は不可。
+    AlreadyReaped,
+    /// 判定不能（`waitid` が `ECHILD` 以外のエラーを返した）。安全側に倒し未確定として扱う。
+    Unknown,
+}
+
+/// `libc::waitid(P_PID, .., WEXITED | WNOHANG | WNOWAIT)` で子プロセスの終了状態を
+/// **reapせずにpeekする**（Issue #33 Q-1）。
+///
+/// `std::process::Child::try_wait()` は死亡していれば即座にreapしOSにstatusを
+/// キャッシュしてしまうため使えない。`is_alive()` は `McpToolWrapper::call` から
+/// 毎回呼ばれるので、これを使うとMCPサーバー自然死直後の自動再接続処理の中でreapが
+/// 起きてしまい、旧 `McpConnection` が drop される際に `Drop` 側の「reap済みか
+/// 再確認」ガード（F-1）が必ず「既にreap済み」と判定して killpg を一度も発行しなく
+/// なる。結果、`npx` の孫 `node` プロセスが再接続のたびにリークする
+/// （本Issueが解決すべき典型シナリオの再発）。
+///
+/// `WNOWAIT` はプロセスをゾンビのまま残す（reapしない）ため、「reapを行うのは
+/// `Drop` のみ」という不変条件を保ちながら生死判定できる。これによりF-1の保証
+/// （pid再利用ゼロ）を一切損なわずに孫プロセスの確実な後始末を両立する。
+#[cfg(unix)]
+fn peek_child_state(child: &Child) -> ChildPeekState {
+    // si_pid を0クリアしてから呼ぶ: WNOHANG指定時に報告できる子が無い場合、
+    // siginfo_t の内容はPOSIX上未規定。呼び出し前に0クリアしておき、呼び出し後の
+    // 非0を「終了済み」の判定根拠にするのがglibc/Linux含め既知の回避策。
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id(),
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if ret != 0 {
+        let is_echild = std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+        return if is_echild {
+            // 該当pidの子がOS側に存在しない＝既にreap済み。不変条件が保たれていれば
+            // Drop以外では本来起きないはずだが、防御的にAlreadyReaped扱いする。
+            ChildPeekState::AlreadyReaped
+        } else {
+            ChildPeekState::Unknown
+        };
+    }
+    // SAFETY: waitid が 0 を返した直後であり、info は初期化済みのsiginfo_t。
+    // si_pid は WEXITED|WNOWAIT で終了済みの子が実際にあった場合のみ非0になる
+    // （呼び出し前に0クリア済みのため誤検知しない）。
+    if unsafe { info.si_pid() } != 0 {
+        ChildPeekState::ExitedNotReaped
+    } else {
+        ChildPeekState::Alive
+    }
+}
+
+/// stdio子プロセスの生存チェック本体。unixではreapしないpeekで判定する（Q-1）。
+/// `is_alive()` の意味論上、ゾンビ（`ExitedNotReaped`）は「動いていない」= false。
+#[cfg(unix)]
+fn stdio_is_alive(child: &Child) -> bool {
+    matches!(peek_child_state(child), ChildPeekState::Alive)
+}
+
+/// 非unix環境向けフォールバック。プロセスグループkillを行わないため、本Issueの
+/// group-killリーク対策（グループを跨いだreapタイミング調整）は対象外であり、
+/// 従来通りtry_wait()で判定する。
+#[cfg(not(unix))]
+fn stdio_is_alive(child: &mut Child) -> bool {
+    matches!(child.try_wait(), Ok(None))
+}
+
 impl McpConnection {
     /// MCPサーバーへ接続（url設定時はHTTP、未設定時はstdioプロセス起動）
     pub fn spawn(config: &McpServerConfig) -> Result<Self> {
@@ -97,11 +216,7 @@ impl McpConnection {
             Ok(conn)
         } else {
             // Stdio transportで起動
-            let mut child = Command::new(&config.command)
-                .args(&config.args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+            let mut child = build_stdio_command(config)
                 .spawn()
                 .map_err(|e| anyhow::anyhow!("MCPサーバー起動失敗 '{}': {e}", config.command))?;
 
@@ -291,9 +406,7 @@ impl McpConnection {
     /// MCPサーバーの生存チェック
     pub fn is_alive(&mut self) -> bool {
         match &mut self.transport {
-            McpTransport::Stdio { child, .. } => {
-                matches!(child.try_wait(), Ok(None))
-            }
+            McpTransport::Stdio { child, .. } => stdio_is_alive(child),
             McpTransport::Http { client, url } => {
                 // HTTPサーバーの死活をtools/listで軽量チェック（タイムアウト5秒）
                 let req = serde_json::json!({
@@ -317,6 +430,45 @@ impl McpConnection {
 impl Drop for McpConnection {
     fn drop(&mut self) {
         if let McpTransport::Stdio { child, .. } = &mut self.transport {
+            // グループkill（Issue #33）。build_stdio_command で process_group(0) 済みのため
+            // `-pid` でプロセスグループ全体（npx → node 等の孫プロセス含む）へ SIGKILL が届く。
+            //
+            // 「reapを行うのは Drop のみ」という不変条件（Issue #33 Q-1）。is_alive() /
+            // stdio_is_alive() は `libc::waitid(.., WNOWAIT)` でreapしないpeek専用実装の
+            // ため、この Drop の中で初めて子プロセスの終了状態を判定し、reapより前に
+            // killpgを行う。これにより自動再接続経路でis_alive()が呼ばれていても
+            // killpgが必ず発行される（Q-1）一方、F-1のpid再利用ガード（生存を確認できた
+            // 場合のみグループ全体へSIGKILLする）も維持する。この不変条件は
+            // `sandbox/direct.rs` の `kill_group_and_reap`（reap済み経路からは呼ばれない）
+            // と揃えている。
+            #[cfg(unix)]
+            match peek_child_state(child) {
+                ChildPeekState::Alive | ChildPeekState::ExitedNotReaped => {
+                    // pidはまだOS上に存在しreapされていない（生存中、または未reapの
+                    // ゾンビ）→ pid再利用の懸念なし。グループ全体へSIGKILL。
+                    // SAFETY: 直前の peek（waitid, WNOWAITでreapしない）でpidがまだ
+                    // OS上に存在することを確認済み。この後 child.wait() まで reap は
+                    // 一切行われないため、pid の再利用は発生していない。ゾンビ化した
+                    // グループリーダーに対する `kill(-pgid, ..)` もプロセスグループ自体は
+                    // 存命な限り（孫プロセスがメンバーとして残っている限り）孫へ正しく
+                    // 伝播する（実測確認済み）。
+                    unsafe {
+                        libc::kill(-(child.id() as i32), libc::SIGKILL);
+                    }
+                }
+                ChildPeekState::AlreadyReaped => {
+                    // 既にreap済み。pidがOSに再利用されている可能性があるため
+                    // グループkillはスキップする（F-1対策）。
+                }
+                ChildPeekState::Unknown => {
+                    // 生死判定不能。安全側に倒し、プロセスグループには触れない。
+                }
+            }
+
+            // child自身の後始末。ここで初めてreapする（不変条件: reapはDropのみ）。
+            // `child.kill()` はプロセスグループではなく生pid単体へSIGKILLを送るのみで、
+            // 既に終了していれば何もせずErrを返す（reap自体は伴わない。reapするのは
+            // 直後の `wait()` のみ）。
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -417,302 +569,4 @@ impl Tool for McpToolWrapper {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mcp_server_config_deserialize() {
-        let toml_str = r#"
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-"#;
-        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.name, "filesystem");
-        assert_eq!(config.command, "npx");
-        assert_eq!(config.args.len(), 3);
-        assert!(config.url.is_none()); // url未設定時はNone
-    }
-
-    #[test]
-    fn test_mcp_tool_info() {
-        let info = McpToolInfo {
-            name: "read_file".to_string(),
-            description: "ファイルを読む".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-        };
-        assert_eq!(info.name, "read_file");
-        assert_eq!(info.description, "ファイルを読む");
-    }
-
-    #[test]
-    fn test_mcp_tool_info_schema() {
-        let info = McpToolInfo {
-            name: "test".to_string(),
-            description: "desc".to_string(),
-            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
-        };
-        assert!(info.input_schema["properties"]["path"].is_object());
-    }
-
-    #[test]
-    fn test_json_rpc_request_serialize() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/list".to_string(),
-            params: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("tools/list"));
-        assert!(!json.contains("params")); // skip_serializing_if
-    }
-
-    #[test]
-    fn test_json_rpc_request_with_params() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: 2,
-            method: "tools/call".to_string(),
-            params: Some(serde_json::json!({"name": "test"})),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("params"));
-    }
-
-    #[test]
-    fn test_mcp_tool_wrapper_display_name_format() {
-        // display_nameのフォーマット検証（McpConnection不要）
-        let display = format!("{}:{}", "filesystem", "read_file");
-        assert_eq!(display, "filesystem:read_file");
-        let display2 = format!("{}:{}", "git", "status");
-        assert_eq!(display2, "git:status");
-    }
-
-    #[test]
-    fn test_mcp_multiple_servers_toml() {
-        let toml_str = r#"
-[[servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
-[[servers]]
-name = "git"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-git"]
-"#;
-        let config: crate::config::McpConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.servers.len(), 2);
-        assert_eq!(config.servers[0].name, "filesystem");
-        assert_eq!(config.servers[1].name, "git");
-    }
-
-    #[test]
-    fn test_mcp_server_config_with_url() {
-        // url設定時のデシリアライズ検証
-        let toml_str = r#"
-name = "remote-mcp"
-command = "unused"
-args = []
-url = "http://localhost:8080/mcp"
-"#;
-        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.name, "remote-mcp");
-        assert_eq!(config.url.as_deref(), Some("http://localhost:8080/mcp"));
-        // command/argsはHTTP時は無視されるが、フィールドとして保持
-        assert_eq!(config.command, "unused");
-    }
-
-    #[test]
-    fn test_mcp_server_config_without_url() {
-        // url未設定時の後方互換性検証
-        let toml_str = r#"
-name = "stdio-server"
-command = "npx"
-args = ["-y", "some-mcp-server"]
-"#;
-        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.url.is_none());
-        assert_eq!(config.command, "npx");
-    }
-
-    #[test]
-    fn test_mcp_server_config_http_toml() {
-        // 複数サーバー混在（stdio + HTTP）のTOML検証
-        let toml_str = r#"
-[[servers]]
-name = "local"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
-[[servers]]
-name = "remote"
-command = "unused"
-args = []
-url = "https://mcp.example.com/rpc"
-"#;
-        let config: crate::config::McpConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.servers.len(), 2);
-        assert!(config.servers[0].url.is_none()); // stdioサーバー
-        assert_eq!(
-            config.servers[1].url.as_deref(),
-            Some("https://mcp.example.com/rpc")
-        );
-    }
-
-    #[test]
-    fn test_http_transport_request_serialization() {
-        // HTTP transport用JSON-RPCリクエストのフォーマット検証
-        let id = 42u64;
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: "tools/call".to_string(),
-            params: Some(serde_json::json!({
-                "name": "read_file",
-                "arguments": {"path": "/tmp/test.txt"}
-            })),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-        // JSON-RPC 2.0準拠のフィールド検証
-        assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["id"], 42);
-        assert_eq!(parsed["method"], "tools/call");
-        assert_eq!(parsed["params"]["name"], "read_file");
-        assert_eq!(parsed["params"]["arguments"]["path"], "/tmp/test.txt");
-    }
-
-    #[test]
-    fn test_http_notification_format() {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-        });
-        let json = serde_json::to_string(&notification).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["jsonrpc"], "2.0");
-        assert_eq!(parsed["method"], "notifications/initialized");
-        assert!(parsed.get("id").is_none());
-    }
-
-    #[test]
-    fn test_http_error_response_parsing() {
-        let error_json = r#"{"id": 1, "result": null, "error": {"code": -32601, "message": "Method not found"}}"#;
-        let response: JsonRpcResponse = serde_json::from_str(error_json).unwrap();
-        assert!(response.error.is_some());
-        let err = response.error.unwrap();
-        assert_eq!(err["code"], -32601);
-    }
-
-    #[test]
-    fn test_http_tool_call_result_empty_content() {
-        let result = serde_json::json!({"content": []});
-        let text = result
-            .get("content")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|c| c.get("text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert!(text.is_empty());
-    }
-
-    #[test]
-    fn test_http_tool_call_result_with_text() {
-        let result = serde_json::json!({
-            "content": [{"type": "text", "text": "ファイル内容です"}]
-        });
-        let text = result
-            .get("content")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|c| c.get("text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(text, "ファイル内容です");
-    }
-
-    #[test]
-    fn test_http_config_url_overrides_command() {
-        let toml_str = r#"
-name = "http-server"
-command = "should-not-run"
-args = ["--invalid"]
-url = "http://localhost:9090/mcp"
-"#;
-        let config: McpServerConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.url.is_some());
-        assert_eq!(config.command, "should-not-run");
-    }
-
-    #[test]
-    fn test_http_initialize_request_format() {
-        let init_params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "bonsai-agent", "version": "0.1.0" }
-        });
-        assert_eq!(init_params["protocolVersion"], "2024-11-05");
-        assert_eq!(init_params["clientInfo"]["name"], "bonsai-agent");
-    }
-
-    #[test]
-    fn test_http_tool_call_result_no_content_field() {
-        let result = serde_json::json!({"status": "ok"});
-        let text = result
-            .get("content")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|c| c.get("text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert!(text.is_empty());
-    }
-
-    #[test]
-    fn test_http_tool_call_result_non_text_content() {
-        let result = serde_json::json!({
-            "content": [{"type": "image", "data": "base64..."}]
-        });
-        let text = result
-            .get("content")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|c| c.get("text"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert!(text.is_empty());
-    }
-
-    #[test]
-    fn test_json_rpc_response_both_result_and_error() {
-        let json =
-            r#"{"id": 1, "result": {"tools": []}, "error": {"code": -1, "message": "partial"}}"#;
-        let response: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(response.error.is_some());
-        assert!(response.result.is_some());
-    }
-
-    // 実MCPサーバーとの統合テスト
-    #[test]
-    #[ignore]
-    fn test_mcp_echo_server() {
-        // echo的なMCPサーバーが必要
-        let config = McpServerConfig {
-            name: "test".to_string(),
-            command: "npx".to_string(),
-            args: vec![
-                "-y".to_string(),
-                "@modelcontextprotocol/server-filesystem".to_string(),
-                "/tmp".to_string(),
-            ],
-            url: None,
-        };
-        let mut conn = McpConnection::spawn(&config).unwrap();
-        let tools = conn.list_tools().unwrap();
-        assert!(!tools.is_empty());
-    }
-}
+mod tests;

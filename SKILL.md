@@ -65,7 +65,7 @@ source: local-design-analysis
 
 ### 動的ツール選択
 - 全ツールをプロンプトに入れない（小型モデルの精度低下を防ぐ）
-- `ToolRegistry::select_relevant(query, max=5)`で関連ツールのみ注入
+- `ToolRegistry::select_relevant_split_semantic(query, builtin_max, mcp_max, allowed)`で関連ツールのみ注入（Issue #31: 未配線だった`select_relevant`/`select_relevant_with_type`は削除）
 - キーワードマッチングでスコアリング
 
 ### 権限モデル

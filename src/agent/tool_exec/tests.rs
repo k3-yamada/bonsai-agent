@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::agent_loop::AgentConfig;
 use crate::agent::error_recovery::{CircuitBreaker, FileStuckGuard, TrialSummary};
+use crate::agent::event_store::EventStore;
 use crate::safety::autonomy::AutonomyLevel;
 use crate::safety::secrets::SecretsFilter;
 use crate::tools::permission::{DaemonPolicy, Permission};
@@ -336,6 +337,179 @@ fn t_apply_tool_result_cancelled_skips_learning_signals_but_stays_failed() {
         "通常失敗はcircuit_breakerに記録されるべき"
     );
     assert_eq!(ts.len(), 1, "通常失敗はtrial_summaryに記録されるべき");
+}
+
+/// Issue #34: cancelled時、ToolCallStart/End の両 payload に
+/// `"cancelled": true` が刻まれる（`success` は false のまま維持）。
+#[test]
+fn t_apply_tool_result_cancelled_marks_event_payload() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+    let store = MemoryStore::in_memory().unwrap();
+
+    let r = ToolExecResult {
+        name: "shell".into(),
+        args_json: "{}".into(),
+        output: "取消されました".into(),
+        success: false,
+        is_error: false,
+        cancelled: true,
+    };
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        Some(&store),
+        4000,
+    );
+
+    let events = EventStore::new(store.conn()).replay(&session.id).unwrap();
+    let start = events
+        .iter()
+        .find(|e| e.event_type == "tool_call_start")
+        .expect("tool_call_start event");
+    let end = events
+        .iter()
+        .find(|e| e.event_type == "tool_call_end")
+        .expect("tool_call_end event");
+    let start_v: serde_json::Value = serde_json::from_str(&start.event_data).unwrap();
+    let end_v: serde_json::Value = serde_json::from_str(&end.event_data).unwrap();
+    assert_eq!(start_v["cancelled"], serde_json::json!(true));
+    assert_eq!(end_v["cancelled"], serde_json::json!(true));
+    assert_eq!(end_v["success"], serde_json::json!(false));
+}
+
+/// Issue #34 後方互換確証: 非取消時は `cancelled` フィールド自体が出力されない
+/// (成功/失敗いずれの経路でも)。
+#[test]
+fn t_apply_tool_result_non_cancelled_payload_has_no_cancelled_field() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+    let store = MemoryStore::in_memory().unwrap();
+
+    for r in [
+        ToolExecResult {
+            name: "shell".into(),
+            args_json: "{}".into(),
+            output: "ok".into(),
+            success: true,
+            is_error: false,
+            cancelled: false,
+        },
+        ToolExecResult {
+            name: "shell".into(),
+            args_json: "{}".into(),
+            output: "通常のエラー".into(),
+            success: false,
+            is_error: true,
+            cancelled: false,
+        },
+    ] {
+        apply_tool_result(
+            &r,
+            &mut session,
+            &mut cb,
+            &mut ts,
+            &mut guard,
+            0,
+            &sf,
+            Some(&store),
+            4000,
+        );
+    }
+
+    let events = EventStore::new(store.conn()).replay(&session.id).unwrap();
+    for e in events
+        .iter()
+        .filter(|e| e.event_type == "tool_call_start" || e.event_type == "tool_call_end")
+    {
+        let v: serde_json::Value = serde_json::from_str(&e.event_data).unwrap();
+        assert!(
+            v.get("cancelled").is_none(),
+            "非取消時はcancelledフィールドが出力されないべき: {v:?}"
+        );
+    }
+}
+
+/// Issue #34: cancelled時は FileStuckGuard の失敗記録をスキップする。
+#[test]
+fn t_apply_tool_result_cancelled_skips_file_stuck_guard() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+
+    let r = ToolExecResult {
+        name: "edit".into(),
+        args_json: r#"{"path": "/tmp/foo.rs"}"#.into(),
+        output: "取消されました".into(),
+        success: false,
+        is_error: false,
+        cancelled: true,
+    };
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        None,
+        4000,
+    );
+    assert_eq!(
+        guard.tracked_files(),
+        0,
+        "cancelled時はFileStuckGuardに記録されないべき"
+    );
+}
+
+/// 過剰除外の回帰ガード: 通常失敗 (cancelled: false) は従来どおり
+/// FileStuckGuard に記録される。
+#[test]
+fn t_apply_tool_result_non_cancelled_records_file_stuck_guard() {
+    let mut session = Session::new();
+    let mut cb = CircuitBreaker::default();
+    let sf = SecretsFilter::default();
+    let mut ts = TrialSummary::default();
+    let mut guard = FileStuckGuard::default();
+
+    let r = ToolExecResult {
+        name: "edit".into(),
+        args_json: r#"{"path": "/tmp/foo.rs"}"#.into(),
+        output: "通常のエラー".into(),
+        success: false,
+        is_error: true,
+        cancelled: false,
+    };
+    apply_tool_result(
+        &r,
+        &mut session,
+        &mut cb,
+        &mut ts,
+        &mut guard,
+        0,
+        &sf,
+        None,
+        4000,
+    );
+    assert_eq!(
+        guard.tracked_files(),
+        1,
+        "非取消の失敗はFileStuckGuardに記録されるべき"
+    );
 }
 
 #[test]

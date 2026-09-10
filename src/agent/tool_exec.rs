@@ -37,6 +37,12 @@ pub(crate) struct ToolExecResult {
     /// ユーザー操作（Ctrl+C等）による取消で失敗したか（Issue #22 qa-reviewer MEDIUM-2）。
     /// `apply_tool_result` はこれが true の場合、circuit_breaker / trial_summary /
     /// KnowledgeGraph への学習記録をスキップする（ユーザー取消を品質シグナル化しない）。
+    /// 加えて FileStuckGuard の失敗記録もスキップし、ToolCallStart/End の event
+    /// payload に `"cancelled": true` を刻む（Issue #34、`apply_tool_result` 内）。
+    /// この刻印は `domain::event::has_user_cancelled_tool_call` の判定根拠になり、
+    /// cancelled を 1 件でも含むセッションは `build_trajectory_from_events` /
+    /// `classify_session_for_verification` の双方から trajectory 抽出・検証サンプルの
+    /// 対象外として除外される（Issue #34 follow-up、ADR-016）。
     pub cancelled: bool,
 }
 
@@ -289,7 +295,9 @@ pub(crate) fn execute_read_batch_parallel(
     })
 }
 
-/// ツール実行結果をセッション・サーキットブレーカー・監査ログ・試行サマリーに反映
+/// ツール実行結果をセッション・サーキットブレーカー・監査ログ・試行サマリーに反映。
+/// `r.cancelled` 時は ToolCallStart/End payload に `"cancelled": true` を刻み、
+/// FileStuckGuard の失敗記録もスキップする (Issue #34)。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_tool_result(
     r: &ToolExecResult,
@@ -317,18 +325,26 @@ pub(crate) fn apply_tool_result(
     let is_failed = r.is_error || !r.success;
 
     // EventStore: ToolCallStart + ToolCallEnd emit (項目162: P1 Step 5 ランタイム統合)
+    // Issue #34: ユーザー取消 (Ctrl+C) 時のみ payload に "cancelled": true を刻む
+    // (観測専用フィールド、後方互換のためフィールド不在=false)。
+    let mut start_payload = serde_json::json!({ "tool": r.name });
+    let mut end_payload = serde_json::json!({ "tool": r.name, "success": !is_failed });
+    if r.cancelled {
+        start_payload["cancelled"] = serde_json::Value::Bool(true);
+        end_payload["cancelled"] = serde_json::Value::Bool(true);
+    }
     crate::agent::agent_loop::emit_event(
         store,
         &session.id,
         &EventType::ToolCallStart,
-        &serde_json::json!({ "tool": r.name }).to_string(),
+        &start_payload.to_string(),
         None,
     );
     crate::agent::agent_loop::emit_event(
         store,
         &session.id,
         &EventType::ToolCallEnd,
-        &serde_json::json!({ "tool": r.name, "success": !is_failed }).to_string(),
+        &end_payload.to_string(),
         None,
     );
 
@@ -343,7 +359,11 @@ pub(crate) fn apply_tool_result(
             circuit_breaker.record_failure(&r.name);
             trial_summary.record_failure(&r.name, &redacted_args, &redacted_output, iteration);
         }
-        if let Some(ref fp) = file_path {
+        // Issue #34: ユーザー取消 (Ctrl+C) は FileStuckGuard の失敗記録対象外
+        // (circuit_breaker/trial_summary と同じ理由、docs/VALUES.md V1/V4)。
+        if !r.cancelled
+            && let Some(ref fp) = file_path
+        {
             file_stuck_guard.record_file_failure(fp);
             if let Some(action) = file_stuck_guard.check_stuck(fp) {
                 let msg = match action {

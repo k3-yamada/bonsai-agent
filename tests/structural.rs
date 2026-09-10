@@ -301,7 +301,7 @@ fn t_lint_error_messages_include_docs_link() {
     // silent deletion (refactor で assert! が消える) 防止のため、code 毎に最低 1 件 expected.
     // 注: code name を runtime format で組立て、source 内に bracketed リテラルを増やさない
     // (contains_lint_code self-count を抑制、META meta-test の false positive 回避).
-    for code in &["SIZE-001", "DEP-001", "LOG-001", "META"] {
+    for code in &["SIZE-001", "DEP-001", "LOG-001", "META", "SSOT-001"] {
         let bracketed = format!("[LINT:{}]", code);
         assert!(
             lint_codes.iter().any(|l| l.contains(&bracketed)),
@@ -321,12 +321,10 @@ fn t_lint_error_messages_include_docs_link() {
 /// 並列実行でも競合しない。
 #[test]
 fn t_smoke_whitelist_keeps_real_readonly_tools() {
+    use bonsai_agent::cancel::CancellationToken;
+    use bonsai_agent::safety::path_guard::PathGuard;
     use bonsai_agent::tools::ToolRegistry;
-    use bonsai_agent::tools::arxiv::ArxivTool;
-    use bonsai_agent::tools::file::{FileReadTool, FileWriteTool};
-    use bonsai_agent::tools::memory::RecallTool;
-    use bonsai_agent::tools::repomap::RepoMapTool;
-    use bonsai_agent::tools::web::{WebFetchTool, WebSearchTool};
+    use bonsai_agent::tools::builtin::{BuiltinToolDeps, register_builtin_tools};
     use bonsai_agent::tools::whitelist::{READONLY_TOOL_WHITELIST, effective_tool_whitelist};
 
     // SAFETY: 本 binary 内で env を触る唯一の test (他 test は env 不読).
@@ -342,13 +340,15 @@ fn t_smoke_whitelist_keeps_real_readonly_tools() {
         .to_string();
 
     let mut reg = ToolRegistry::new();
-    reg.register(Box::new(FileReadTool));
-    reg.register(Box::new(FileWriteTool));
-    reg.register(Box::new(RepoMapTool));
-    reg.register(Box::new(WebFetchTool));
-    reg.register(Box::new(WebSearchTool));
-    reg.register(Box::new(ArxivTool));
-    reg.register(Box::new(RecallTool::new(db_path)));
+    register_builtin_tools(
+        &mut reg,
+        &BuiltinToolDeps {
+            shell_timeout_secs: 30,
+            cancel: CancellationToken::new(),
+            path_guard: PathGuard::new(vec![]),
+            db_path,
+        },
+    );
 
     let reg = reg.apply_whitelist(effective_tool_whitelist().as_deref().unwrap_or(&[]));
 
@@ -370,5 +370,33 @@ fn t_smoke_whitelist_keeps_real_readonly_tools() {
     assert!(
         !write_still_present,
         "smoke mode で write tool 'file_write' は除外される"
+    );
+}
+
+// ===== builtin tool 登録 SSOT (Issue #28) =====
+
+/// main 層バイパス検出: `setup_tools()`（`src/main.rs`）が builtin tool を
+/// `register_builtin_tools()`（`src/tools/builtin.rs`）経由でのみ登録し、
+/// `registry.register(Box::new(..))` を直接呼んでいないことを検証する。
+/// バイパスが起きると `BUILTIN_TOOL_NAMES` (SSOT) と実登録集合が乖離しうる。
+#[test]
+fn t_setup_tools_registers_only_via_builtin_factory() {
+    let content = fs::read_to_string("src/main.rs").expect("read src/main.rs");
+    let start = content.find("fn setup_tools").expect(
+        "[LINT:SSOT-001] src/main.rs に fn setup_tools が見つからない. 参照: docs/architecture/module-layer-rules.md",
+    );
+    let rest = &content[start..];
+    let end = rest.find("\n}\n").expect(
+        "[LINT:SSOT-001] setup_tools() の終端 '\\n}\\n' が見つからない. 参照: docs/architecture/module-layer-rules.md",
+    );
+    let body = &rest[..end];
+
+    assert!(
+        body.contains("register_builtin_tools"),
+        "[LINT:SSOT-001] setup_tools() は register_builtin_tools() 経由で builtin tool を登録すること. 参照: docs/architecture/module-layer-rules.md"
+    );
+    assert!(
+        !body.contains("register(Box::new("),
+        "[LINT:SSOT-001] setup_tools() が register_builtin_tools() をバイパスして直接 register(Box::new(..)) を呼んでいる. 参照: docs/architecture/module-layer-rules.md"
     );
 }

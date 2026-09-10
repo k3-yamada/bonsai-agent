@@ -63,10 +63,10 @@ pub enum SubAgentRole {
 impl SubAgentRole {
     /// ロールに応じたデフォルトの許可ツール一覧
     ///
-    /// ツール名は `src/tools/*.rs` の `TypedTool::NAME`（本番 `setup_tools()` で
-    /// 実際に登録される名前）とのみ一致させること。H-1: 過去に Antigravity/Windsurf
-    /// 系の語彙（`find_by_name` 等）が誤って混入したため、回帰防止テスト
-    /// `test_default_tools_only_reference_registered_tools` で検証している。
+    /// ツール名は `crate::tools::builtin::BUILTIN_TOOL_NAMES`（本番 `setup_tools()` で
+    /// 実際に登録される名前の SSOT、Issue #28）とのみ一致させること。H-1: 過去に
+    /// Antigravity/Windsurf 系の語彙（`find_by_name` 等）が誤って混入したため、回帰防止
+    /// テスト `test_default_tools_only_reference_registered_tools` で検証している。
     ///
     /// # ロール別権限方針（Issue #25）
     ///
@@ -739,33 +739,14 @@ mod tests {
     use crate::cancel::CancellationToken;
     use crate::domain::llm::MockLlmBackend;
     use crate::tools::ToolRegistry;
-    use crate::tools::arxiv::ArxivTool;
-    use crate::tools::file::{FileReadTool, FileWriteTool, MultiEditTool};
-    use crate::tools::git::GitTool;
-    use crate::tools::memory::{RecallTool, RememberTool};
-    use crate::tools::repomap::RepoMapTool;
-    use crate::tools::shell::ShellTool;
-    use crate::tools::typed::TypedTool;
-    use crate::tools::web::{WebFetchTool, WebSearchTool};
 
     /// 本番 `setup_tools`（`src/main.rs`）で実際にレジストリへ登録される
     /// ツール名の一覧。H-1 回帰防止: `SubAgentRole::default_tools()` が
     /// 実在しないツール名（Antigravity/Windsurf系語彙の混入等）を返さないことを
     /// 検証するための一次情報として使う。
-    fn known_tool_names() -> Vec<&'static str> {
-        vec![
-            <ShellTool as TypedTool>::NAME,
-            <FileReadTool as TypedTool>::NAME,
-            <FileWriteTool as TypedTool>::NAME,
-            <MultiEditTool as TypedTool>::NAME,
-            <GitTool as TypedTool>::NAME,
-            <WebSearchTool as TypedTool>::NAME,
-            <WebFetchTool as TypedTool>::NAME,
-            <ArxivTool as TypedTool>::NAME,
-            <RepoMapTool as TypedTool>::NAME,
-            <RememberTool as TypedTool>::NAME,
-            <RecallTool as TypedTool>::NAME,
-        ]
+    /// 一次情報は tools 層の `crate::tools::builtin::BUILTIN_TOOL_NAMES`（Issue #28、SSOT化）。
+    fn known_tool_names() -> &'static [&'static str] {
+        crate::tools::builtin::BUILTIN_TOOL_NAMES
     }
 
     fn test_store() -> MemoryStore {
@@ -1239,6 +1220,10 @@ mod tests {
     #[test]
     fn test_default_tools_only_reference_registered_tools() {
         let known = known_tool_names();
+        assert!(
+            !known.is_empty(),
+            "BUILTIN_TOOL_NAMES が空。H-1 検証が空振りする"
+        );
         for role in [
             SubAgentRole::General,
             SubAgentRole::Explorer,

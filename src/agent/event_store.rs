@@ -101,6 +101,9 @@ impl<'a> EventStore<'a> {
     /// - UserMessage: `{"content": "タスク記述"}`
     /// - ToolCallStart: `{"tool": "shell"}` (tool名のみ必須)
     /// - ToolCallEnd:   `{"tool": "shell", "success": true}` (successのみ必須)
+    /// - `"cancelled": true` を含む ToolCallStart/End を 1 件でも含む session は
+    ///   「完遂したか」が観測不能なため trajectory 候補から除外される
+    ///   (Issue #34 follow-up、ADR-016)。
     ///
     /// 本 method は `extract_successful_trajectories_since_id(0, ...)` の薄いラッパ
     /// (handoff 05-07g Phase 5 で scoping 機構導入時に delegate 化、互換維持)。
@@ -148,7 +151,10 @@ impl<'a> EventStore<'a> {
     ///
     /// 過去全 SessionEnd 済 session のうち、`task_type` に分類されるものを集計し、
     /// 「成功」 = AssistantMessage[last] に `[検証済]` 含有 AND 全 ToolCallEnd 成功
-    /// と定義した比率を返す。sample 数が `min_samples` 未満なら `None` (cold-start)。
+    /// と定義した比率を返す。cancelled な tool call (ユーザー Ctrl+C 中断) を
+    /// 1 件でも含む session は集計サンプル対象外
+    /// (Issue #34 follow-up: 部分取消セッションが成功扱いに反転するのを防ぐ、ADR-016)。
+    /// sample 数が `min_samples` 未満なら `None` (cold-start)。
     pub fn verification_success_rate(
         &self,
         task_type: &str,
@@ -844,5 +850,178 @@ mod tests {
             "snapshot_id 以降の cycle 2 のみ 1 件 (new1)"
         );
         assert_eq!(scoped[0].session_id, "new1");
+    }
+
+    /// Issue #34 follow-up: cancelled な ToolCallStart/End を 1 件でも含む session は
+    /// 成功/失敗 trajectory 抽出の**どちらからも候補外** (`None`) になる
+    /// (分子・分母から除外するのではなく候補そのものを除外、ADR-016)。
+    #[test]
+    fn t_extract_trajectories_partial_cancel_excluded_from_both_directions() {
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::UserMessage,
+            r#"{"content":"ファイル一覧を取得して"}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append("s1", &EventType::ToolCallStart, r#"{"tool":"a"}"#, Some(0))
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"a","success":true}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append("s1", &EventType::ToolCallStart, r#"{"tool":"b"}"#, Some(1))
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"b","success":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"c","cancelled":true}"#,
+            Some(2),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"c","success":false,"cancelled":true}"#,
+            Some(2),
+        )
+        .unwrap();
+        es.append("s1", &EventType::SessionEnd, "{}", None).unwrap();
+
+        let successful = es.extract_successful_trajectories(0.0, 0).unwrap();
+        assert!(
+            successful.is_empty(),
+            "部分キャンセル session は成功 trajectory 候補にもならない"
+        );
+
+        let failed = es.extract_failed_trajectories(1.0, 0).unwrap();
+        assert!(
+            failed.is_empty(),
+            "部分キャンセル session は失敗 trajectory 候補にもならない"
+        );
+    }
+
+    /// Issue #34 follow-up 本番経路の直接的回帰ガード: `verification_success_rate` が
+    /// 部分キャンセル session を「検証成功」として誤集計しないこと。
+    /// sample 数が 0 (min_samples=1 未満) となり `None` を返す (cold-start fallback、
+    /// `dynamic_skip_threshold` default 0.0=OFF への保守的 fallback)。
+    #[test]
+    fn t_verification_success_rate_partial_cancel_is_not_a_sample() {
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::UserMessage,
+            r#"{"content":"ファイルを編集して"}"#,
+            None,
+        )
+        .unwrap();
+        es.append("s1", &EventType::ToolCallStart, r#"{"tool":"a"}"#, Some(0))
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"a","success":true}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"b","cancelled":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"b","success":false,"cancelled":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::AssistantMessage,
+            r#"{"content":"完了 [検証済]"}"#,
+            None,
+        )
+        .unwrap();
+        es.append("s1", &EventType::SessionEnd, "{}", None).unwrap();
+
+        let rate = es.verification_success_rate("code_edit", 1).unwrap();
+        assert_eq!(rate, None);
+    }
+
+    /// Phase 3 (#9): SQLite/Mock parity 明示テスト。qa-reviewer 指摘
+    /// 「`min_steps=0` で不変条件が壊れる」への直接の回帰防止
+    /// (`min_steps` に依存しない構築点 gate であることを確認、ADR-016)。
+    /// `src/memory/mocks/event_repository_mock.rs` の
+    /// `t_mock_partial_cancel_excluded_even_with_min_steps_zero` と同一 assertion。
+    #[test]
+    fn t_event_store_partial_cancel_excluded_from_both_directions() {
+        let store = test_store();
+        let es = EventStore::new(store.conn());
+        es.append("s1", &EventType::SessionStart, "{}", None)
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::UserMessage,
+            r#"{"content":"ファイル一覧を取得して"}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append("s1", &EventType::ToolCallStart, r#"{"tool":"a"}"#, Some(0))
+            .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"a","success":true}"#,
+            Some(0),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallStart,
+            r#"{"tool":"b","cancelled":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append(
+            "s1",
+            &EventType::ToolCallEnd,
+            r#"{"tool":"b","success":false,"cancelled":true}"#,
+            Some(1),
+        )
+        .unwrap();
+        es.append("s1", &EventType::SessionEnd, "{}", None).unwrap();
+
+        let successful = es
+            .extract_successful_trajectories_since_id(0, 0.0, 0)
+            .unwrap();
+        assert!(
+            successful.is_empty(),
+            "min_steps=0 でも部分キャンセル session は成功候補にならない"
+        );
+        let failed = es.extract_failed_trajectories_since_id(0, 1.0, 0).unwrap();
+        assert!(
+            failed.is_empty(),
+            "min_steps=0 でも部分キャンセル session は失敗候補にならない"
+        );
     }
 }
