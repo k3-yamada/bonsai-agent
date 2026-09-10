@@ -174,7 +174,11 @@ impl Tool for PluginTool {
         } else {
             result.stdout
         };
-        Ok(ToolResult { output, success })
+        Ok(ToolResult {
+            output,
+            success,
+            ..Default::default()
+        })
     }
 }
 

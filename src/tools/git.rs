@@ -29,6 +29,7 @@ impl GitTool {
         Ok(ToolResult {
             output: result_text,
             success: output.status.success(),
+            ..Default::default()
         })
     }
 }
@@ -85,6 +86,7 @@ impl TypedTool for GitTool {
             _ => Ok(ToolResult {
                 output: format!("不明なサブコマンド: {subcommand}"),
                 success: false,
+                ..Default::default()
             }),
         }
     }

@@ -115,7 +115,7 @@ impl SubAgentRole {
 }
 
 /// サブエージェント設定
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SubAgentConfig {
     /// 現在の深度（0=ルート）
     pub depth: usize,
@@ -134,11 +134,44 @@ pub struct SubAgentConfig {
     pub n_ctx_budget: Option<u32>,
     /// サブエージェントの専門化ロール
     pub role: SubAgentRole,
+    /// ツール実行前の確認コールバック（Issue #22 B3-3）。親から `Arc` clone で継承する。
+    /// `Some` の間は並列実行を選ばない（[`should_parallelize`] 参照、stdin 競合防止）。
+    pub confirm_callback: Option<crate::agent::agent_loop::ConfirmCallback>,
+    /// 自律レベル（Issue #22 B3-3）。子は親と同値を継承し、より広い値を設定する
+    /// API は用意しない（単調性維持）。
+    pub autonomy: crate::safety::autonomy::AutonomyLevel,
+    /// デーモンモード（バックグラウンド無人実行）フラグ（Issue #22 B3-3）。
+    pub is_daemon: bool,
+    /// デーモン時のツール実行ポリシー（Issue #22 B3-3）。
+    pub daemon_policy: crate::tools::permission::DaemonPolicy,
+    /// 親から引き継ぐタスク単位のウォールクロックタイムアウト（Issue #22 B3-3）。
+    /// 子の無制限実行を防ぐ。
+    pub task_timeout: Option<std::time::Duration>,
     /// `with_tools()` により `allowed_tools` が明示指定されたかどうかの内部フラグ。
     /// `from_parent()` 由来（継承）の値と区別するために用いる。`true` の間は
     /// `with_role()` が積集合を取らず明示指定を無条件で優先する（Issue #25
     /// qa-reviewer 合意: 明示指定は単調性の保証対象外）。
     tools_explicit: bool,
+}
+
+impl std::fmt::Debug for SubAgentConfig {
+    /// `confirm_callback` は `Arc<dyn Fn...>` のため自動 derive 不可（Issue #22 B3-3）。
+    /// 中身は表示せず `.is_some()` のみ出す。
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubAgentConfig")
+            .field("depth", &self.depth)
+            .field("max_iterations", &self.max_iterations)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("n_ctx_budget", &self.n_ctx_budget)
+            .field("role", &self.role)
+            .field("confirm_callback", &self.confirm_callback.is_some())
+            .field("autonomy", &self.autonomy)
+            .field("is_daemon", &self.is_daemon)
+            .field("daemon_policy", &self.daemon_policy)
+            .field("task_timeout", &self.task_timeout)
+            .field("tools_explicit", &self.tools_explicit)
+            .finish()
+    }
 }
 
 impl SubAgentConfig {
@@ -160,6 +193,18 @@ impl SubAgentConfig {
     ///   LLM出力が到達する経路は存在しないため、明示指定を無条件に優先する
     ///   設計としている（`with_tools()` 呼び出し後は `with_role()` を呼んでも
     ///   明示指定が保持される）。
+    ///
+    /// # 継承するフィールド（Issue #22 B3-3、明示列挙。増減時は本表と
+    /// `build_sub_config` を同時更新すること）
+    /// - `allowed_tools`=する(単調性) / `n_ctx_budget`=する / `confirm_callback`=する
+    ///   (`Arc` clone、並列時は [`should_parallelize`] が抑止)
+    /// - `autonomy`=する(子は親と同値、より広い値を設定するAPIは用意しない)
+    /// - `is_daemon`/`daemon_policy`=する
+    /// - `task_timeout`=する(子の無制限実行を防ぐ)
+    /// - `max_iterations`=半減(親/2、最低3、従来どおり)
+    /// - `auto_checkpoint`=しない(子は常にfalse) / `system_prompt`=しない(ロール指示+goalで置換)
+    /// - `advisor`/`base_inference`/`soul_path`/`memory_blocks`/`max_tool_output_chars`
+    ///   =しない(非ゴール、必要なら別Issue)
     pub fn from_parent(parent_config: &AgentConfig, depth: usize) -> Self {
         Self {
             depth,
@@ -167,6 +212,11 @@ impl SubAgentConfig {
             allowed_tools: parent_config.allowed_tools.clone(),
             n_ctx_budget: parent_config.n_ctx_budget,
             role: SubAgentRole::General,
+            confirm_callback: parent_config.confirm_callback.clone(),
+            autonomy: parent_config.autonomy,
+            is_daemon: parent_config.is_daemon,
+            daemon_policy: parent_config.daemon_policy,
+            task_timeout: parent_config.task_timeout,
             tools_explicit: false,
         }
     }
@@ -325,9 +375,15 @@ impl<'a> SubAgentExecutor<'a> {
 
         let independent = check_independence(subtask_goals);
         let store_clonable = self.store.map(|s| s.path().is_some()).unwrap_or(true);
-        let should_parallelize = independent && store_clonable && subtask_goals.len() >= 2;
+        let has_confirm = self.sub_config.confirm_callback.is_some();
+        let do_parallelize = should_parallelize(
+            independent,
+            store_clonable,
+            subtask_goals.len(),
+            has_confirm,
+        );
 
-        let results = if should_parallelize {
+        let results = if do_parallelize {
             log_event(
                 LogLevel::Info,
                 "subagent",
@@ -339,7 +395,7 @@ impl<'a> SubAgentExecutor<'a> {
                 LogLevel::Info,
                 "subagent",
                 &format!(
-                    "順次実行モード: {}件 (独立={independent}, store_clonable={store_clonable})",
+                    "順次実行モード: {}件 (独立={independent}, store_clonable={store_clonable}, confirm_cb={has_confirm})",
                     subtask_goals.len(),
                 ),
             );
@@ -487,6 +543,14 @@ impl<'a> SubAgentExecutor<'a> {
             // Issue #25: ロール/明示指定の allowlist を AgentConfig へ伝播。
             // これが唯一の伝播経路であり、ここを落とすと enforcement が丸ごと無効になる。
             allowed_tools: self.sub_config.allowed_tools.clone(),
+            // Issue #22 B3-3: 安全コンテキストの伝播。ここを落とすと子は常に
+            // confirm_callback=None かつ autonomy=Supervised に戻り、
+            // Permission::Confirm なツール（shell 含む）が無条件拒否される。
+            confirm_callback: self.sub_config.confirm_callback.clone(),
+            autonomy: self.sub_config.autonomy,
+            is_daemon: self.sub_config.is_daemon,
+            daemon_policy: self.sub_config.daemon_policy,
+            task_timeout: self.sub_config.task_timeout,
             ..Default::default()
         }
     }
@@ -521,6 +585,20 @@ pub fn format_delegation_for_context(result: &DelegationResult) -> String {
         "<context type=\"subtask-results\">\n{}\n</context>",
         result.summary
     )
+}
+
+/// 並列サブエージェント実行の可否（純関数、Issue #22 AC-3-5）。
+/// `has_confirm_callback == true` のときは必ず `false` を返す
+/// （`tool_exec::execute_read_batch_parallel` と同一理由: 確認プロンプトの
+/// stdin 競合防止。複数スレッドが同時に確認コールバックを呼ぶと、どちらの
+/// 確認がどちらのプロンプトへの応答か区別できなくなるため）。
+pub(crate) fn should_parallelize(
+    independent: bool,
+    store_clonable: bool,
+    goal_count: usize,
+    has_confirm_callback: bool,
+) -> bool {
+    independent && store_clonable && goal_count >= 2 && !has_confirm_callback
 }
 
 /// サブタスク群が相互に独立かをヒューリスティックで判定。
@@ -796,6 +874,11 @@ mod tests {
             allowed_tools: None,
             n_ctx_budget: None,
             role: SubAgentRole::General,
+            confirm_callback: None,
+            autonomy: crate::safety::autonomy::AutonomyLevel::default(),
+            is_daemon: false,
+            daemon_policy: crate::tools::permission::DaemonPolicy::AutoOnly,
+            task_timeout: None,
             tools_explicit: false,
         };
 
@@ -1404,6 +1487,239 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains(&"shell".to_string())
+        );
+    }
+
+    // ===== Issue #22 B3-3: サブエージェント境界の安全コンテキスト継承 =====
+
+    /// AC-3-1: `from_parent` が5フィールド（confirm_callback/autonomy/is_daemon/
+    /// daemon_policy/task_timeout）を親からそのまま複製すること。
+    #[test]
+    fn t_from_parent_inherits_safety_context() {
+        let cb: crate::agent::agent_loop::ConfirmCallback = std::sync::Arc::new(|_, _| true);
+        let parent = AgentConfig {
+            confirm_callback: Some(cb),
+            autonomy: crate::safety::autonomy::AutonomyLevel::Full,
+            is_daemon: true,
+            daemon_policy: crate::tools::permission::DaemonPolicy::QueueForHuman,
+            task_timeout: Some(std::time::Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert!(sub.confirm_callback.is_some());
+        assert_eq!(sub.autonomy, crate::safety::autonomy::AutonomyLevel::Full);
+        assert!(sub.is_daemon);
+        assert_eq!(
+            sub.daemon_policy,
+            crate::tools::permission::DaemonPolicy::QueueForHuman
+        );
+        assert_eq!(sub.task_timeout, Some(std::time::Duration::from_secs(60)));
+    }
+
+    /// AC-3-1: `build_sub_config` が5フィールドを子 `AgentConfig` へ伝播すること。
+    #[test]
+    fn t_build_sub_config_propagates_safety_context() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+
+        let cb: crate::agent::agent_loop::ConfirmCallback = std::sync::Arc::new(|_, _| true);
+        let parent = AgentConfig {
+            confirm_callback: Some(cb),
+            autonomy: crate::safety::autonomy::AutonomyLevel::Full,
+            is_daemon: true,
+            daemon_policy: crate::tools::permission::DaemonPolicy::QueueForHuman,
+            task_timeout: Some(std::time::Duration::from_secs(45)),
+            ..Default::default()
+        };
+        let sub_config = SubAgentConfig::from_parent(&parent, 0);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+        let config = executor.build_sub_config("g");
+        assert!(config.confirm_callback.is_some());
+        assert_eq!(
+            config.autonomy,
+            crate::safety::autonomy::AutonomyLevel::Full
+        );
+        assert!(config.is_daemon);
+        assert_eq!(
+            config.daemon_policy,
+            crate::tools::permission::DaemonPolicy::QueueForHuman
+        );
+        assert_eq!(
+            config.task_timeout,
+            Some(std::time::Duration::from_secs(45))
+        );
+    }
+
+    /// AC-3-3: 子 `AgentConfig.confirm_callback` が実際に呼び出せること
+    /// （呼出回数を `AtomicUsize` で検証）。
+    #[test]
+    fn t_build_sub_config_confirm_callback_is_invoked() {
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let cb: crate::agent::agent_loop::ConfirmCallback =
+            std::sync::Arc::new(move |_name: &str, _args: &str| {
+                calls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                true
+            });
+
+        let parent = AgentConfig {
+            confirm_callback: Some(cb),
+            ..Default::default()
+        };
+        let sub_config = SubAgentConfig::from_parent(&parent, 0);
+
+        let executor = SubAgentExecutor::new(
+            &backend,
+            &tools,
+            &path_guard,
+            &cancel,
+            Some(&store),
+            sub_config,
+        );
+        let config = executor.build_sub_config("g");
+        let callback = config
+            .confirm_callback
+            .as_ref()
+            .expect("callback must propagate");
+        assert!(callback("shell", "{}"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// AC-3-3: `false` を返す confirm_callback を持つ子で、Confirm 権限ツール
+    /// (`shell`) の実行が「確認拒否」文言で拒否されること
+    /// (`tool_exec::execute_single_call_with_policy` の本番経路を直接検証)。
+    #[test]
+    fn t_confirm_callback_denying_blocks_confirm_tool() {
+        use crate::agent::tool_exec::{ValidatedCall, execute_single_call_with_policy};
+        use crate::tools::Tool;
+        use crate::tools::shell::ShellTool;
+
+        let shell = ShellTool::new();
+        let deny_cb: crate::agent::agent_loop::ConfirmCallback =
+            std::sync::Arc::new(|_name: &str, _args: &str| false);
+
+        let parent = AgentConfig {
+            autonomy: crate::safety::autonomy::AutonomyLevel::Supervised,
+            confirm_callback: Some(deny_cb),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert!(sub.confirm_callback.is_some());
+
+        let call = ValidatedCall {
+            name: "shell".to_string(),
+            args_json: r#"{"command":"echo hi"}"#.to_string(),
+            coerced_args: serde_json::json!({"command": "echo hi"}),
+            tool: &shell as &dyn Tool,
+            is_read_only: false,
+        };
+
+        let cb = sub.confirm_callback.as_deref().unwrap();
+        let result = execute_single_call_with_policy(
+            &call,
+            sub.is_daemon,
+            sub.daemon_policy,
+            sub.autonomy,
+            Some(cb),
+        );
+        assert!(!result.success);
+        assert!(result.output.contains("確認拒否"));
+    }
+
+    /// AC-3-4: 親が Supervised + confirm_callback あり + Verifier ロールの場合、
+    /// `shell` が allowlist に残り、かつ「確認コールバック未設定」エラーに
+    /// ならないこと（伝播忘れによる機能不全の回帰防止）。
+    #[test]
+    fn t_verifier_role_shell_not_blocked_by_missing_callback() {
+        use crate::agent::tool_exec::{ValidatedCall, execute_single_call_with_policy};
+        use crate::tools::Tool;
+        use crate::tools::shell::ShellTool;
+
+        let shell = ShellTool::new();
+        let allow_cb: crate::agent::agent_loop::ConfirmCallback =
+            std::sync::Arc::new(|_name: &str, _args: &str| true);
+        let parent = AgentConfig {
+            autonomy: crate::safety::autonomy::AutonomyLevel::Supervised,
+            confirm_callback: Some(allow_cb),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0).with_role(SubAgentRole::Verifier);
+        assert!(
+            sub.allowed_tools
+                .as_ref()
+                .unwrap()
+                .contains(&"shell".to_string())
+        );
+        assert!(sub.confirm_callback.is_some());
+
+        let call = ValidatedCall {
+            name: "shell".to_string(),
+            args_json: r#"{"command":"echo hi"}"#.to_string(),
+            coerced_args: serde_json::json!({"command": "echo hi"}),
+            tool: &shell as &dyn Tool,
+            is_read_only: false,
+        };
+        let cb = sub.confirm_callback.as_deref().unwrap();
+        let result = execute_single_call_with_policy(
+            &call,
+            sub.is_daemon,
+            sub.daemon_policy,
+            sub.autonomy,
+            Some(cb),
+        );
+        assert!(!result.output.contains("確認コールバック未設定"));
+    }
+
+    /// AC-3-5: `should_parallelize` 純関数の4分岐検証。
+    /// `has_confirm_callback == true` のときは必ず `false`。
+    #[test]
+    fn t_should_parallelize_false_when_confirm_callback() {
+        assert!(should_parallelize(true, true, 2, false));
+        assert!(!should_parallelize(true, true, 2, true));
+        assert!(!should_parallelize(false, true, 2, false));
+        assert!(!should_parallelize(true, false, 2, false));
+        assert!(!should_parallelize(true, true, 1, false));
+    }
+
+    /// AC-3-6: 親の `task_timeout` が子 `SubAgentConfig`/`AgentConfig` へ
+    /// 伝播すること。
+    #[test]
+    fn t_task_timeout_propagates_to_sub_config() {
+        let parent = AgentConfig {
+            task_timeout: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        };
+        let sub = SubAgentConfig::from_parent(&parent, 0);
+        assert_eq!(sub.task_timeout, Some(std::time::Duration::from_secs(30)));
+
+        let store = test_store();
+        let backend = MockLlmBackend::new(vec![]);
+        let tools = ToolRegistry::default();
+        let path_guard = test_path_guard();
+        let cancel = CancellationToken::new();
+        let executor =
+            SubAgentExecutor::new(&backend, &tools, &path_guard, &cancel, Some(&store), sub);
+        let config = executor.build_sub_config("g");
+        assert_eq!(
+            config.task_timeout,
+            Some(std::time::Duration::from_secs(30))
         );
     }
 }

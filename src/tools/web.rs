@@ -37,11 +37,13 @@ impl TypedTool for WebSearchTool {
                 Ok(ToolResult {
                     output: result,
                     success: true,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolResult {
                 output: format!("検索エラー: {e}"),
                 success: false,
+                ..Default::default()
             }),
         }
     }
@@ -72,6 +74,7 @@ impl TypedTool for WebFetchTool {
             return Ok(ToolResult {
                 output: format!("セキュリティエラー: {e}"),
                 success: false,
+                ..Default::default()
             });
         }
 
@@ -86,6 +89,7 @@ impl TypedTool for WebFetchTool {
                 return Ok(ToolResult {
                     output: format!("クライアント初期化エラー: {e}"),
                     success: false,
+                    ..Default::default()
                 });
             }
         };
@@ -99,6 +103,7 @@ impl TypedTool for WebFetchTool {
                             "リダイレクトが検出されたため取得を中止しました (status: {status})"
                         ),
                         success: false,
+                        ..Default::default()
                     });
                 }
                 let body = response.text()?;
@@ -117,11 +122,13 @@ impl TypedTool for WebFetchTool {
                 Ok(ToolResult {
                     output: truncated,
                     success: true,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolResult {
                 output: format!("取得エラー: {e}"),
                 success: false,
+                ..Default::default()
             }),
         }
     }

@@ -35,6 +35,7 @@ impl TypedTool for FileReadTool {
             return Ok(ToolResult {
                 output: format!("セキュリティエラー: 禁止パスへのアクセスは拒否されました: {path}"),
                 success: false,
+                ..Default::default()
             });
         }
         let offset = args.offset.unwrap_or(0) as usize;
@@ -55,11 +56,13 @@ impl TypedTool for FileReadTool {
                 Ok(ToolResult {
                     output: format!("{hdr}\n{}", numbered.join("\n")),
                     success: true,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolResult {
                 output: format!("ファイル読み取りエラー: {e}"),
                 success: false,
+                ..Default::default()
             }),
         }
     }
@@ -131,6 +134,7 @@ impl TypedTool for FileWriteTool {
             return Ok(ToolResult {
                 output: format!("セキュリティエラー: 禁止パスへのアクセスは拒否されました: {path}"),
                 success: false,
+                ..Default::default()
             });
         }
 
@@ -146,10 +150,12 @@ impl TypedTool for FileWriteTool {
                 Ok(()) => Ok(ToolResult {
                     output: format!("ファイルを書き込みました: {path}"),
                     success: true,
+                    ..Default::default()
                 }),
                 Err(e) => Ok(ToolResult {
                     output: format!("書き込みエラー: {e}"),
                     success: false,
+                    ..Default::default()
                 }),
             }
         } else if let (Some(old_text), Some(new_text)) =
@@ -168,6 +174,7 @@ impl TypedTool for FileWriteTool {
                         return Ok(ToolResult {
                             output: format!("置換対象テキストがファイル内に見つかりません: {path}"),
                             success: false,
+                            ..Default::default()
                         });
                     };
                     match std::fs::write(path, &updated) {
@@ -180,23 +187,27 @@ impl TypedTool for FileWriteTool {
                             Ok(ToolResult {
                                 output: msg,
                                 success: true,
+                                ..Default::default()
                             })
                         }
                         Err(e) => Ok(ToolResult {
                             output: format!("書き込みエラー: {e}"),
                             success: false,
+                            ..Default::default()
                         }),
                     }
                 }
                 Err(e) => Ok(ToolResult {
                     output: format!("ファイル読み取りエラー: {e}"),
                     success: false,
+                    ..Default::default()
                 }),
             }
         } else {
             Ok(ToolResult {
                 output: "'content' または 'old_text'+'new_text' のいずれかが必要です".to_string(),
                 success: false,
+                ..Default::default()
             })
         }
     }
@@ -234,12 +245,14 @@ impl TypedTool for MultiEditTool {
             return Ok(ToolResult {
                 output: format!("セキュリティエラー: 禁止パスへのアクセスは拒否されました: {path}"),
                 success: false,
+                ..Default::default()
             });
         }
         if args.edits.is_empty() {
             return Ok(ToolResult {
                 output: "editsが空です".to_string(),
                 success: false,
+                ..Default::default()
             });
         }
 
@@ -250,6 +263,7 @@ impl TypedTool for MultiEditTool {
                 return Ok(ToolResult {
                     output: format!("ファイル読み取りエラー: {e}"),
                     success: false,
+                    ..Default::default()
                 });
             }
         };
@@ -280,6 +294,7 @@ impl TypedTool for MultiEditTool {
                         i, applied, path
                     ),
                     success: false,
+                    ..Default::default()
                 });
             }
         }
@@ -298,6 +313,7 @@ impl TypedTool for MultiEditTool {
                         applied, warn_msg, path
                     ),
                     success: true,
+                    ..Default::default()
                 })
             }
             Err(e) => {
@@ -305,6 +321,7 @@ impl TypedTool for MultiEditTool {
                 Ok(ToolResult {
                     output: format!("書き込みエラー（ロールバック済み）: {e}"),
                     success: false,
+                    ..Default::default()
                 })
             }
         }

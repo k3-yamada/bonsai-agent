@@ -96,6 +96,7 @@ mod tests {
             Ok(ToolResult {
                 output: format!("query={}", args.query),
                 success: true,
+                ..Default::default()
             })
         }
     }

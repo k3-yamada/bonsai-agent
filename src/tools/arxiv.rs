@@ -25,6 +25,7 @@ impl TypedTool for ArxivTool {
             Ok(entries) if entries.is_empty() => Ok(ToolResult {
                 output: format!("「{}」の論文なし", args.query),
                 success: true,
+                ..Default::default()
             }),
             Ok(entries) => {
                 let mut o = format!("arxiv: {}件\n\n", entries.len());
@@ -34,11 +35,13 @@ impl TypedTool for ArxivTool {
                 Ok(ToolResult {
                     output: o,
                     success: true,
+                    ..Default::default()
                 })
             }
             Err(e) => Ok(ToolResult {
                 output: format!("エラー: {e}"),
                 success: false,
+                ..Default::default()
             }),
         }
     }

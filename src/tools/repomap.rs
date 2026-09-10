@@ -27,6 +27,7 @@ impl TypedTool for RepoMapTool {
         Ok(ToolResult {
             output: gen_map_ranked(Path::new(p), 3)?,
             success: true,
+            ..Default::default()
         })
     }
 }

@@ -396,6 +396,7 @@ impl Tool for McpToolWrapper {
                     return Ok(ToolResult {
                         output: format!("MCP再接続失敗: {e}"),
                         success: false,
+                        ..Default::default()
                     });
                 }
             }
@@ -404,10 +405,12 @@ impl Tool for McpToolWrapper {
             Ok(output) => Ok(ToolResult {
                 output,
                 success: true,
+                ..Default::default()
             }),
             Err(e) => Ok(ToolResult {
                 output: format!("MCPツールエラー: {e}"),
                 success: false,
+                ..Default::default()
             }),
         }
     }
