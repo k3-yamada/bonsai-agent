@@ -11,15 +11,23 @@
 use anyhow::Result;
 
 use crate::domain::embedder::{
-    DEFAULT_EMBEDDING_DIM, Embedder, SimpleEmbedder, hash_embed, l2_normalize,
+    DEFAULT_EMBEDDING_DIM, EmbedInputType, Embedder, SimpleEmbedder, hash_embed, l2_normalize,
 };
 use crate::runtime::http_agent::shared_agent;
 
 /// OpenAI 互換 `/v1/embeddings` の request body を組む（純粋・テスト可能）。
-fn build_embeddings_request(model: &str, texts: &[&str]) -> serde_json::Value {
+///
+/// `input_type` は ADR-015 拡張。Ruri sidecar が prefix 付与に使う。
+/// 未知サーバは無視してよい（OpenAI 標準外フィールド）。
+fn build_embeddings_request(
+    model: &str,
+    texts: &[&str],
+    input_type: EmbedInputType,
+) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "input": texts,
+        "input_type": input_type.as_api_str(),
     })
 }
 
@@ -98,9 +106,13 @@ impl HttpEmbedder {
     }
 
     /// リモート `/v1/embeddings` を呼ぶ。ネットワーク/パースエラーは `Err` を返す。
-    fn embed_remote(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    fn embed_remote(
+        &self,
+        texts: &[&str],
+        input_type: EmbedInputType,
+    ) -> Result<Vec<Vec<f32>>> {
         let url = format!("{}/v1/embeddings", self.base_url);
-        let body = build_embeddings_request(&self.model, texts);
+        let body = build_embeddings_request(&self.model, texts, input_type);
         let resp: serde_json::Value = shared_agent()
             .post(&url)
             .header("Content-Type", "application/json")
@@ -113,6 +125,14 @@ impl HttpEmbedder {
 
 impl Embedder for HttpEmbedder {
     fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        self.embed_typed(texts, EmbedInputType::Semantic)
+    }
+
+    fn embed_typed(
+        &self,
+        texts: &[&str],
+        input_type: EmbedInputType,
+    ) -> Result<Vec<Vec<f32>>> {
         // リモート失敗 or 件数不一致時はハッシュ埋め込みに graceful fallback。
         // 全 Embedder impl は「出力数 == 入力数」を保証する契約（呼び出し側の
         // `query_vec[0]` 等の index 前提を守る）。HTTP-200 でも data 配列が空/不足だと
@@ -122,7 +142,7 @@ impl Embedder for HttpEmbedder {
             eprintln!("[warn] HttpEmbedder {reason}、ハッシュ埋め込みにフォールバック");
             texts.iter().map(|t| hash_embed(t, self.dim)).collect()
         };
-        match self.embed_remote(texts) {
+        match self.embed_remote(texts, input_type) {
             Ok(v) if v.len() == texts.len() => Ok(v),
             Ok(v) => Ok(fallback(format!(
                 "が埋め込み件数不一致 ({} != 入力 {})",
@@ -170,10 +190,17 @@ mod tests {
 
     #[test]
     fn t_build_embeddings_request_shape() {
-        let body = build_embeddings_request("my-model", &["a", "b"]);
+        let body = build_embeddings_request("my-model", &["a", "b"], EmbedInputType::Query);
         assert_eq!(body["model"], "my-model");
         assert_eq!(body["input"][0], "a");
         assert_eq!(body["input"][1], "b");
+        assert_eq!(body["input_type"], "query");
+    }
+
+    #[test]
+    fn t_build_embeddings_request_semantic_default_role() {
+        let body = build_embeddings_request("m", &["x"], EmbedInputType::Semantic);
+        assert_eq!(body["input_type"], "semantic");
     }
 
     #[test]
